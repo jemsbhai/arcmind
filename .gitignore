@@ -67,6 +67,7 @@ logs/
 *.onnx
 
 # === Data (large files) ===
+data/
 *.h5
 *.hdf5
 *.csv
