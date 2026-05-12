@@ -93,6 +93,7 @@ class ArcMindModel(nn.Module):
 
         In training, processes the entire sequence at once.
         The slow path runs at strided intervals (every decision_stride steps).
+        Ablation flags in config control which components are active.
 
         Args:
             sensor_input: Raw sensor data, shape (batch, seq_len, num_sensor_channels).
@@ -102,27 +103,43 @@ class ArcMindModel(nn.Module):
             Actions, shape (batch, seq_len, action_dim).
         """
         batch, seq_len, _ = sensor_input.shape
+        cfg = self.config
 
         # Step 1: Tokenize sensor input
         tokens = self.tokenizer(sensor_input)
 
-        # Step 2: Fast path — SSM processes all tokens
-        fast_output = self.ssm_core(tokens)
+        # Step 2: Fast path — SSM processes all tokens (unless ablated)
+        if cfg.ablate_ssm:
+            fast_output = tokens  # skip SSM, pass raw embeddings
+        else:
+            fast_output = self.ssm_core(tokens)
 
-        # Step 3: Write periodic snapshots to memory
-        if use_memory:
-            for t in range(0, seq_len, self.decision_stride):
-                snapshot = fast_output[:, t, :]  # (batch, d_model)
-                self.memory.write(snapshot)
+        # Step 3-4: Slow path — attention with optional memory (unless ablated)
+        if cfg.ablate_attention:
+            # Skip attention entirely, use fast output for action head
+            fused = fast_output
+        else:
+            # Write periodic snapshots to memory
+            effective_memory = use_memory and not cfg.ablate_memory
+            if effective_memory:
+                for t in range(0, seq_len, self.decision_stride):
+                    snapshot = fast_output[:, t, :]
+                    self.memory.write(snapshot)
 
-        # Step 4: Slow path — attention at decision rate with memory
-        memory_slots = self.memory.read() if use_memory else None
-        slow_output = self.slow_attention(fast_output, memory=memory_slots)
+            memory_slots = self.memory.read() if effective_memory else None
+            slow_output = self.slow_attention(fast_output, memory=memory_slots)
 
-        # Step 5: Gate fast and slow outputs
-        combined = torch.cat([fast_output, slow_output], dim=-1)
-        gate_values = self.gate(combined)
-        fused = gate_values * slow_output + (1 - gate_values) * fast_output
+            # Step 5: Gate fast and slow outputs (unless ablated)
+            if cfg.ablate_ssm:
+                # No fast path to gate with — use slow output directly
+                fused = slow_output
+            elif cfg.ablate_gating:
+                # Simple average instead of learned gate
+                fused = 0.5 * fast_output + 0.5 * slow_output
+            else:
+                combined = torch.cat([fast_output, slow_output], dim=-1)
+                gate_values = self.gate(combined)
+                fused = gate_values * slow_output + (1 - gate_values) * fast_output
 
         # Step 6: Action prediction
         actions = self.action_head(fused)

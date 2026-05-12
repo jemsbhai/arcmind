@@ -71,6 +71,19 @@ class ArcMindConfig:
     dropout: float = 0.1
     """Dropout rate applied throughout the model."""
 
+    # === Ablation flags ===
+    ablate_ssm: bool = False
+    """If True, skip SSM core — feed tokenized input directly to attention."""
+
+    ablate_attention: bool = False
+    """If True, skip slow attention — use SSM output directly for action head."""
+
+    ablate_memory: bool = False
+    """If True, disable episodic memory (attention runs without memory context)."""
+
+    ablate_gating: bool = False
+    """If True, replace learned gating with simple 0.5/0.5 average."""
+
     # === Presets ===
     @classmethod
     def iot_tiny(cls) -> "ArcMindConfig":
