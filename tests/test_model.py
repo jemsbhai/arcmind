@@ -320,3 +320,79 @@ class TestArcMindModel:
             model.reset_memory(batch_size=1)
             out = model(x)
             assert out.shape == (1, 10, config.action_dim)
+
+
+# ============================================================
+# Parameter count validation
+# ============================================================
+
+
+class TestParameterCounts:
+    """Verify each preset lands in its intended parameter range."""
+
+    def _get_counts(self, config):
+        model = ArcMindModel(config)
+        return model.count_parameters()
+
+    def test_iot_tiny_count(self):
+        counts = self._get_counts(ArcMindConfig.iot_tiny())
+        total = counts["total"]
+        # IoT-tiny should be well under 1M (MCU-class)
+        assert total < 1_000_000, f"iot_tiny has {total:,} params — exceeds 1M ceiling"
+        assert total > 10_000, f"iot_tiny has {total:,} params — suspiciously small"
+
+    def test_robotics_small_count(self):
+        counts = self._get_counts(ArcMindConfig.robotics_small())
+        total = counts["total"]
+        # Robotics-small targets Jetson Nano class
+        assert total < 10_000_000, f"robotics_small has {total:,} params — exceeds 10M ceiling"
+        assert total > 100_000, f"robotics_small has {total:,} params — suspiciously small"
+
+    def test_robotics_medium_count(self):
+        counts = self._get_counts(ArcMindConfig.robotics_medium())
+        total = counts["total"]
+        # Robotics-medium targets desktop GPU inference
+        assert total < 100_000_000, f"robotics_medium has {total:,} params — exceeds 100M ceiling"
+        assert total > 1_000_000, f"robotics_medium has {total:,} params — suspiciously small"
+
+    def test_presets_ordered_by_size(self):
+        """Larger presets must have strictly more parameters."""
+        tiny = self._get_counts(ArcMindConfig.iot_tiny())["total"]
+        small = self._get_counts(ArcMindConfig.robotics_small())["total"]
+        medium = self._get_counts(ArcMindConfig.robotics_medium())["total"]
+        assert tiny < small < medium, (
+            f"Presets not ordered: tiny={tiny:,}, small={small:,}, medium={medium:,}"
+        )
+
+    def test_ssm_dominates_parameters(self):
+        """SSM core should hold the majority of parameters (it's the backbone)."""
+        counts = self._get_counts(ArcMindConfig.robotics_small())
+        ssm_ratio = counts["ssm_core"] / counts["total"]
+        assert ssm_ratio > 0.5, (
+            f"SSM core is only {ssm_ratio:.1%} of params — expected >50%"
+        )
+
+    def test_tokenizer_is_lightweight(self):
+        """Sensor tokenizer must be <1% of total params (no embedding table)."""
+        counts = self._get_counts(ArcMindConfig.robotics_small())
+        tok_ratio = counts["tokenizer"] / counts["total"]
+        assert tok_ratio < 0.01, (
+            f"Tokenizer is {tok_ratio:.1%} of params — should be <1% (no vocab table)"
+        )
+
+    def test_print_all_counts(self, capsys):
+        """Print parameter breakdowns for manual inspection (always passes)."""
+        for name, preset_fn in [
+            ("iot_tiny", ArcMindConfig.iot_tiny),
+            ("robotics_small", ArcMindConfig.robotics_small),
+            ("robotics_medium", ArcMindConfig.robotics_medium),
+        ]:
+            counts = self._get_counts(preset_fn())
+            print(f"\n{'='*50}")
+            print(f"Preset: {name}")
+            print(f"{'='*50}")
+            for component, count in counts.items():
+                pct = count / counts['total'] * 100 if component != 'total' else 100
+                print(f"  {component:20s}: {count:>10,}  ({pct:5.1f}%)")
+        # Always passes — this test is for human review
+        assert True

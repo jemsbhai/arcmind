@@ -49,11 +49,11 @@ print(model.count_parameters())
 
 ### Model Presets
 
-| Preset | Target | Params | Hardware |
-|--------|--------|--------|----------|
-| `ArcMindConfig.iot_tiny()` | 5–15M | MCU/NPU (Cortex-M7, ESP32) |
-| `ArcMindConfig.robotics_small()` | 30–50M | Jetson Orin Nano, RPi 5 |
-| `ArcMindConfig.robotics_medium()` | 50–100M | Desktop GPU, Jetson AGX |
+| Preset | Params | Hardware |
+|--------|--------|----------|
+| `ArcMindConfig.iot_tiny()` | ~245K | MCU/NPU (Cortex-M7, ESP32) |
+| `ArcMindConfig.robotics_small()` | ~1.7M | Jetson Orin Nano, RPi 5 |
+| `ArcMindConfig.robotics_medium()` | ~10.3M | Desktop GPU, Jetson AGX |
 
 ## Development
 

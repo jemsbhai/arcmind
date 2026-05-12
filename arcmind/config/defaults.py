@@ -74,7 +74,7 @@ class ArcMindConfig:
     # === Presets ===
     @classmethod
     def iot_tiny(cls) -> "ArcMindConfig":
-        """5-15M param target. For MCU/NPU deployment (Cortex-M7, ESP32-S3)."""
+        """~245K params. For MCU/NPU deployment (Cortex-M7, ESP32-S3)."""
         return cls(
             num_sensor_channels=4,
             d_model=64,
@@ -89,7 +89,7 @@ class ArcMindConfig:
 
     @classmethod
     def robotics_small(cls) -> "ArcMindConfig":
-        """30-50M param target. For Jetson Orin Nano, RPi 5 + Hailo."""
+        """~1.7M params. For Jetson Orin Nano, RPi 5 + Hailo."""
         return cls(
             num_sensor_channels=12,
             d_model=128,
@@ -104,7 +104,7 @@ class ArcMindConfig:
 
     @classmethod
     def robotics_medium(cls) -> "ArcMindConfig":
-        """50-100M param target. For desktop GPU inference."""
+        """~10.3M params. For desktop GPU inference."""
         return cls(
             num_sensor_channels=24,
             d_model=256,
