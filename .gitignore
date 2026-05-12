@@ -1,0 +1,84 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.whl
+pip-wheel-metadata/
+*.manifest
+*.spec
+
+# === Virtual environments ===
+venv/
+.venv/
+env/
+ENV/
+test_env/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# === Secrets & Environment ===
+.env
+.env.local
+*.key
+*secrets*
+*.pem
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# === Testing / Coverage ===
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+
+# === Jupyter ===
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# === PyTorch / ML ===
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+checkpoints/
+wandb/
+runs/
+logs/
+*.onnx
+
+# === Data (large files) ===
+*.h5
+*.hdf5
+*.csv
+*.parquet
+*.arrow
+*.npy
+*.npz
+!tests/fixtures/*.npy
+!tests/fixtures/*.csv
+
+# === Build artifacts ===
+*.egg-info/
+.eggs/
+*.tar.gz
+*.whl
