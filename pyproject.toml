@@ -67,7 +67,10 @@ include = ["arcmind*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not slow'"
+markers = [
+    "slow: tests that download data or take a long time",
+]
 
 [tool.ruff]
 line-length = 100
