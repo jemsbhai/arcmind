@@ -15,6 +15,7 @@ Design rationale:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from arcmind.config.defaults import ArcMindConfig
 
@@ -72,11 +73,11 @@ class SSMLayer(nn.Module):
 
         # Causal convolution (conv1d expects B, C, L)
         x_conv = self.conv(x_branch.transpose(1, 2))[:, :, :seq_len].transpose(1, 2)
-        x_conv = torch.silu(x_conv)
+        x_conv = F.silu(x_conv)
 
         # SSM scan (sequential for correctness; parallel scan is an optimization)
         A = -torch.exp(self.A_log)  # (d_inner, state_dim)
-        dt = torch.softplus(self.dt_proj(x_conv))  # (batch, seq_len, d_inner)
+        dt = F.softplus(self.dt_proj(x_conv))  # (batch, seq_len, d_inner)
         B = self.B_proj(x_conv)  # (batch, seq_len, state_dim)
         C = self.C_proj(x_conv)  # (batch, seq_len, state_dim)
 
@@ -104,7 +105,7 @@ class SSMLayer(nn.Module):
 
         # Apply D (skip connection) and gate
         y = y + x_conv * self.D.unsqueeze(0).unsqueeze(0)
-        y = y * torch.silu(z)
+        y = y * F.silu(z)
 
         # Project back to d_model and add residual
         return self.norm(self.out_proj(y) + residual)
