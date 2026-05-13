@@ -150,6 +150,80 @@ class ArcMindModel(nn.Module):
         """Reset episodic memory for a new episode."""
         self.memory.reset(batch_size=batch_size, device=next(self.parameters()).device)
 
+    def init_streaming(self, batch_size: int = 1) -> None:
+        """
+        Initialize streaming (recurrent) inference mode.
+
+        Must be called before the first step() call in an episode.
+        Initializes SSM hidden state, resets memory, and resets the
+        internal step counter.
+        """
+        device = next(self.parameters()).device
+        self.ssm_core.init_state(batch_size, device)
+        self.memory.reset(batch_size=batch_size, device=device)
+        self._step_counter = 0
+        self._last_slow_output = torch.zeros(
+            batch_size, self.config.d_model, device=device
+        )
+
+    def step(self, sensor_frame: torch.Tensor) -> torch.Tensor:
+        """
+        Process a single sensor frame in streaming mode.
+
+        SSM state persists between calls. Episodic memory is written
+        and attention is run at decision rate (every decision_stride steps).
+
+        Must call init_streaming() before first step().
+
+        Args:
+            sensor_frame: Single sensor reading, shape (batch, num_sensor_channels).
+
+        Returns:
+            Action, shape (batch, action_dim).
+        """
+        cfg = self.config
+
+        # Tokenize single frame: (batch, channels) -> (batch, d_model)
+        token = self.tokenizer.projection(sensor_frame)
+        token = self.tokenizer.norm(token)
+
+        # Fast path: SSM step with persistent state
+        if cfg.ablate_ssm:
+            fast_output = token
+        else:
+            fast_output = self.ssm_core.step(token)  # (batch, d_model)
+
+        # Slow path: runs at decision rate
+        if cfg.ablate_attention:
+            fused = fast_output
+        else:
+            if self._step_counter % self.decision_stride == 0:
+                # Write snapshot to memory
+                if not cfg.ablate_memory:
+                    self.memory.write(fast_output)
+
+                # Run attention: current SSM output as query over memory
+                memory_slots = self.memory.read() if not cfg.ablate_memory else None
+                query = fast_output.unsqueeze(1)  # (batch, 1, d_model)
+                slow_out = self.slow_attention(query, memory=memory_slots)  # (batch, 1, d_model)
+                self._last_slow_output = slow_out.squeeze(1)  # (batch, d_model)
+
+            # Gate fast and slow
+            if cfg.ablate_ssm:
+                fused = self._last_slow_output
+            elif cfg.ablate_gating:
+                fused = 0.5 * fast_output + 0.5 * self._last_slow_output
+            else:
+                combined = torch.cat([fast_output, self._last_slow_output], dim=-1)
+                gate_values = self.gate(combined)  # (batch, d_model)
+                fused = gate_values * self._last_slow_output + (1 - gate_values) * fast_output
+
+        self._step_counter += 1
+
+        # Action head: (batch, d_model) -> (batch, action_dim)
+        action = self.action_head.head(fused)
+        return action
+
     def count_parameters(self) -> dict[str, int]:
         """Count parameters by component."""
         components = {

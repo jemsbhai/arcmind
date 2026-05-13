@@ -53,13 +53,15 @@ class EpisodicMemory(nn.Module):
         self.d_model = config.d_model
         self.compressor = MemoryCompressor(config)
 
-        # Write pointer (not a parameter — not saved in state_dict)
-        self.register_buffer("write_ptr", torch.zeros(1, dtype=torch.long))
-
-        # The ring buffer itself
+        # Runtime state — NOT saved in state_dict (persistent=False).
+        # These are ephemeral per-episode state, not learned parameters.
+        self.register_buffer(
+            "write_ptr", torch.zeros(1, dtype=torch.long), persistent=False
+        )
         self.register_buffer(
             "buffer",
             torch.zeros(1, config.num_memory_slots, config.d_model),
+            persistent=False,
         )
 
     def reset(self, batch_size: int = 1, device: torch.device | None = None) -> None:

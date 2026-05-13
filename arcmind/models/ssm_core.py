@@ -6,9 +6,14 @@ continuous sensor streams at high frequency. The default implementation
 is a pure-PyTorch SSM that runs on CPU/GPU without custom CUDA kernels.
 When mamba-ssm is available, it can be swapped for hardware-optimized kernels.
 
+Supports two modes:
+- forward(): batch processing of full sequences (training)
+- step(): single-timestep recurrent inference with persistent state (deployment)
+
 Design rationale:
 - SSM provides O(n) time and O(1) per-token decode (no KV cache).
 - Selective (input-dependent) gating follows Mamba's design.
+- step() mode enables real-time streaming at sensor rate.
 - Produces smoother, more physically plausible control outputs than
   Transformers (Tsuji, IEEE Access 2025).
 """
@@ -26,38 +31,60 @@ class SSMLayer(nn.Module):
     def __init__(self, config: ArcMindConfig):
         super().__init__()
         self.config = config
-        d_inner = config.d_model * config.ssm_expand_factor
+        self.d_inner = config.d_model * config.ssm_expand_factor
+        self.state_dim = config.ssm_state_dim
+        self.conv_width = config.ssm_conv_width
 
         # Input projection (expand)
-        self.in_proj = nn.Linear(config.d_model, d_inner * 2, bias=False)
+        self.in_proj = nn.Linear(config.d_model, self.d_inner * 2, bias=False)
 
         # Causal depthwise convolution
         self.conv = nn.Conv1d(
-            in_channels=d_inner,
-            out_channels=d_inner,
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
             kernel_size=config.ssm_conv_width,
             padding=config.ssm_conv_width - 1,
-            groups=d_inner,
+            groups=self.d_inner,
         )
 
         # SSM parameters: input-dependent discretization
-        self.dt_proj = nn.Linear(d_inner, d_inner, bias=True)
+        self.dt_proj = nn.Linear(self.d_inner, self.d_inner, bias=True)
         self.A_log = nn.Parameter(
             torch.log(torch.arange(1, config.ssm_state_dim + 1, dtype=torch.float32))
             .unsqueeze(0)
-            .expand(d_inner, -1)
+            .expand(self.d_inner, -1)
             .clone()
         )
-        self.B_proj = nn.Linear(d_inner, config.ssm_state_dim, bias=False)
-        self.C_proj = nn.Linear(d_inner, config.ssm_state_dim, bias=False)
-        self.D = nn.Parameter(torch.ones(d_inner))
+        self.B_proj = nn.Linear(self.d_inner, config.ssm_state_dim, bias=False)
+        self.C_proj = nn.Linear(self.d_inner, config.ssm_state_dim, bias=False)
+        self.D = nn.Parameter(torch.ones(self.d_inner))
 
         # Output projection (contract)
-        self.out_proj = nn.Linear(d_inner, config.d_model, bias=False)
+        self.out_proj = nn.Linear(self.d_inner, config.d_model, bias=False)
         self.norm = nn.LayerNorm(config.d_model)
+
+        # Persistent recurrent state (not saved in state_dict)
+        self._ssm_state: torch.Tensor | None = None
+        self._conv_state: torch.Tensor | None = None
+
+    def init_state(self, batch_size: int, device: torch.device) -> None:
+        """Initialize recurrent state for streaming inference."""
+        self._ssm_state = torch.zeros(
+            batch_size, self.d_inner, self.state_dim, device=device
+        )
+        self._conv_state = torch.zeros(
+            batch_size, self.d_inner, self.conv_width - 1, device=device
+        )
+
+    def reset_state(self) -> None:
+        """Clear recurrent state."""
+        self._ssm_state = None
+        self._conv_state = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
+        Batch forward pass over a full sequence.
+
         Args:
             x: Input tensor, shape (batch, seq_len, d_model).
 
@@ -75,39 +102,93 @@ class SSMLayer(nn.Module):
         x_conv = self.conv(x_branch.transpose(1, 2))[:, :, :seq_len].transpose(1, 2)
         x_conv = F.silu(x_conv)
 
-        # SSM scan (sequential for correctness; parallel scan is an optimization)
-        A = -torch.exp(self.A_log)  # (d_inner, state_dim)
-        dt = F.softplus(self.dt_proj(x_conv))  # (batch, seq_len, d_inner)
-        B = self.B_proj(x_conv)  # (batch, seq_len, state_dim)
-        C = self.C_proj(x_conv)  # (batch, seq_len, state_dim)
+        # SSM scan
+        A = -torch.exp(self.A_log)
+        dt = F.softplus(self.dt_proj(x_conv))
+        B = self.B_proj(x_conv)
+        C = self.C_proj(x_conv)
 
-        d_inner = x_conv.shape[-1]
-        state_dim = B.shape[-1]
-
-        # Discretize: dA = exp(A * dt), dB = dt * B
-        # Sequential scan (correct reference implementation)
-        h = torch.zeros(batch, d_inner, state_dim, device=x.device, dtype=x.dtype)
+        h = torch.zeros(batch, self.d_inner, self.state_dim, device=x.device, dtype=x.dtype)
         outputs = []
         for t in range(seq_len):
-            dt_t = dt[:, t, :].unsqueeze(-1)  # (batch, d_inner, 1)
-            B_t = B[:, t, :].unsqueeze(1)  # (batch, 1, state_dim)
-            C_t = C[:, t, :]  # (batch, state_dim)
-            x_t = x_conv[:, t, :].unsqueeze(-1)  # (batch, d_inner, 1)
+            dt_t = dt[:, t, :].unsqueeze(-1)
+            B_t = B[:, t, :].unsqueeze(1)
+            C_t = C[:, t, :]
+            x_t = x_conv[:, t, :].unsqueeze(-1)
 
-            dA = torch.exp(A.unsqueeze(0) * dt_t)  # (batch, d_inner, state_dim)
-            dB = dt_t * B_t  # (batch, d_inner, state_dim)
+            dA = torch.exp(A.unsqueeze(0) * dt_t)
+            dB = dt_t * B_t
 
-            h = dA * h + dB * x_t  # (batch, d_inner, state_dim)
-            y_t = (h * C_t.unsqueeze(1)).sum(dim=-1)  # (batch, d_inner)
+            h = dA * h + dB * x_t
+            y_t = (h * C_t.unsqueeze(1)).sum(dim=-1)
             outputs.append(y_t)
 
-        y = torch.stack(outputs, dim=1)  # (batch, seq_len, d_inner)
+        y = torch.stack(outputs, dim=1)
 
         # Apply D (skip connection) and gate
         y = y + x_conv * self.D.unsqueeze(0).unsqueeze(0)
         y = y * F.silu(z)
 
-        # Project back to d_model and add residual
+        return self.norm(self.out_proj(y) + residual)
+
+    def step(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Single-timestep recurrent inference. Carries state between calls.
+
+        Must call init_state() before first step().
+
+        Args:
+            x: Input tensor, shape (batch, d_model).
+
+        Returns:
+            Output tensor, shape (batch, d_model).
+        """
+        assert self._ssm_state is not None, "Call init_state() before step()"
+
+        residual = x
+
+        # Project and split
+        xz = self.in_proj(x)  # (batch, d_inner*2)
+        x_branch, z = xz.chunk(2, dim=-1)  # each (batch, d_inner)
+
+        # Compute convolution over [history, current_input]
+        # conv_state holds the last conv_width-1 inputs
+        conv_weight = self.conv.weight.squeeze(1)  # (d_inner, conv_width)
+        conv_input = torch.cat(
+            [self._conv_state, x_branch.unsqueeze(-1)], dim=-1
+        )  # (batch, d_inner, conv_width)
+        x_conv = (conv_input * conv_weight.unsqueeze(0)).sum(dim=-1)  # (batch, d_inner)
+        if self.conv.bias is not None:
+            x_conv = x_conv + self.conv.bias
+        x_conv = F.silu(x_conv)
+
+        # Update conv state: shift left, append current input
+        self._conv_state = torch.cat(
+            [self._conv_state[:, :, 1:], x_branch.unsqueeze(-1)],
+            dim=-1,
+        )  # (batch, d_inner, conv_width-1)
+
+        # SSM step
+        A = -torch.exp(self.A_log)  # (d_inner, state_dim)
+        dt = F.softplus(self.dt_proj(x_conv))  # (batch, d_inner)
+
+        B = self.B_proj(x_conv)  # (batch, state_dim)
+        C = self.C_proj(x_conv)  # (batch, state_dim)
+
+        dt_e = dt.unsqueeze(-1)       # (batch, d_inner, 1)
+        B_e = B.unsqueeze(1)          # (batch, 1, state_dim)
+        x_e = x_conv.unsqueeze(-1)    # (batch, d_inner, 1)
+
+        dA = torch.exp(A.unsqueeze(0) * dt_e)   # (batch, d_inner, state_dim)
+        dB = dt_e * B_e                          # (batch, d_inner, state_dim)
+
+        self._ssm_state = dA * self._ssm_state + dB * x_e
+        y = (self._ssm_state * C.unsqueeze(1)).sum(dim=-1)  # (batch, d_inner)
+
+        # D skip + gate
+        y = y + x_conv * self.D
+        y = y * F.silu(z)
+
         return self.norm(self.out_proj(y) + residual)
 
 
@@ -123,6 +204,8 @@ class SSMCore(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
+        Batch forward pass.
+
         Args:
             x: Input tensor, shape (batch, seq_len, d_model).
 
@@ -132,3 +215,27 @@ class SSMCore(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return x
+
+    def step(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Single-timestep recurrent inference through all layers.
+
+        Args:
+            x: Input tensor, shape (batch, d_model).
+
+        Returns:
+            Output tensor, shape (batch, d_model).
+        """
+        for layer in self.layers:
+            x = layer.step(x)
+        return x
+
+    def init_state(self, batch_size: int, device: torch.device) -> None:
+        """Initialize recurrent state for all layers."""
+        for layer in self.layers:
+            layer.init_state(batch_size, device)
+
+    def reset_state(self) -> None:
+        """Clear recurrent state for all layers."""
+        for layer in self.layers:
+            layer.reset_state()
