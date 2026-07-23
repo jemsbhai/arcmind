@@ -70,12 +70,44 @@ def _registration_v2(
 
 @pytest.mark.parametrize(
     "filename",
-    ["smoke_controls_v1.json", "tmaze_pilot_v1.json"],
+    [
+        "smoke_controls_v1.json",
+        "tmaze_pilot_v1.json",
+        "tmaze_shm_repair_v2.json",
+    ],
 )
 def test_repository_registrations_are_valid(filename: str):
     manifest_path = Path(__file__).resolve().parents[1] / "manifests" / filename
 
     assert _load_registration(manifest_path)["status"] == "frozen"
+
+
+def test_tmaze_shm_repair_registration_preserves_pilot_contract():
+    manifest_path = Path(__file__).resolve().parents[1] / "manifests" / "tmaze_shm_repair_v2.json"
+
+    assert _load_registration(manifest_path) == {
+        "schema_version": 2,
+        "status": "frozen",
+        "evidence_tier": "pilot",
+        "matrix_kind": "primary_comparison",
+        "comparison_profile": "arcmind_shared_comparison",
+        "models": ["shm", "arcmind"],
+        "environments": [{"id": "tmaze_10", "total_steps": 250_000}],
+        "seeds": [1103, 2207, 3301],
+        "learner": {
+            "num_envs": 8,
+            "rollout_steps": 125,
+            "update_epochs": 4,
+            "num_minibatches": 4,
+            "learning_rate": 0.00025,
+            "gae_lambda": 0.95,
+            "entropy_coefficient": 0.01,
+            "anneal_learning_rate": False,
+        },
+        "evaluation_episodes_per_env": 16,
+        "require_gpu": True,
+        "quick": False,
+    }
 
 
 def test_registration_accepts_a_complete_paired_matrix(tmp_path):

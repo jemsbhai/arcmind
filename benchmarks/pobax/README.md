@@ -171,6 +171,12 @@ The first predeclared multi-seed pilot uses
 250,000 exact environment transitions on the three development seeds. Its
 pilot status remains ineligible for paper performance claims.
 
+The numerical repair replay uses
+`benchmarks/pobax/manifests/tmaze_shm_repair_v2.json`. It reruns SHM and
+ArcMind on the same T-Maze pilot seeds, budget, learner settings, and
+evaluation contract. ArcMind is the required comparison anchor. This replay
+is pilot evidence and remains ineligible for paper performance claims.
+
 Registration schema v1 remains readable for existing development matrices.
 New experiment registrations use schema v2 and must name one of two comparison
 profiles:
