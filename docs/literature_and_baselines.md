@@ -228,26 +228,37 @@ finite optimization problem have changed. Keep them out of the
 parameter-matched backbone table and report them in a separately labeled
 reference table.
 
-The Battleship adapter must correct two interface hazards. Its public
+The implemented shared-runner aliases are
+`tmaze_10-perfect-memory`, `rocksample_11_11-fully-observable`, and
+`Navix-DMLab-Maze-01-fully-observable`, together with
+`battleship_10-perfect-recall`. They hash the exact source invocation, restrict
+the model to the matched memoryless policy, and inherit the corresponding
+primary interaction budget. Both primary and upper RockSample observations
+have 33 values at runtime. The upper reference changes the meaning of the
+rock features to true morality rather than increasing input width. The Navix
+alias invokes the separately registered full source task.
+
+The Battleship adapter corrects two interface hazards. Its public
 perfect-recall wrapper returns an array rather than the ordinary observation
-and action-mask dictionary, so the shared learner must reconstruct the legal
-mask from `hits_misses == 0`. The unregistered state wrapper is not a shortcut:
+and action-mask dictionary, so the adapter preserves the `(10, 10)` history
+and reconstructs a row-major legal mask from `hits_misses == 0`. The
+unregistered state wrapper is not a shortcut:
 it declares `(rows, cols, 2)`, returns a `(2, rows, cols)` stack, and also
 drops the action mask
 ([source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/battleship.py#L67-L205)).
-A future true privileged-state variant would need an explicitly corrected
-local wrapper exposing hit history and the hidden board, while restoring the
-legal mask. It would be classified separately from POBAX's public
-perfect-recall reference.
+A future true privileged-state variant would still need an explicitly
+corrected local wrapper exposing hit history and the hidden board. It would be
+classified separately from POBAX's public perfect-recall reference.
 
-Navix requires a parameter-matching adapter rather than direct flattening into
-the existing MLP. The primary partial observation is `(7, 7, 2)`, or 98
+The Navix partial task produces a `(3, 3, 2)` runtime observation, or 18
 values, while the full reference has 5,166 values
 ([partial field-of-view wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/nx.py#L59-L132),
 [full representation](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/navix_mazes.py#L350-L464)).
-The target parameter budget must be the primary partial-task ArcMind budget,
-not a larger budget induced by the privileged input width, and every learned
-adapter parameter must be included.
+The shared input also contains the previous action and two boundary flags, so
+the primary and full policy widths are 23 and 5,171. The full observation is
+flattened into a memoryless MLP with hidden width six. Its target is the
+primary partial-task ArcMind parameter budget, not a larger budget induced by
+the privileged input width, and every learned parameter is counted.
 
 ## Algorithm-level and contextual comparisons
 

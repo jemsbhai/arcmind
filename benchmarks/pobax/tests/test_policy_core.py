@@ -816,14 +816,18 @@ def test_runner_horizons_cover_every_accepted_environment() -> None:
     assert MAX_EPISODE_STEPS == {
         "simple_chain": 10,
         "tmaze_10": 1_000,
+        "tmaze_10-perfect-memory": 1_000,
         "rocksample_11_11": 1_000,
+        "rocksample_11_11-fully-observable": 1_000,
         "battleship_10": 1_000,
+        "battleship_10-perfect-recall": 1_000,
         "HalfCheetah-P-v0": 1_000,
         "HalfCheetah-V-v0": 1_000,
         "HalfCheetah-F-v0": 1_000,
         "Walker-V-v0": 1_000,
         "Walker-F-v0": 1_000,
         "Navix-DMLab-Maze-01-v0": 2_000,
+        "Navix-DMLab-Maze-01-fully-observable": 2_000,
     }
 
 

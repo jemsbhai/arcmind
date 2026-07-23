@@ -53,6 +53,11 @@ from benchmarks.pobax.registered_artifacts import (
     canonical_json_sha256,
     registered_cell_id,
 )
+from benchmarks.pobax.upper_reference_registry import (
+    UPPER_REFERENCE_ENVIRONMENTS,
+    expected_environment_reference,
+    expected_environment_source,
+)
 
 BOOTSTRAP_RESAMPLES = 10_000
 CONFIDENCE_LEVEL = 0.95
@@ -111,13 +116,17 @@ _MATRIX_KINDS = {"primary_comparison", "upper_reference"}
 _REGISTERED_FINAL_SEED_COUNT = 30
 _REGISTERED_TRAIN_STEPS = {
     "tmaze_10": 1_000_000,
+    "tmaze_10-perfect-memory": 1_000_000,
     "rocksample_11_11": 5_000_000,
+    "rocksample_11_11-fully-observable": 5_000_000,
     "battleship_10": 10_000_000,
+    "battleship_10-perfect-recall": 10_000_000,
     "Walker-V-v0": 50_000_000,
     "Walker-F-v0": 50_000_000,
     "HalfCheetah-V-v0": 50_000_000,
     "HalfCheetah-F-v0": 50_000_000,
     "Navix-DMLab-Maze-01-v0": 10_000_000,
+    "Navix-DMLab-Maze-01-fully-observable": 10_000_000,
 }
 
 
@@ -318,6 +327,12 @@ def _validate_frozen_configuration(
         "environment",
         "model",
         "seed",
+        "environment_source",
+        "environment_reference",
+        "parameter_count",
+        "effective_parameter_count",
+        "arcmind_target_parameter_count",
+        "parameter_ratio",
         "ppo",
         "evaluation_episodes_per_environment",
         "evaluation_max_episode_steps",
@@ -342,6 +357,52 @@ def _validate_frozen_configuration(
     )
     if configured_identity != identity:
         raise RegisteredAggregationError(f"{field} identity does not match its artifact")
+    environment_source = _mapping(
+        configuration["environment_source"],
+        field=f"{field}.environment_source",
+    )
+    if dict(environment_source) != expected_environment_source(environment):
+        raise RegisteredAggregationError(
+            f"{field}.environment_source does not match the registered source invocation"
+        )
+    expected_reference = expected_environment_reference(environment)
+    environment_reference = configuration["environment_reference"]
+    if environment_reference != expected_reference:
+        raise RegisteredAggregationError(
+            f"{field}.environment_reference does not match the registered reference class"
+        )
+    parameter_count = _integer(
+        configuration["parameter_count"],
+        field=f"{field}.parameter_count",
+        positive=True,
+    )
+    effective_parameter_count = _integer(
+        configuration["effective_parameter_count"],
+        field=f"{field}.effective_parameter_count",
+        positive=True,
+    )
+    target_parameter_count = _integer(
+        configuration["arcmind_target_parameter_count"],
+        field=f"{field}.arcmind_target_parameter_count",
+        positive=True,
+    )
+    parameter_ratio = _finite_number(
+        configuration["parameter_ratio"],
+        field=f"{field}.parameter_ratio",
+    )
+    computed_ratio = parameter_count / target_parameter_count
+    if effective_parameter_count > parameter_count:
+        raise RegisteredAggregationError(
+            f"{field}.effective_parameter_count exceeds parameter_count"
+        )
+    if not math.isclose(parameter_ratio, computed_ratio, rel_tol=1e-12, abs_tol=1e-12):
+        raise RegisteredAggregationError(
+            f"{field}.parameter_ratio disagrees with frozen parameter counts"
+        )
+    if not 0.9 <= parameter_ratio <= 1.1:
+        raise RegisteredAggregationError(
+            f"{field}.parameter_ratio violates the registered matching tolerance"
+        )
 
     expected_budget = _REGISTERED_TRAIN_STEPS.get(environment)
     if expected_budget is None:
@@ -683,6 +744,19 @@ def _validate_manifest(
         raise RegisteredAggregationError(
             "upper_reference manifest.models must contain only 'memoryless_mlp'"
         )
+    selected_upper_references = set(environments) & UPPER_REFERENCE_ENVIRONMENTS
+    if matrix_kind == "upper_reference":
+        invalid_environments = set(environments) - UPPER_REFERENCE_ENVIRONMENTS
+        if invalid_environments:
+            raise RegisteredAggregationError(
+                "upper_reference manifest contains non-reference environments: "
+                f"{sorted(invalid_environments)}"
+            )
+    elif selected_upper_references:
+        raise RegisteredAggregationError(
+            "primary_comparison manifest contains upper-reference aliases: "
+            f"{sorted(selected_upper_references)}"
+        )
     provenance = _validate_provenance(manifest["provenance"], field="manifest.provenance")
     cells = manifest["cells"]
     if not isinstance(cells, list) or not cells:
@@ -767,6 +841,7 @@ def _validate_artifact(
     field = f"artifact[{environment},{model},{seed}]"
     artifact = _mapping(_load_json(path, kind=field), field=field)
     required = {
+        "schema_version",
         "status",
         "matrix_manifest_sha256",
         "cell_id",
@@ -775,6 +850,12 @@ def _validate_artifact(
         "environment",
         "model",
         "seed",
+        "environment_source",
+        "environment_reference",
+        "parameter_count",
+        "effective_parameter_count",
+        "arcmind_target_parameter_count",
+        "parameter_ratio",
         "provenance",
         "actual_environment_steps",
         "ppo",
@@ -788,6 +869,8 @@ def _validate_artifact(
     missing = sorted(required - set(artifact))
     if missing:
         raise RegisteredAggregationError(f"{field} is missing required fields: {missing}")
+    if artifact["schema_version"] != 4:
+        raise RegisteredAggregationError(f"{field}.schema_version must equal current schema 4")
     if artifact["status"] != "registered_final_complete":
         raise RegisteredAggregationError(f"{field}.status must equal 'registered_final_complete'")
     if (
@@ -831,6 +914,18 @@ def _validate_artifact(
         provenance=provenance,
         field=f"{field}.configuration",
     )
+    for name in (
+        "environment_source",
+        "environment_reference",
+        "parameter_count",
+        "effective_parameter_count",
+        "arcmind_target_parameter_count",
+        "parameter_ratio",
+    ):
+        if artifact[name] != configuration[name]:
+            raise RegisteredAggregationError(
+                f"{field}.{name} does not match the frozen configuration"
+            )
     actual_environment_steps = _integer(
         artifact["actual_environment_steps"],
         field=f"{field}.actual_environment_steps",
@@ -1154,8 +1249,13 @@ def aggregate_registered(
 ) -> dict[str, Any]:
     """Build an aggregate and atomically create its canonical JSON artifact."""
 
-    aggregate = build_registered_aggregate(manifest_path)
-    atomic_write_json(output_path, aggregate)
+    manifest = Path(manifest_path).resolve()
+    raw_matrix_root = manifest.parent
+    output = Path(output_path).resolve()
+    if output == raw_matrix_root or output.is_relative_to(raw_matrix_root):
+        raise RegisteredAggregationError("aggregate output must be outside the raw matrix root")
+    aggregate = build_registered_aggregate(manifest)
+    atomic_write_json(output, aggregate)
     return aggregate
 
 

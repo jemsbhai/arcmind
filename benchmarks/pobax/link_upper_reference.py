@@ -1,0 +1,768 @@
+"""Link one primary POBAX matrix to its paired upper-reference matrix.
+
+The link is a derived artifact. It must be written outside both immutable raw
+matrix roots. Every raw artifact, log, completion record, and checksum is
+validated before the link is created.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from benchmarks.pobax.aggregate_development import build_development_aggregate
+from benchmarks.pobax.aggregate_registered import build_registered_aggregate
+from benchmarks.pobax.registered_artifacts import (
+    atomic_write_json,
+    canonical_json_sha256,
+    registered_cell_id,
+    sha256_file,
+)
+from benchmarks.pobax.upper_reference_registry import UPPER_TO_PRIMARY_ENVIRONMENT
+
+REGISTERED_TRAIN_STEPS = {
+    "tmaze_10": 1_000_000,
+    "tmaze_10-perfect-memory": 1_000_000,
+    "rocksample_11_11": 5_000_000,
+    "rocksample_11_11-fully-observable": 5_000_000,
+    "battleship_10": 10_000_000,
+    "battleship_10-perfect-recall": 10_000_000,
+    "Walker-V-v0": 50_000_000,
+    "Walker-F-v0": 50_000_000,
+    "HalfCheetah-V-v0": 50_000_000,
+    "HalfCheetah-F-v0": 50_000_000,
+    "Navix-DMLab-Maze-01-v0": 10_000_000,
+    "Navix-DMLab-Maze-01-fully-observable": 10_000_000,
+}
+
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_CHECKSUM_LINE_PATTERN = re.compile(r"([0-9a-f]{64})  (.+)")
+_REGISTRATION_KEYS = {
+    "schema_version",
+    "status",
+    "evidence_tier",
+    "matrix_kind",
+    "models",
+    "environments",
+    "seeds",
+    "learner",
+    "evaluation_episodes_per_env",
+    "require_gpu",
+    "quick",
+}
+_MANIFEST_KEYS = {
+    "schema_version",
+    "status",
+    "manifest_sha256",
+    "matrix_kind",
+    "models",
+    "environments",
+    "seeds",
+    "provenance",
+    "cells",
+}
+_CELL_KEYS = {
+    "cell_id",
+    "environment",
+    "model",
+    "seed",
+    "configuration_sha256",
+    "artifact_path",
+}
+_COMPLETION_KEYS = {
+    "schema_version",
+    "status",
+    "manifest_sha256",
+    "planned_cells",
+    "completed_cells",
+    "cells",
+}
+_COMPLETED_CELL_KEYS = _CELL_KEYS | {
+    "artifact_sha256",
+    "log_path",
+    "log_sha256",
+}
+_SOURCE_IDENTITY_KEYS = (
+    "dependency_lock_sha256",
+    "pobax_commit",
+    "navix_commit",
+)
+
+
+class UpperReferenceLinkError(ValueError):
+    """Raised when two raw matrices cannot be paired safely."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise UpperReferenceLinkError(f"non-finite JSON constant is prohibited: {value}")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise UpperReferenceLinkError(f"duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _load_json(path: Path, *, field: str) -> Any:
+    if not path.is_file():
+        raise UpperReferenceLinkError(f"{field} does not exist or is not a file: {path}")
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise UpperReferenceLinkError(f"cannot read {field} {path}: {error}") from error
+
+
+def _mapping(value: Any, *, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise UpperReferenceLinkError(f"{field} must be a JSON object")
+    return value
+
+
+def _exact_keys(value: Mapping[str, Any], expected: set[str], *, field: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise UpperReferenceLinkError(
+            f"{field} has wrong fields: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+
+
+def _sha256(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise UpperReferenceLinkError(f"{field} must be a lowercase SHA256")
+    return value
+
+
+def _cell_identity(
+    value: Mapping[str, Any],
+    *,
+    field: str,
+) -> tuple[str, str, int]:
+    environment = value.get("environment")
+    model = value.get("model")
+    seed = value.get("seed")
+    if not isinstance(environment, str) or not environment:
+        raise UpperReferenceLinkError(f"{field}.environment must be a non-empty string")
+    if not isinstance(model, str) or not model:
+        raise UpperReferenceLinkError(f"{field}.model must be a non-empty string")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise UpperReferenceLinkError(f"{field}.seed must be a non-negative integer")
+    return environment, model, seed
+
+
+def _safe_relative_path(root: Path, value: Any, *, field: str) -> tuple[str, Path]:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise UpperReferenceLinkError(f"{field} must be a non-empty POSIX path")
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        raise UpperReferenceLinkError(f"{field} must be a normalized relative POSIX path")
+    normalized = pure.as_posix()
+    resolved = root.joinpath(*pure.parts).resolve()
+    if not resolved.is_relative_to(root):
+        raise UpperReferenceLinkError(f"{field} escapes its raw matrix root")
+    return normalized, resolved
+
+
+def _validate_registration(root: Path) -> tuple[dict[str, Any], str]:
+    path = root / "registration.json"
+    raw = _mapping(_load_json(path, field="registration"), field="registration")
+    _exact_keys(raw, _REGISTRATION_KEYS, field="registration")
+    if raw["schema_version"] != 1 or raw["status"] != "frozen":
+        raise UpperReferenceLinkError("registration must be frozen schema version 1")
+    tier = raw["evidence_tier"]
+    if tier not in {"smoke", "pilot", "registered_final"}:
+        raise UpperReferenceLinkError(f"registration has unsupported evidence tier: {tier!r}")
+    matrix_kind = raw["matrix_kind"]
+    if matrix_kind not in {"primary_comparison", "upper_reference"}:
+        raise UpperReferenceLinkError(f"registration has unsupported matrix kind: {matrix_kind!r}")
+    models = raw["models"]
+    if (
+        not isinstance(models, list)
+        or not models
+        or any(not isinstance(model, str) or not model for model in models)
+        or len(set(models)) != len(models)
+    ):
+        raise UpperReferenceLinkError("registration.models must be unique non-empty names")
+    if matrix_kind == "primary_comparison" and "arcmind" not in models:
+        raise UpperReferenceLinkError("primary registration must contain arcmind")
+    if matrix_kind == "upper_reference" and models != ["memoryless_mlp"]:
+        raise UpperReferenceLinkError(
+            "upper-reference registration must contain only memoryless_mlp"
+        )
+    environments = raw["environments"]
+    if not isinstance(environments, list) or not environments:
+        raise UpperReferenceLinkError("registration.environments must be a non-empty list")
+    environment_ids: list[str] = []
+    for index, environment_value in enumerate(environments):
+        field = f"registration.environments[{index}]"
+        environment = _mapping(environment_value, field=field)
+        _exact_keys(environment, {"id", "total_steps"}, field=field)
+        environment_id = environment["id"]
+        total_steps = environment["total_steps"]
+        if not isinstance(environment_id, str) or not environment_id:
+            raise UpperReferenceLinkError(f"{field}.id must be a non-empty string")
+        if isinstance(total_steps, bool) or not isinstance(total_steps, int) or total_steps <= 0:
+            raise UpperReferenceLinkError(f"{field}.total_steps must be a positive integer")
+        environment_ids.append(environment_id)
+    if len(set(environment_ids)) != len(environment_ids):
+        raise UpperReferenceLinkError("registration environment IDs contain duplicates")
+    selected_aliases = set(environment_ids) & set(UPPER_TO_PRIMARY_ENVIRONMENT)
+    if matrix_kind == "upper_reference":
+        unknown_aliases = set(environment_ids) - set(UPPER_TO_PRIMARY_ENVIRONMENT)
+        if unknown_aliases:
+            raise UpperReferenceLinkError(
+                f"upper-reference registration has unknown aliases: {sorted(unknown_aliases)}"
+            )
+    elif selected_aliases:
+        raise UpperReferenceLinkError(
+            f"primary registration contains upper-reference aliases: {sorted(selected_aliases)}"
+        )
+    seeds = raw["seeds"]
+    if (
+        not isinstance(seeds, list)
+        or not seeds
+        or any(isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 for seed in seeds)
+        or len(set(seeds)) != len(seeds)
+    ):
+        raise UpperReferenceLinkError("registration.seeds must be unique non-negative integers")
+    if tier == "registered_final" and len(seeds) != 30:
+        raise UpperReferenceLinkError("registered_final requires exactly 30 paired seeds")
+    learner = _mapping(raw["learner"], field="registration.learner")
+    _exact_keys(
+        learner,
+        {"num_envs", "rollout_steps", "update_epochs", "learning_rate"},
+        field="registration.learner",
+    )
+    for key in ("num_envs", "rollout_steps", "update_epochs"):
+        value = learner[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise UpperReferenceLinkError(f"registration.learner.{key} must be a positive integer")
+    learning_rate = learner["learning_rate"]
+    if (
+        isinstance(learning_rate, bool)
+        or not isinstance(learning_rate, (int, float))
+        or not math.isfinite(float(learning_rate))
+        or learning_rate <= 0
+    ):
+        raise UpperReferenceLinkError(
+            "registration.learner.learning_rate must be positive and finite"
+        )
+    evaluation_episodes = raw["evaluation_episodes_per_env"]
+    if (
+        isinstance(evaluation_episodes, bool)
+        or not isinstance(evaluation_episodes, int)
+        or evaluation_episodes <= 0
+    ):
+        raise UpperReferenceLinkError(
+            "registration.evaluation_episodes_per_env must be a positive integer"
+        )
+    if not isinstance(raw["require_gpu"], bool) or not isinstance(raw["quick"], bool):
+        raise UpperReferenceLinkError("registration boolean fields must be booleans")
+    if raw["quick"]:
+        if tier != "smoke":
+            raise UpperReferenceLinkError("quick registration is valid only for smoke")
+        if any(environment["total_steps"] != 8_192 for environment in environments):
+            raise UpperReferenceLinkError("quick registration must use 8192 total steps")
+        expected_quick = {"num_envs": 32, "rollout_steps": 32, "update_epochs": 2}
+        for key, value in expected_quick.items():
+            if learner[key] != value:
+                raise UpperReferenceLinkError(
+                    f"quick registration learner.{key} must equal {value}"
+                )
+    return dict(raw), canonical_json_sha256(raw)
+
+
+def _validate_manifest(
+    root: Path,
+    registration: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[tuple[str, str, int], dict[str, Any]]]:
+    raw = _mapping(
+        _load_json(root / "frozen_manifest.json", field="frozen manifest"),
+        field="frozen_manifest",
+    )
+    _exact_keys(raw, _MANIFEST_KEYS, field="frozen_manifest")
+    if raw["schema_version"] != 1 or raw["status"] != "frozen":
+        raise UpperReferenceLinkError("frozen_manifest must be frozen schema version 1")
+    manifest_sha256 = _sha256(
+        raw["manifest_sha256"],
+        field="frozen_manifest.manifest_sha256",
+    )
+    hash_input = dict(raw)
+    del hash_input["manifest_sha256"]
+    if canonical_json_sha256(hash_input) != manifest_sha256:
+        raise UpperReferenceLinkError(
+            "frozen_manifest.manifest_sha256 does not match canonical content"
+        )
+    expected_identity = {
+        "matrix_kind": registration["matrix_kind"],
+        "models": registration["models"],
+        "environments": [item["id"] for item in registration["environments"]],
+        "seeds": registration["seeds"],
+    }
+    actual_identity = {key: raw[key] for key in expected_identity}
+    if actual_identity != expected_identity:
+        raise UpperReferenceLinkError("frozen_manifest identity drifts from registration")
+
+    models = registration["models"]
+    environments = expected_identity["environments"]
+    seeds = registration["seeds"]
+    expected_cells = {
+        (environment, model, seed)
+        for environment in environments
+        for model in models
+        for seed in seeds
+    }
+    raw_cells = raw["cells"]
+    if not isinstance(raw_cells, list) or len(raw_cells) != len(expected_cells):
+        raise UpperReferenceLinkError("frozen_manifest has an incomplete cell list")
+    cells: dict[tuple[str, str, int], dict[str, Any]] = {}
+    seen_cell_ids: set[str] = set()
+    seen_artifact_paths: set[str] = set()
+    for index, raw_cell in enumerate(raw_cells):
+        field = f"frozen_manifest.cells[{index}]"
+        cell = _mapping(raw_cell, field=field)
+        _exact_keys(cell, _CELL_KEYS, field=field)
+        identity = _cell_identity(cell, field=field)
+        if identity not in expected_cells or identity in cells:
+            raise UpperReferenceLinkError(f"{field} has an invalid or duplicate identity")
+        configuration_sha256 = _sha256(
+            cell["configuration_sha256"],
+            field=f"{field}.configuration_sha256",
+        )
+        cell_id = _sha256(cell["cell_id"], field=f"{field}.cell_id")
+        if cell_id != registered_cell_id(*identity, configuration_sha256):
+            raise UpperReferenceLinkError(f"{field}.cell_id does not match its identity")
+        relative_path, artifact_path = _safe_relative_path(
+            root,
+            cell["artifact_path"],
+            field=f"{field}.artifact_path",
+        )
+        if cell_id in seen_cell_ids or relative_path in seen_artifact_paths:
+            raise UpperReferenceLinkError(f"{field} duplicates a cell ID or artifact path")
+        seen_cell_ids.add(cell_id)
+        seen_artifact_paths.add(relative_path)
+        cells[identity] = {
+            **dict(cell),
+            "artifact_path": relative_path,
+            "resolved_artifact_path": artifact_path,
+        }
+    if set(cells) != expected_cells:
+        raise UpperReferenceLinkError("frozen_manifest is missing Cartesian matrix cells")
+    return dict(raw), cells
+
+
+def _validate_completion_and_checksums(
+    root: Path,
+    manifest: Mapping[str, Any],
+    cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
+) -> None:
+    raw_index = _mapping(
+        _load_json(root / "completion_index.json", field="completion index"),
+        field="completion_index",
+    )
+    _exact_keys(raw_index, _COMPLETION_KEYS, field="completion_index")
+    expected_count = len(cells)
+    if (
+        raw_index["schema_version"] != 1
+        or raw_index["status"] != "complete"
+        or raw_index["manifest_sha256"] != manifest["manifest_sha256"]
+        or raw_index["planned_cells"] != expected_count
+        or raw_index["completed_cells"] != expected_count
+        or not isinstance(raw_index["cells"], list)
+        or len(raw_index["cells"]) != expected_count
+    ):
+        raise UpperReferenceLinkError("completion_index is incomplete or belongs to another matrix")
+
+    indexed: set[tuple[str, str, int]] = set()
+    expected_checksum_paths = {
+        "registration.json",
+        "frozen_manifest.json",
+        "completion_index.json",
+    }
+    for index, raw_completed in enumerate(raw_index["cells"]):
+        field = f"completion_index.cells[{index}]"
+        completed = _mapping(raw_completed, field=field)
+        _exact_keys(completed, _COMPLETED_CELL_KEYS, field=field)
+        identity = _cell_identity(completed, field=field)
+        if identity not in cells or identity in indexed:
+            raise UpperReferenceLinkError(f"{field} has an invalid or duplicate identity")
+        indexed.add(identity)
+        frozen = cells[identity]
+        for key in _CELL_KEYS:
+            if key == "artifact_path":
+                expected = frozen["artifact_path"]
+            else:
+                expected = frozen[key]
+            if completed[key] != expected:
+                raise UpperReferenceLinkError(f"{field}.{key} drifts from frozen_manifest")
+        artifact_sha256 = _sha256(
+            completed["artifact_sha256"],
+            field=f"{field}.artifact_sha256",
+        )
+        if sha256_file(frozen["resolved_artifact_path"]) != artifact_sha256:
+            raise UpperReferenceLinkError(f"{field}.artifact_sha256 is incorrect")
+        log_relative, log_path = _safe_relative_path(
+            root,
+            completed["log_path"],
+            field=f"{field}.log_path",
+        )
+        log_sha256 = _sha256(completed["log_sha256"], field=f"{field}.log_sha256")
+        if sha256_file(log_path) != log_sha256:
+            raise UpperReferenceLinkError(f"{field}.log_sha256 is incorrect")
+        expected_checksum_paths.add(frozen["artifact_path"])
+        expected_checksum_paths.add(log_relative)
+    if indexed != set(cells):
+        raise UpperReferenceLinkError("completion_index is missing frozen cells")
+
+    checksum_path = root / "checksums.sha256"
+    try:
+        lines = checksum_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise UpperReferenceLinkError(f"cannot read checksum manifest: {error}") from error
+    parsed_paths: list[str] = []
+    for index, line in enumerate(lines):
+        match = _CHECKSUM_LINE_PATTERN.fullmatch(line)
+        if match is None:
+            raise UpperReferenceLinkError(f"invalid checksum line {index + 1}")
+        relative, path = _safe_relative_path(
+            root,
+            match.group(2),
+            field=f"checksums[{index}].path",
+        )
+        if relative == "checksums.sha256" or relative in parsed_paths:
+            raise UpperReferenceLinkError("checksum manifest has a duplicate or self entry")
+        if sha256_file(path) != match.group(1):
+            raise UpperReferenceLinkError(f"checksum mismatch for {relative}")
+        parsed_paths.append(relative)
+    expected_order = sorted(expected_checksum_paths, key=lambda item: item.encode("utf-8"))
+    if parsed_paths != expected_order:
+        raise UpperReferenceLinkError(
+            "checksum manifest must exactly cover the frozen raw matrix in canonical order"
+        )
+
+
+def _deep_validate(
+    root: Path,
+    registration: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        if registration["evidence_tier"] in {"smoke", "pilot"}:
+            aggregate = build_development_aggregate(root)
+            integrity = aggregate["integrity_indexes"]
+            if not all(integrity.values()):
+                raise UpperReferenceLinkError(
+                    "development aggregate did not validate completion and checksums"
+                )
+            return aggregate
+        if registration["evidence_tier"] == "registered_final":
+            return build_registered_aggregate(root / "frozen_manifest.json")
+    except UpperReferenceLinkError:
+        raise
+    except (OSError, TypeError, ValueError) as error:
+        raise UpperReferenceLinkError(f"raw matrix validation failed: {error}") from error
+    raise UpperReferenceLinkError(f"unsupported evidence tier: {registration['evidence_tier']!r}")
+
+
+def _task_contracts(
+    cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    contracts: dict[str, dict[str, Any]] = {}
+    for identity, cell in cells.items():
+        artifact = _mapping(
+            _load_json(cell["resolved_artifact_path"], field=f"artifact{identity!r}"),
+            field=f"artifact{identity!r}",
+        )
+        configuration = _mapping(
+            artifact.get("configuration"),
+            field=f"artifact{identity!r}.configuration",
+        )
+        ppo = _mapping(configuration.get("ppo"), field=f"artifact{identity!r}.configuration.ppo")
+        contract = {
+            "ppo": dict(ppo),
+            "evaluation_episodes_per_environment": configuration.get(
+                "evaluation_episodes_per_environment"
+            ),
+            "evaluation_max_episode_steps": configuration.get("evaluation_max_episode_steps"),
+        }
+        environment = identity[0]
+        if environment in contracts and contracts[environment] != contract:
+            raise UpperReferenceLinkError(
+                f"learner or evaluation contract differs within environment {environment!r}"
+            )
+        contracts[environment] = contract
+    return contracts
+
+
+def _runtime_without_device(value: Any, *, field: str) -> dict[str, Any]:
+    runtime = dict(_mapping(value, field=field))
+    required = {"python", "packages", "jax_backend", "jax_enable_x64", "devices"}
+    if set(runtime) != required:
+        raise UpperReferenceLinkError(f"{field} has wrong fields")
+    del runtime["jax_backend"]
+    del runtime["devices"]
+    return runtime
+
+
+def _validate_source_pair(
+    primary: Mapping[str, Any],
+    upper: Mapping[str, Any],
+) -> None:
+    primary_git = _mapping(primary.get("git"), field="primary.provenance.git")
+    upper_git = _mapping(upper.get("git"), field="upper_reference.provenance.git")
+    if primary_git.get("commit") != upper_git.get("commit"):
+        raise UpperReferenceLinkError("Git commits differ across paired matrices")
+    if primary_git.get("dirty") is not False or upper_git.get("dirty") is not False:
+        raise UpperReferenceLinkError("paired matrices must come from clean Git worktrees")
+    for key in _SOURCE_IDENTITY_KEYS:
+        if primary.get(key) != upper.get(key):
+            raise UpperReferenceLinkError(f"source provenance differs for {key}")
+    if _runtime_without_device(
+        primary.get("runtime_contract"),
+        field="primary.provenance.runtime_contract",
+    ) != _runtime_without_device(
+        upper.get("runtime_contract"),
+        field="upper_reference.provenance.runtime_contract",
+    ):
+        raise UpperReferenceLinkError(
+            "runtime contracts differ beyond the allowed backend and device fields"
+        )
+
+
+def _paper_status(tier: str) -> tuple[str, bool, str]:
+    if tier == "registered_final":
+        return (
+            "registered_final_primary_upper_reference_link",
+            False,
+            "eligible_only_after_all_other_release_gates_pass",
+        )
+    return (
+        f"development_{tier}_primary_upper_reference_link_not_for_paper",
+        True,
+        "prohibited_development_evidence",
+    )
+
+
+def _validate_registered_budgets(
+    tier: str,
+    primary_registration: Mapping[str, Any],
+    upper_registration: Mapping[str, Any],
+) -> None:
+    if tier != "registered_final":
+        return
+    for registration, label in (
+        (primary_registration, "primary"),
+        (upper_registration, "upper_reference"),
+    ):
+        for environment in registration["environments"]:
+            expected = REGISTERED_TRAIN_STEPS.get(environment["id"])
+            if expected is None or environment["total_steps"] != expected:
+                raise UpperReferenceLinkError(
+                    f"{label} registered-final budget is invalid for {environment['id']!r}"
+                )
+
+
+def build_upper_reference_link(
+    primary_root: str | Path,
+    upper_reference_root: str | Path,
+) -> dict[str, Any]:
+    """Validate two complete raw matrices and return their canonical link."""
+
+    primary_path = Path(primary_root).resolve()
+    upper_path = Path(upper_reference_root).resolve()
+    if not primary_path.is_dir() or not upper_path.is_dir():
+        raise UpperReferenceLinkError("both raw matrix roots must be existing directories")
+    if primary_path == upper_path:
+        raise UpperReferenceLinkError("primary and upper-reference roots must be distinct")
+
+    primary_registration, primary_registration_sha256 = _validate_registration(primary_path)
+    upper_registration, upper_registration_sha256 = _validate_registration(upper_path)
+    if primary_registration["matrix_kind"] != "primary_comparison":
+        raise UpperReferenceLinkError("primary root is not a primary_comparison matrix")
+    if upper_registration["matrix_kind"] != "upper_reference":
+        raise UpperReferenceLinkError("upper-reference root is not an upper_reference matrix")
+
+    primary_manifest, primary_cells = _validate_manifest(
+        primary_path,
+        primary_registration,
+    )
+    upper_manifest, upper_cells = _validate_manifest(
+        upper_path,
+        upper_registration,
+    )
+    _validate_completion_and_checksums(primary_path, primary_manifest, primary_cells)
+    _validate_completion_and_checksums(upper_path, upper_manifest, upper_cells)
+    primary_aggregate = _deep_validate(primary_path, primary_registration)
+    upper_aggregate = _deep_validate(upper_path, upper_registration)
+
+    tier = primary_registration["evidence_tier"]
+    if upper_registration["evidence_tier"] != tier:
+        raise UpperReferenceLinkError("paired matrices have different evidence tiers")
+    if primary_registration["seeds"] != upper_registration["seeds"]:
+        raise UpperReferenceLinkError("paired matrices must use the same ordered seed list")
+    if primary_registration["learner"] != upper_registration["learner"]:
+        raise UpperReferenceLinkError("paired matrices have different learner registrations")
+    if (
+        primary_registration["evaluation_episodes_per_env"]
+        != upper_registration["evaluation_episodes_per_env"]
+        or primary_registration["quick"] != upper_registration["quick"]
+    ):
+        raise UpperReferenceLinkError("paired matrices have different evaluation registrations")
+
+    upper_environments = [item["id"] for item in upper_registration["environments"]]
+    try:
+        mapped_primary_environments = [
+            UPPER_TO_PRIMARY_ENVIRONMENT[environment] for environment in upper_environments
+        ]
+    except KeyError as error:
+        raise UpperReferenceLinkError(
+            f"upper-reference environment has no registered primary mapping: {error.args[0]!r}"
+        ) from error
+    primary_environments = [item["id"] for item in primary_registration["environments"]]
+    if mapped_primary_environments != primary_environments:
+        raise UpperReferenceLinkError(
+            "ordered upper-reference aliases do not map exactly to primary environments"
+        )
+
+    _validate_registered_budgets(tier, primary_registration, upper_registration)
+    primary_contracts = _task_contracts(primary_cells)
+    upper_contracts = _task_contracts(upper_cells)
+    alias_mapping: list[dict[str, str]] = []
+    for upper_environment, primary_environment in zip(
+        upper_environments,
+        primary_environments,
+    ):
+        if upper_contracts[upper_environment] != primary_contracts[primary_environment]:
+            raise UpperReferenceLinkError(
+                "learner or evaluation contract differs for paired environments "
+                f"{primary_environment!r} and {upper_environment!r}"
+            )
+        alias_mapping.append(
+            {
+                "upper_reference_environment": upper_environment,
+                "primary_environment": primary_environment,
+            }
+        )
+
+    primary_provenance = _mapping(
+        primary_aggregate["provenance"],
+        field="primary aggregate provenance",
+    )
+    upper_provenance = _mapping(
+        upper_aggregate["provenance"],
+        field="upper-reference aggregate provenance",
+    )
+    _validate_source_pair(primary_provenance, upper_provenance)
+    status, not_for_paper, paper_status = _paper_status(tier)
+    return {
+        "schema_version": 1,
+        "status": status,
+        "paper_status": paper_status,
+        "not_for_paper": not_for_paper,
+        "evidence_tier": tier,
+        "statistical_unit": "seed",
+        "seeds": list(primary_registration["seeds"]),
+        "alias_mapping": alias_mapping,
+        "learner_contract": {
+            "learner": primary_registration["learner"],
+            "evaluation_episodes_per_environment": primary_registration[
+                "evaluation_episodes_per_env"
+            ],
+            "quick": primary_registration["quick"],
+            "task_contracts": [
+                {
+                    "primary_environment": mapping["primary_environment"],
+                    **primary_contracts[mapping["primary_environment"]],
+                }
+                for mapping in alias_mapping
+            ],
+        },
+        "primary": {
+            "registration_sha256": primary_registration_sha256,
+            "matrix_manifest_sha256": primary_manifest["manifest_sha256"],
+            "provenance": dict(primary_provenance),
+        },
+        "upper_reference": {
+            "registration_sha256": upper_registration_sha256,
+            "matrix_manifest_sha256": upper_manifest["manifest_sha256"],
+            "provenance": dict(upper_provenance),
+        },
+        "source_pairing": {
+            "git_commit": primary_provenance["git"]["commit"],
+            "dependency_lock_sha256": primary_provenance["dependency_lock_sha256"],
+            "pobax_commit": primary_provenance["pobax_commit"],
+            "navix_commit": primary_provenance["navix_commit"],
+            "runtime_backend_and_devices_may_differ": True,
+        },
+    }
+
+
+def link_upper_reference(
+    primary_root: str | Path,
+    upper_reference_root: str | Path,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Validate paired matrices and atomically create their derived link."""
+
+    primary = Path(primary_root).resolve()
+    upper = Path(upper_reference_root).resolve()
+    output = Path(output_path).resolve()
+    if (
+        output == primary
+        or output.is_relative_to(primary)
+        or output == upper
+        or output.is_relative_to(upper)
+    ):
+        raise UpperReferenceLinkError("link output must be outside both immutable raw matrix roots")
+    result = build_upper_reference_link(primary, upper)
+    atomic_write_json(output, result)
+    return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("primary_root", type=Path)
+    parser.add_argument("upper_reference_root", type=Path)
+    parser.add_argument("output", type=Path)
+    arguments = parser.parse_args()
+    result = link_upper_reference(
+        arguments.primary_root,
+        arguments.upper_reference_root,
+        arguments.output,
+    )
+    print(
+        json.dumps(
+            {
+                "output": str(arguments.output.resolve()),
+                "status": result["status"],
+                "primary_manifest_sha256": result["primary"]["matrix_manifest_sha256"],
+                "upper_reference_manifest_sha256": result["upper_reference"][
+                    "matrix_manifest_sha256"
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+__all__ = [
+    "REGISTERED_TRAIN_STEPS",
+    "UpperReferenceLinkError",
+    "build_upper_reference_link",
+    "link_upper_reference",
+]

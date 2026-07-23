@@ -1,4 +1,4 @@
-protocol_version: 4
+protocol_version: 5
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -98,8 +98,7 @@ stages:
       - arcmind_no_ssm
       - arcmind_no_gate
       - arcmind_ssm_only
-    remaining_required_adapters:
-      - privileged_observation_upper_references
+    remaining_required_adapters: []
     tasks:
       - simple_chain
       - tmaze_10
@@ -123,6 +122,16 @@ stages:
     policy_selection: final_policy_after_fixed_interaction_budget
     development_tuning_seeds: [1103, 2207, 3301]
     registered_tuning_seed_rule: match_published_task_count
+    artifact_requirements:
+      aggregate_output_location: outside_immutable_raw_matrix
+      freeze_environment_source_and_reference: true
+      freeze_parameter_counts_and_ratio: true
+      parameter_ratio_bounds: [0.9, 1.1]
+      upper_reference_link:
+        required: true
+        ordered_seed_identity: exact
+        alias_mapping: exact
+        validate_both_raw_checksum_inventories: true
     required_policy_cores:
       - memoryless_mlp
       - positional_mlp

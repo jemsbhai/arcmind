@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.pobax import run_pilot
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
     canonical_json_sha256,
@@ -17,7 +18,11 @@ from benchmarks.pobax.run_matrix import (
     _load_matching_artifact,
     _load_registration,
 )
-from benchmarks.pobax.run_pilot import environment_horizon_and_gamma
+from benchmarks.pobax.run_pilot import (
+    environment_horizon_and_gamma,
+    make_environment,
+    validate_upper_reference_task_contract,
+)
 
 
 def _registration() -> dict[str, object]:
@@ -297,3 +302,113 @@ def test_environment_horizon_and_gamma_rejects_source_drift():
             environment_params,
             "tmaze_10",
         )
+
+
+@pytest.mark.parametrize(
+    ("alias", "source", "perfect_memory"),
+    [
+        ("tmaze_10-perfect-memory", "tmaze_10", True),
+        ("rocksample_11_11-fully-observable", "rocksample_11_11", True),
+        (
+            "Navix-DMLab-Maze-01-fully-observable",
+            "Navix-DMLab-Maze-F-01-v0",
+            False,
+        ),
+    ],
+)
+def test_upper_reference_aliases_request_source_variant(
+    monkeypatch,
+    alias,
+    source,
+    perfect_memory,
+):
+    calls = []
+
+    def fake_get_env(environment_name, key, **kwargs):
+        calls.append((environment_name, key, kwargs))
+        return "environment", "params"
+
+    monkeypatch.setattr(run_pilot, "get_env", fake_get_env)
+
+    assert make_environment(alias, "key", num_envs=8) == ("environment", "params")
+    assert calls == [
+        (
+            source,
+            "key",
+            {"num_envs": 8, "perfect_memory": perfect_memory},
+        )
+    ]
+
+
+def test_battleship_upper_reference_adds_the_audited_observation_adapter(
+    monkeypatch,
+):
+    source_environment = object()
+    calls = []
+
+    def fake_get_env(environment_name, key, **kwargs):
+        calls.append((environment_name, key, kwargs))
+        return source_environment, "params"
+
+    monkeypatch.setattr(run_pilot, "get_env", fake_get_env)
+
+    environment, params = make_environment(
+        "battleship_10-perfect-recall",
+        "key",
+        num_envs=8,
+    )
+
+    assert environment._env is source_environment
+    assert params == "params"
+    assert calls == [
+        (
+            "battleship_10",
+            "key",
+            {"num_envs": 8, "perfect_memory": True},
+        )
+    ]
+
+
+class _DiscreteActionSpace:
+    def __init__(self, n):
+        self.n = n
+
+
+class _ContinuousActionSpace:
+    def __init__(self, shape):
+        self.shape = shape
+
+
+def test_upper_reference_task_contract_accepts_only_equivalent_dynamics():
+    assert (
+        validate_upper_reference_task_contract(
+            upper_action_space=_DiscreteActionSpace(4),
+            primary_action_space=_DiscreteActionSpace(4),
+            upper_horizon=1_000,
+            primary_horizon=1_000,
+            upper_gamma=0.99,
+            primary_gamma=0.99,
+        )
+        == 4
+    )
+
+    mismatches = [
+        (
+            {"primary_action_space": _ContinuousActionSpace((4,))},
+            "action-space class",
+        ),
+        ({"primary_action_space": _DiscreteActionSpace(3)}, "action dimensions"),
+        ({"primary_horizon": 999}, "horizons"),
+        ({"primary_gamma": 1.0}, "discounts"),
+    ]
+    defaults = {
+        "upper_action_space": _DiscreteActionSpace(4),
+        "primary_action_space": _DiscreteActionSpace(4),
+        "upper_horizon": 1_000,
+        "primary_horizon": 1_000,
+        "upper_gamma": 0.99,
+        "primary_gamma": 0.99,
+    }
+    for override, message in mismatches:
+        with pytest.raises(RuntimeError, match=message):
+            validate_upper_reference_task_contract(**(defaults | override))

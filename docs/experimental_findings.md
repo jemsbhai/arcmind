@@ -199,6 +199,107 @@ with each actual experiment.
   completeness. Registered aggregation must validate both bytes and meaning.
 - Evidence restriction: no registered result existed before this gate.
 
+### F-ENG-005: Discrete upper references need explicit aliases
+
+- Class: `development smoke`
+- Status: configuration and shape validation complete, performance not run
+- Date: 2026-07-23
+- Source contract: the pinned POBAX factory uses `perfect_memory=True` to keep
+  the T-Maze cue visible and to wrap RockSample with its fully observable
+  representation
+  ([factory source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/__init__.py#L171-L319)).
+- Implementation: the registered runner exposes
+  `tmaze_10-perfect-memory` and
+  `rocksample_11_11-fully-observable`, which call the primary source with
+  `perfect_memory=True`, and
+  `battleship_10-perfect-recall`, which applies the same source flag and
+  restores its omitted action mask, and
+  `Navix-DMLab-Maze-01-fully-observable`, which calls the separately
+  registered full source environment. Each hashed configuration records its
+  source invocation, upper-reference class, primary parameter target, and
+  inherited registered interaction budget. Upper-reference matrices accept
+  only the memoryless policy.
+- Shape validation:
+  - T-Maze primary and persistent-cue observations both contain four values,
+    giving policy input width ten with four actions. The matched policy has
+    28,663 parameters against the 28,717-parameter primary target, a ratio of
+    `0.9981`;
+  - RockSample primary and fully observable observations both contain 33
+    values, giving policy input width 51 with 16 actions. The upper wrapper
+    replaces uncertain rock features with true rock morality rather than
+    increasing the width
+    ([wrapper source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/rocksample.py#L93-L125)).
+    The matched counts are 30,476 and 30,425, a ratio of `1.0017`;
+  - Battleship perfect recall supplies a `(10, 10)` hit and miss history. The
+    local adapter preserves that array and supplies the row-major mask
+    `observation == 0`, giving 100 legal-action flags
+    ([source wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/battleship.py#L67-L99)).
+    Its policy input width is 202 against the primary width 103. The matched
+    counts are 34,685 and 34,861, a ratio of `0.9950`; and
+  - Navix primary runtime observations have shape `(3, 3, 2)`, or 18 values,
+    while the full source observations have shape `(21, 41, 6)`, or 5,166
+    values. The shared input adds the previous-action one-hot vector and two
+    boundary flags, giving widths 23 and 5,171. A hidden width of six keeps
+    the full-observation memoryless MLP within the primary ArcMind parameter
+    budget. The matched counts are 31,102 and 29,100, a ratio of `1.0688`.
+- Task-equivalence validation: each alias now fails closed unless its action
+  space class, action dimension, evaluation horizon, and discount match the
+  paired primary task. All four runtime descriptions passed.
+- Contract correction: an independent review found that the initial
+  Battleship wrapper delegated stale source `observation_space` and
+  `dummy_observation` metadata. The corrected adapter declares the emitted
+  named `(10, 10)` observation and 100-value Boolean mask, supplies a matching
+  sequence-first dummy batch, and passes compiled tests against the pinned
+  vector environment.
+- Interpretation: an upper reference is defined by information, not tensor
+  size or the label `perfect memory`. Explicit aliases prevent accidental
+  mixing with primary cells and preserve the exact source invocation.
+- Evidence restriction: configuration descriptions and adapter tests are not
+  performance evidence.
+
+### F-ENG-006: Upper-reference evidence needed four additional fail-closed gates
+
+- Class: `engineering validation`
+- Status: complete
+- Date: 2026-07-23
+- Trigger: independent review of the completed upper-reference paths.
+- Findings:
+  - the first Battleship adapter emitted the correct observation and mask but
+    delegated stale `observation_space` and `dummy_observation` metadata;
+  - aggregate writers could be pointed inside the immutable raw matrix and
+    therefore could overwrite inputs after validating them;
+  - independent aggregation checked the matrix role but did not prove the
+    exact environment source, reference class, or parameter-match ratio; and
+  - two separate 30-seed matrices did not by themselves prove that primary and
+    upper-reference runs used the same ordered seeds.
+- Corrections:
+  - the Battleship adapter now declares and tests its exact named observation
+    space and sequence-first dummy batch;
+  - registered and development aggregate writers reject every output at or
+    below the raw matrix root before input validation;
+  - a pure six-alias registry supplies the runner, both aggregators, and the
+    cross-matrix linker with one source of truth;
+  - new frozen configurations record parameter count, effective parameter
+    count, primary ArcMind target count, ratio, source invocation, and
+    reference class. Registered aggregation requires these fields and checks
+    the ratio range `0.9` through `1.1`;
+  - the development aggregator validates the same artifact fields while
+    explicitly marking whether an older primary pilot froze them inside its
+    configuration; and
+  - `link_upper_reference.py` validates both complete checksum inventories,
+    exact ordered seeds, all alias mappings, learner and evaluation contracts,
+    registered budgets, Git and dependency identity, and non-device runtime
+    fields before creating a derived link outside both raw roots.
+- Validation: 64 aggregate tests, 15 cross-matrix link tests, 11 adapter tests,
+  and 24 runner-matrix tests passed in focused CPU runs. The runtime
+  descriptions for all four discrete aliases and Walker-F passed their
+  parameter and task-equivalence checks. The integrated POBAX CPU suite passed
+  all 212 tests, and the Windows package suite passed all 118 selected tests.
+- Interpretation: equal seed cardinality is not paired evidence. Pairing
+  requires a machine-verifiable link between the exact immutable manifests.
+- Evidence restriction: these gates establish artifact validity, not policy
+  performance.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`

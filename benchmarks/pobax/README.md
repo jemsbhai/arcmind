@@ -154,8 +154,9 @@ python -m benchmarks.pobax.run_pilot \
 
 `--quick` results are explicitly marked `development_smoke_not_for_paper`.
 They validate plumbing and learnability; they are not registered evidence.
-Each JSON artifact records the complete policy-core configuration, parameter
-match, PPO configuration, accelerator, and exact POBAX commit.
+Each JSON artifact and its hashed frozen configuration record the complete
+policy core, parameter counts and ratio, environment source and reference
+class, PPO configuration, accelerator, and exact POBAX commit.
 
 Frozen Cartesian matrices use the fail-closed launcher:
 
@@ -200,6 +201,35 @@ entries with no completed episode remain JSON `null`; aggregation starts at
 the first step where every cell in that task has a finite return.
 Derived aggregates live outside the immutable raw-matrix directory so its
 checksum manifest continues to cover every file it was created to protect.
+The write commands reject any output path inside that directory.
+
+Smoke and pilot matrices use the separately labeled development aggregator:
+
+```bash
+python -m benchmarks.pobax.aggregate_development \
+  benchmark_results/pobax/tmaze-pilot-v1 \
+  benchmark_results/pobax/aggregates/tmaze-pilot-v1.json
+```
+
+Development aggregation preserves raw seed returns, validates the recorded
+parameter match and environment semantics, and stamps the result as not for
+paper. Legacy primary pilots whose older frozen configuration omitted those
+fields are accepted only when the completed artifact itself passes the same
+checks, and the aggregate records that limitation explicitly.
+
+Primary and upper-reference matrices are paired only through a validated link:
+
+```bash
+python -m benchmarks.pobax.link_upper_reference \
+  benchmark_results/pobax/registered-primary \
+  benchmark_results/pobax/registered-upper \
+  benchmark_results/pobax/aggregates/primary-upper-link.json
+```
+
+The linker requires identical ordered seeds, exact alias-to-primary mappings,
+learner and evaluation contracts, source commits, dependency locks, and
+registered budgets. It validates both raw checksum inventories and permits
+backend or device differences only when all non-device runtime fields match.
 
 The discrete development runner accepts `simple_chain`, `tmaze_10`,
 `rocksample_11_11`, `battleship_10`, and
@@ -208,6 +238,14 @@ infrastructure rather than policy quality. The same learner supports
 `HalfCheetah-V-v0` and `Walker-V-v0` through a learned state-independent
 diagonal-Gaussian action distribution. Separately labeled `Walker-F-v0` and
 `HalfCheetah-F-v0` full-observation references use the common runner too.
+The discrete upper-reference aliases `tmaze_10-perfect-memory`,
+`rocksample_11_11-fully-observable`, and
+`Navix-DMLab-Maze-01-fully-observable` invoke an explicit pinned source variant
+and accept only the parameter-matched memoryless policy.
+`battleship_10-perfect-recall` additionally restores the legal-action mask
+omitted by the public perfect-recall wrapper. The Navix reference flattens the
+full `(21, 41, 6)` source observation into a narrow learned MLP whose total
+parameter count is matched to the primary ArcMind target.
 `HalfCheetah-P-v0` is exposed by the library and may remain useful for
 development, but it is not a registered task from the published POBAX
 benchmark.

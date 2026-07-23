@@ -22,6 +22,10 @@ from benchmarks.pobax.registered_artifacts import (
     canonical_json_sha256,
     registered_cell_id,
 )
+from benchmarks.pobax.upper_reference_registry import (
+    expected_environment_reference,
+    expected_environment_source,
+)
 
 MODELS = ["arcmind", "gru"]
 ENVIRONMENTS = ["tmaze_10"]
@@ -71,6 +75,12 @@ def _configuration(environment: str, model: str, seed: int) -> dict[str, Any]:
         "environment": environment,
         "model": model,
         "seed": seed,
+        "environment_source": expected_environment_source(environment),
+        "environment_reference": expected_environment_reference(environment),
+        "parameter_count": 1_000,
+        "effective_parameter_count": 1_000,
+        "arcmind_target_parameter_count": 1_000,
+        "parameter_ratio": 1.0,
         "ppo": {"total_steps": total_steps, "num_envs": 2},
         "evaluation_episodes_per_environment": EVALUATION_EPISODES[environment],
         "evaluation_max_episode_steps": EVALUATION_HORIZON,
@@ -170,7 +180,7 @@ def _write_matrix(
         evaluation_steps = evaluation_episodes * configuration["evaluation_max_episode_steps"]
         value = values.get(identity, float(seed))
         artifact = {
-            "schema_version": 1,
+            "schema_version": 4,
             "status": "registered_final_complete",
             "matrix_manifest_sha256": manifest_sha256,
             "cell_id": registered_cell_id(
@@ -184,6 +194,12 @@ def _write_matrix(
             "environment": environment,
             "model": model,
             "seed": seed,
+            "environment_source": deepcopy(configuration["environment_source"]),
+            "environment_reference": deepcopy(configuration["environment_reference"]),
+            "parameter_count": configuration["parameter_count"],
+            "effective_parameter_count": configuration["effective_parameter_count"],
+            "arcmind_target_parameter_count": configuration["arcmind_target_parameter_count"],
+            "parameter_ratio": configuration["parameter_ratio"],
             "provenance": deepcopy(PROVENANCE),
             "actual_environment_steps": total_steps,
             "ppo": deepcopy(configuration["ppo"]),
@@ -235,7 +251,8 @@ def test_iqm_fractional_boundaries() -> None:
 def test_complete_matrix_aggregates_raw_seeds_pairs_curves_and_canonical_json(
     tmp_path: Path,
 ) -> None:
-    manifest_path, manifest, _ = _write_matrix(tmp_path)
+    matrix_root = tmp_path / "matrix"
+    manifest_path, manifest, _ = _write_matrix(matrix_root)
     output = tmp_path / "aggregate.json"
 
     result = aggregate_registered(manifest_path, output)
@@ -282,6 +299,23 @@ def test_complete_matrix_aggregates_raw_seeds_pairs_curves_and_canonical_json(
     )
 
 
+@pytest.mark.parametrize(
+    "relative_output",
+    [".", "matrix.json", "cells/aggregate.json"],
+)
+def test_aggregate_output_cannot_target_raw_matrix_root(
+    tmp_path: Path,
+    relative_output: str,
+) -> None:
+    matrix_root = tmp_path / "matrix"
+    manifest_path, _, _ = _write_matrix(matrix_root)
+    _rewrite_manifest(manifest_path, lambda value: value.update(status="draft"))
+    output = matrix_root / relative_output
+
+    with pytest.raises(RegisteredAggregationError, match="outside the raw matrix root"):
+        aggregate_registered(manifest_path, output)
+
+
 def test_bootstrap_is_deterministic_and_group_order_independent(tmp_path: Path) -> None:
     manifest_path, _, _ = _write_matrix(tmp_path)
     first = build_registered_aggregate(manifest_path)
@@ -308,6 +342,42 @@ def test_upper_reference_matrix_aggregates_without_arcmind_pairs(tmp_path: Path)
     assert result["paired_differences_against_arcmind"] == []
 
 
+@pytest.mark.parametrize(
+    "environment",
+    [
+        "tmaze_10-perfect-memory",
+        "rocksample_11_11-fully-observable",
+        "battleship_10-perfect-recall",
+        "Navix-DMLab-Maze-01-fully-observable",
+        "Walker-F-v0",
+        "HalfCheetah-F-v0",
+    ],
+)
+def test_primary_matrix_rejects_upper_reference_aliases(
+    tmp_path: Path,
+    environment: str,
+) -> None:
+    manifest_path, _, _ = _write_matrix(tmp_path)
+    _rewrite_manifest(
+        manifest_path,
+        lambda value: value.update(environments=[environment]),
+    )
+
+    with pytest.raises(RegisteredAggregationError, match="upper-reference aliases"):
+        build_registered_aggregate(manifest_path)
+
+
+def test_upper_reference_matrix_rejects_primary_environment(tmp_path: Path) -> None:
+    manifest_path, _, _ = _write_matrix(
+        tmp_path,
+        models=["memoryless_mlp"],
+        matrix_kind="upper_reference",
+    )
+
+    with pytest.raises(RegisteredAggregationError, match="non-reference environments"):
+        build_registered_aggregate(manifest_path)
+
+
 def test_frozen_configuration_requires_final_tier_identity_and_sources() -> None:
     configuration = _configuration("tmaze_10", "arcmind", 11)
 
@@ -327,6 +397,43 @@ def test_frozen_configuration_requires_final_tier_identity_and_sources() -> None
             provenance=PROVENANCE,
             field="configuration",
         )
+
+
+def test_frozen_configuration_requires_exact_parameter_and_environment_semantics() -> None:
+    configuration = _configuration("tmaze_10", "arcmind", 11)
+
+    for mutation, message in [
+        (
+            lambda value: value.update(parameter_ratio=1.2),
+            "parameter_ratio",
+        ),
+        (
+            lambda value: value.update(parameter_count=1_001),
+            "parameter_ratio",
+        ),
+        (
+            lambda value: value["environment_source"].update(perfect_memory=True),
+            "environment_source",
+        ),
+        (
+            lambda value: value.update(
+                environment_reference={
+                    "primary_environment": "tmaze_10",
+                    "reference_class": "invalid",
+                }
+            ),
+            "environment_reference",
+        ),
+    ]:
+        invalid = deepcopy(configuration)
+        mutation(invalid)
+        with pytest.raises(RegisteredAggregationError, match=message):
+            _validate_frozen_configuration(
+                invalid,
+                identity=("tmaze_10", "arcmind", 11),
+                provenance=PROVENANCE,
+                field="configuration",
+            )
 
 
 def test_partial_training_history_cannot_pass_as_complete(tmp_path: Path) -> None:
@@ -409,6 +516,11 @@ def test_duplicate_cell_id_and_artifact_path_fail(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("name", "mutate", "match"),
     [
+        (
+            "schema",
+            lambda value: value.__setitem__("schema_version", 3),
+            "current schema 4",
+        ),
         (
             "status",
             lambda value: value.__setitem__("status", "development_pilot_not_for_paper"),

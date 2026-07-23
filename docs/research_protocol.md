@@ -175,17 +175,32 @@ policy's information and, under finite optimization, may perform below a
 partial-observation method. Report them separately from the parameter-matched
 main table.
 
-Two adapters require special care. Battleship's public perfect-memory path
+The shared runner implements the public T-Maze, RockSample, Battleship, and Navix
+references as the explicit aliases `tmaze_10-perfect-memory`,
+`rocksample_11_11-fully-observable`, and
+`Navix-DMLab-Maze-01-fully-observable`, plus
+`battleship_10-perfect-recall`. Each alias records the exact source invocation
+in its hashed configuration, permits only the parameter-matched memoryless
+policy, and inherits the primary task's registered interaction budget.
+T-Maze retains the same four-value shape while keeping the cue visible.
+RockSample retains the same 33-value shape while replacing uncertain rock
+beliefs with true rock morality, so observation width alone does not identify
+the information advantage.
+
+Battleship's public perfect-memory path
 returns a raw `(10, 10)` history array and omits the ordinary action-mask
-dictionary. The shared learner must restore the legal-action mask from
-unvisited cells and use an explicit observation adapter; the unregistered
-state wrapper must not be substituted because its returned axis order
-disagrees with its declared space
+dictionary. The implemented adapter preserves the source history and restores
+the row-major legal-action mask from unvisited cells. The unregistered state
+wrapper is not substituted because its returned axis order disagrees with its
+declared space
 ([wrappers](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/battleship.py#L67-L205)).
-Navix expands from a partial `(7, 7, 2)` observation, or 98 flattened values,
-to 5,166 full-observation values. Its adapter must target the parameter budget
-of the primary partial-task ArcMind cell, and all adapter parameters must be
-counted, rather than allowing privileged input width to define a larger budget
+Navix expands from a partial `(3, 3, 2)` runtime observation, or 18 flattened
+values, to 5,166 full-observation values. After adding the previous action and
+two boundary flags, the respective policy input widths are 23 and 5,171. The
+implemented upper reference flattens the full input into a memoryless MLP with
+hidden width six. It targets the parameter budget of the primary partial-task
+ArcMind cell, and all learned parameters are counted, rather than allowing
+privileged input width to define a larger budget
 ([partial wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/nx.py#L59-L132),
 [full registration](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/navix_mazes.py#L413-L464)).
 
@@ -252,6 +267,12 @@ Classify every run before execution:
   not paper evidence.
 - A registered final run uses frozen choices, paired seed manifests, and the
   published interaction budget for every method in a task cell.
+
+Primary and upper-reference results require a cross-matrix link artifact
+before comparison. The linker validates the complete raw checksum inventories,
+requires the same ordered seed list and exact alias-to-primary mapping, and
+checks learner, evaluation, source, dependency, and registered-budget
+contracts. A shared seed count without this link is insufficient evidence.
 
 The published POBAX budgets are 1 million steps for T-Maze-10, 5 million for
 RockSample11, 10 million for Battleship-10, 50 million each for Walker-V and
@@ -396,7 +417,9 @@ Until the registered results exist, do not claim:
 Existing checkpoints and result files predate the causal memory correction and
 must not enter the paper. Every reported result must be regenerated from a
 versioned configuration, seed manifest, immutable dataset identifier, and
-machine-readable output artifact.
+machine-readable output artifact. Derived aggregates and primary-to-upper
+links must live outside immutable raw-matrix roots. Their writers reject
+in-root paths before reading or writing any result.
 
 ## 7. Release gates
 

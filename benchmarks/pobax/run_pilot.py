@@ -68,6 +68,11 @@ from benchmarks.pobax.smoke_environment import (
     PINNED_POBAX_COMMIT,
     source_commit,
 )
+from benchmarks.pobax.upper_reference_envs import (
+    BATTLESHIP_PERFECT_RECALL_SOURCE_CONTRACT,
+    BattleshipPerfectRecallObservationWrapper,
+)
+from benchmarks.pobax.upper_reference_registry import UPPER_REFERENCE_SPECS
 
 REFERENCE_IMPLEMENTATIONS = {
     "ffm": {
@@ -112,28 +117,32 @@ MAX_EPISODE_STEPS = {
     # Verified against the pinned POBAX environment parameters.
     "simple_chain": 10,
     "tmaze_10": 1_000,
+    "tmaze_10-perfect-memory": 1_000,
     "rocksample_11_11": 1_000,
+    "rocksample_11_11-fully-observable": 1_000,
     "battleship_10": 1_000,
+    "battleship_10-perfect-recall": 1_000,
     "HalfCheetah-P-v0": 1_000,
     "HalfCheetah-V-v0": 1_000,
     "HalfCheetah-F-v0": 1_000,
     "Walker-V-v0": 1_000,
     "Walker-F-v0": 1_000,
     "Navix-DMLab-Maze-01-v0": 2_000,
+    "Navix-DMLab-Maze-01-fully-observable": 2_000,
+}
+
+ENVIRONMENT_SOURCES = {
+    environment: specification["environment_source"]
+    for environment, specification in UPPER_REFERENCE_SPECS.items()
 }
 
 UPPER_REFERENCE_TARGETS = {
-    "HalfCheetah-F-v0": {
-        "primary_environment": "HalfCheetah-V-v0",
-        "reference_class": "full_markov_observation",
-    },
-    "Walker-F-v0": {
-        "primary_environment": "Walker-V-v0",
-        "reference_class": "full_markov_observation",
-    },
+    environment: specification["environment_reference"]
+    for environment, specification in UPPER_REFERENCE_SPECS.items()
 }
 
 ENVIRONMENT_CONTRACTS = {
+    "battleship_10-perfect-recall": BATTLESHIP_PERFECT_RECALL_SOURCE_CONTRACT,
     "HalfCheetah-P-v0": {
         "selected_observation_dimensions": [0, 1, 2, 3, 8, 9, 10, 11, 12],
         "action_bounds": [-1.0, 1.0],
@@ -158,13 +167,17 @@ ENVIRONMENT_CONTRACTS = {
 
 REGISTERED_TRAIN_STEPS = {
     "tmaze_10": 1_000_000,
+    "tmaze_10-perfect-memory": 1_000_000,
     "rocksample_11_11": 5_000_000,
+    "rocksample_11_11-fully-observable": 5_000_000,
     "battleship_10": 10_000_000,
+    "battleship_10-perfect-recall": 10_000_000,
     "Walker-V-v0": 50_000_000,
     "Walker-F-v0": 50_000_000,
     "HalfCheetah-V-v0": 50_000_000,
     "HalfCheetah-F-v0": 50_000_000,
     "Navix-DMLab-Maze-01-v0": 10_000_000,
+    "Navix-DMLab-Maze-01-fully-observable": 10_000_000,
 }
 
 EVIDENCE_STATUS = {
@@ -419,6 +432,78 @@ def environment_horizon_and_gamma(
     return maximum_episode_steps, gamma
 
 
+def make_environment(
+    environment_name: str,
+    key: jax.Array,
+    *,
+    num_envs: int,
+):
+    """Construct a primary task or explicitly named upper-reference variant."""
+    source = ENVIRONMENT_SOURCES.get(environment_name)
+    if source is None:
+        return get_env(environment_name, key, num_envs=num_envs)
+    environment, environment_params = get_env(
+        source["source_environment"],
+        key,
+        num_envs=num_envs,
+        perfect_memory=source["perfect_memory"],
+    )
+    if environment_name == "battleship_10-perfect-recall":
+        environment = BattleshipPerfectRecallObservationWrapper(environment)
+    return environment, environment_params
+
+
+def action_space_contract(action_space: object, *, label: str) -> tuple[bool, int]:
+    """Return whether an action space is continuous and its flat dimension."""
+    continuous = not hasattr(action_space, "n")
+    if continuous:
+        shape = getattr(action_space, "shape", None)
+        if shape is None or len(shape) != 1:
+            raise ValueError(f"Expected one-dimensional {label} Box actions, found {shape}")
+        return True, int(shape[0])
+    return False, int(action_space.n)
+
+
+def validate_upper_reference_task_contract(
+    *,
+    upper_action_space: object,
+    primary_action_space: object,
+    upper_horizon: int,
+    primary_horizon: int,
+    upper_gamma: float,
+    primary_gamma: float,
+) -> int:
+    """Prove that an upper reference changes information, not task dynamics."""
+    upper_continuous, upper_action_dim = action_space_contract(
+        upper_action_space,
+        label="upper-reference",
+    )
+    primary_continuous, primary_action_dim = action_space_contract(
+        primary_action_space,
+        label="primary",
+    )
+    if primary_continuous != upper_continuous:
+        raise RuntimeError(
+            "Upper reference and primary target must use the same action-space class"
+        )
+    if primary_action_dim != upper_action_dim:
+        raise RuntimeError(
+            "Upper reference and primary target action dimensions differ: "
+            f"upper={upper_action_dim}, primary={primary_action_dim}"
+        )
+    if primary_horizon != upper_horizon:
+        raise RuntimeError(
+            "Upper reference and primary target horizons differ: "
+            f"upper={upper_horizon}, primary={primary_horizon}"
+        )
+    if not np.isclose(primary_gamma, upper_gamma, rtol=0.0, atol=1e-12):
+        raise RuntimeError(
+            "Upper reference and primary target discounts differ: "
+            f"upper={upper_gamma}, primary={primary_gamma}"
+        )
+    return primary_action_dim
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     """Train and evaluate one model/environment/seed cell."""
     if jax.default_backend() != "gpu" and args.require_gpu:
@@ -461,7 +546,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if args.cell_id is None and not args.describe_only:
             raise ValueError("registered_final requires a frozen cell ID")
     environment_key = random.PRNGKey(args.seed + 10)
-    environment, environment_params = get_env(
+    environment, environment_params = make_environment(
         args.environment,
         environment_key,
         num_envs=num_envs,
@@ -490,20 +575,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     observation_shape = tuple(int(value) for value in sample_observation.obs.shape[1:])
     observation_dim = int(np.prod(observation_shape))
     action_space = environment.action_space(environment_params)
-    continuous_action = not hasattr(action_space, "n")
-    if continuous_action:
-        if len(action_space.shape) != 1:
-            raise ValueError(f"Expected one-dimensional Box actions, found {action_space.shape}")
-        action_dim = int(action_space.shape[0])
-    else:
-        action_dim = int(action_space.n)
+    continuous_action, action_dim = action_space_contract(action_space, label="policy")
     input_dim = observation_dim + action_dim + 2
     reference_metadata = UPPER_REFERENCE_TARGETS.get(args.environment)
     target_input_dim = input_dim
     if reference_metadata is not None:
         if args.model != "memoryless_mlp":
             raise ValueError("Full-observation upper references must use memoryless_mlp")
-        target_environment, target_params = get_env(
+        target_environment, target_params = make_environment(
             reference_metadata["primary_environment"],
             random.PRNGKey(args.seed + 12),
             num_envs=num_envs,
@@ -512,8 +591,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             random.split(random.PRNGKey(args.seed + 13), num_envs),
             target_params,
         )
+        target_action_space = target_environment.action_space(target_params)
+        target_maximum_episode_steps, target_gamma = environment_horizon_and_gamma(
+            target_environment,
+            target_params,
+            reference_metadata["primary_environment"],
+        )
+        target_action_dim = validate_upper_reference_task_contract(
+            upper_action_space=action_space,
+            primary_action_space=target_action_space,
+            upper_horizon=maximum_episode_steps,
+            primary_horizon=target_maximum_episode_steps,
+            upper_gamma=environment_gamma,
+            primary_gamma=target_gamma,
+        )
         target_observation_dim = int(np.prod(target_observation.obs.shape[1:]))
-        target_input_dim = target_observation_dim + action_dim + 2
+        target_input_dim = target_observation_dim + target_action_dim + 2
     policy_core, parameter_count, target_parameter_count = build_policy_core(
         args.model,
         input_dim=input_dim,
@@ -545,6 +638,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "schema_version": 1,
         "evidence_tier": args.evidence_tier,
         "environment": args.environment,
+        "environment_source": ENVIRONMENT_SOURCES.get(
+            args.environment,
+            {
+                "source_environment": args.environment,
+                "perfect_memory": False,
+            },
+        ),
         "model": args.model,
         "seed": args.seed,
         "policy_core": asdict(policy_core),
@@ -554,6 +654,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "observation_shape": list(observation_shape),
         "policy_input_dim": input_dim,
         "parameter_target_policy_input_dim": target_input_dim,
+        "parameter_count": parameter_count,
+        "effective_parameter_count": effective_parameter_count,
+        "arcmind_target_parameter_count": target_parameter_count,
+        "parameter_ratio": ratio,
         "action_dim": action_dim,
         "action_space": "continuous_box" if continuous_action else "discrete",
         "ppo": asdict(ppo_config),
@@ -638,6 +742,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "parameter_ratio": ratio,
         "policy_core": asdict(policy_core),
         "reference_implementation": REFERENCE_IMPLEMENTATIONS.get(args.model),
+        "environment_source": frozen_configuration["environment_source"],
         "environment_reference": reference_metadata,
         "environment_contract": ENVIRONMENT_CONTRACTS.get(args.environment),
         "observation_dim": observation_dim,
