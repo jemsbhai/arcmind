@@ -956,6 +956,43 @@ with each actual experiment.
   exact recall. It does not invalidate the finite-execution result and does
   not imply that the repaired model will improve.
 
+### F-PILOT-004: T-Maze attention-horizon repair pilot
+
+- Class: `development pilot`
+- Status: planned and frozen before execution, not for a paper performance
+  claim
+- Date planned and frozen: 2026-07-23
+- Question: does extending the benchmark attention window from eight to 16
+  prior snapshots translate the semantic T-Maze repair into reliable
+  three-seed accuracy?
+- Prediction and decision rule stated before execution:
+  - every cell must complete with finite optimizer metrics;
+  - a repaired across-seed mean evaluation return of at least `3.5`, with
+    every seed strictly above `0`, counts as an accuracy repair; and
+  - any other finite outcome means the horizon is semantically corrected but
+    accuracy remains unresolved.
+- Frozen matrix:
+  - manifest:
+    `benchmarks/pobax/manifests/tmaze_attention_horizon_repair_v3.json`;
+  - repair implementation commit:
+    `2d01d304c6fe112822d5fffe804873860f90a12b`;
+  - execution source commit: pending; the launcher requires clean Git and
+    records the exact commit;
+  - schema: `2`;
+  - comparison profile: `arcmind_shared_comparison`;
+  - model: ArcMind only;
+  - environment: `tmaze_10`;
+  - seeds: `1103`, `2207`, and `3301`;
+  - learner: eight environments, 125 rollout steps, four update epochs, four
+    minibatches, constant learning rate `0.00025`, GAE lambda `0.95`, and
+    entropy coefficient `0.01`;
+  - budget: exactly 250,000 requested and realized transitions per cell;
+  - evaluation: 16 episodes per environment, or 128 episodes per seed; and
+  - accelerator: GPU required.
+- Evidence restriction: this pilot can accept or reject the stated
+  development repair criterion. It cannot establish comparative performance,
+  support a paper result, or replace a registered-final matrix.
+
 ### F-REG-000: No registered performance finding exists
 
 - Class: `registered evidence`

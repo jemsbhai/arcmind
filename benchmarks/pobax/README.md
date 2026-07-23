@@ -185,6 +185,14 @@ evaluation contract. The manifest is independent of the SHM repair outcome.
 It is development evidence and remains ineligible for paper performance
 claims.
 
+The attention-horizon repair pilot uses
+`benchmarks/pobax/manifests/tmaze_attention_horizon_repair_v3.json`. It reruns
+ArcMind after increasing the benchmark attention window to cover the T-Maze
+start cue. The frozen three-seed contract retains the earlier pilot budget,
+learner settings, and evaluation count. The launcher requires clean Git
+provenance and a GPU. This pilot remains ineligible for paper performance
+claims.
+
 Registration schema v1 remains readable for existing development matrices.
 New pilot and registered-final experiment registrations use schema v2 and
 must name one of two comparison profiles:
