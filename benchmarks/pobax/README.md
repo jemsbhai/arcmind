@@ -177,6 +177,14 @@ ArcMind on the same T-Maze pilot seeds, budget, learner settings, and
 evaluation contract. ArcMind is the required comparison anchor. This replay
 is pilot evidence and remains ineligible for paper performance claims.
 
+The next coverage and ablation pilot uses
+`benchmarks/pobax/manifests/tmaze_coverage_ablation_v2.json`. It compares the
+four-frame MLP, LRU, S4D, four ArcMind ablations, and complete ArcMind under the
+same T-Maze pilot seeds, exact 250,000-step budget, learner settings, and
+evaluation contract. The manifest is independent of the SHM repair outcome.
+It is development evidence and remains ineligible for paper performance
+claims.
+
 Registration schema v1 remains readable for existing development matrices.
 New experiment registrations use schema v2 and must name one of two comparison
 profiles:
