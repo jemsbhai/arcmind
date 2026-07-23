@@ -1,4 +1,4 @@
-protocol_version: 1
+protocol_version: 2
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -12,6 +12,23 @@ principles:
   paired_data: true
   report_uncertainty: true
   preserve_raw_per_seed_results: true
+
+result_tiers:
+  smoke:
+    purpose: validate_environment_adapter_shapes_jit_gradients_and_artifacts
+    allowed_budget: quick_or_shortened
+    allowed_seeds: 1
+    paper_status: prohibited
+  pilot:
+    purpose: debug_learning_and_freeze_architectures_hyperparameters_and_failures
+    allowed_budget: may_be_shorter_than_published_reference
+    typical_seed_count: 3
+    paper_status: development_only
+  registered_final:
+    purpose: evaluate_frozen_methods_on_paired_seed_manifests
+    budget_rule: use_published_reference_steps_for_pobax
+    target_seed_count: 30
+    paper_status: eligible_after_all_release_gates_pass
 
 stages:
   local_diagnostic:
@@ -70,28 +87,94 @@ stages:
       - arcmind_ssm_only
     remaining_required_adapters:
       - privileged_observation_upper_references
+      - positional_mlp
+      - fast_and_forgetful_memory
+      - stable_hadamard_memory
     tasks:
       - simple_chain
       - tmaze_10
       - rocksample_11_11
       - battleship_10
-      - HalfCheetah-P-v0
       - HalfCheetah-V-v0
       - Navix-DMLab-Maze-01-v0
-    note: Quick cells validate infrastructure only and are prohibited as paper results.
+    note: >-
+      Simple Chain and quick cells validate infrastructure only. They are
+      prohibited as paper accuracy results. HalfCheetah-P-v0 is exposed by the
+      library but is not a registered POBAX paper task.
 
   pomdp_registered:
     benchmark: POBAX
     implementation: shared_jax_ppo
-    seeds: [1103, 2207, 3301, 4409, 5519]
-    minimum_seeds_for_inexpensive_tasks: 10
+    source: https://rlj.cs.umass.edu/2025/papers/RLJ_RLC_2025_153.pdf
+    initial_seed_manifest: [1103, 2207, 3301, 4409, 5519]
+    target_final_seed_count: 30
+    minimum_seed_count_for_preliminary_tables: 10
     policy_selection: final_policy_after_fixed_interaction_budget
-    tuning_seeds: [1103, 2207, 3301]
+    development_tuning_seeds: [1103, 2207, 3301]
+    registered_tuning_seed_rule: match_published_task_count
+    required_policy_cores:
+      - memoryless_mlp
+      - positional_mlp
+      - frame_stack_mlp
+      - gru
+      - lstm
+      - fast_and_forgetful_memory
+      - stable_hadamard_memory
+      - lru
+      - s4d
+      - s5rl
+      - transformer_xl
+      - arcmind
+      - arcmind_unordered
+      - arcmind_no_memory
+      - arcmind_no_ssm
+      - arcmind_no_gate
+    registered_tasks:
+      tmaze_10:
+        environment_id: tmaze_10
+        category: object_uncertainty_and_tracking
+        published_train_steps: 1000000
+        published_tuning_seed_count: 5
+        published_final_seed_count: 30
+      rocksample_11_11:
+        environment_id: rocksample_11_11
+        category: object_uncertainty
+        published_train_steps: 5000000
+        published_tuning_seed_count: 5
+        published_final_seed_count: 30
+      battleship_10:
+        environment_id: battleship_10
+        category: spatial_uncertainty_and_episode_nonstationarity
+        published_train_steps: 10000000
+        published_tuning_seed_count: 10
+        published_final_seed_count: 30
+      walker_velocity_only:
+        environment_id: Walker-V-v0
+        category: moment_features
+        published_train_steps: 50000000
+        published_tuning_seed_count: 5
+        published_final_seed_count: 30
+        status: pending_runner_adapter
+      halfcheetah_velocity_only:
+        environment_id: HalfCheetah-V-v0
+        category: moment_features
+        published_train_steps: 50000000
+        published_tuning_seed_count: 5
+        published_final_seed_count: 30
+      navix_dmlab_maze_01:
+        environment_id: Navix-DMLab-Maze-01-v0
+        category: spatial_uncertainty_and_episode_nonstationarity
+        published_train_steps: 10000000
+        published_tuning_seed_count: 5
+        published_final_seed_count: 30
     note: >-
       Freeze one equal-cardinality tuning grid on the tuning seeds before
       registered evaluation. Never choose checkpoints or hyperparameters from
-      registered-seed evaluation returns. Expand seeds only after the pilot
-      freezes hyperparameters.
+      registered-seed evaluation returns. The three development tuning seeds
+      above are for pilot screening only. Registered tuning must use the
+      published task-specific counts recorded above. A result with fewer than
+      30 final seeds must state that it does not match the published POBAX
+      final-seed count.
 
 statistics:
   bootstrap_resamples: 10000

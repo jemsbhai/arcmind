@@ -53,12 +53,15 @@ REFERENCE_IMPLEMENTATIONS = {
     },
 }
 
-MINIMUM_EVALUATION_STEPS = {
-    # POBAX's HalfCheetah variants inherit a 1,000-step episode horizon.
-    # Evaluating for fewer transitions can therefore produce no completed
-    # episode even when the policy and environment are functioning correctly.
-    "HalfCheetah-P-v0": 1_024,
-    "HalfCheetah-V-v0": 1_024,
+MAX_EPISODE_STEPS = {
+    # Verified against the pinned POBAX environment parameters.
+    "simple_chain": 10,
+    "tmaze_10": 1_000,
+    "rocksample_11_11": 1_000,
+    "battleship_10": 1_000,
+    "HalfCheetah-P-v0": 1_000,
+    "HalfCheetah-V-v0": 1_000,
+    "Navix-DMLab-Maze-01-v0": 2_000,
 }
 
 
@@ -289,17 +292,20 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     jax.block_until_ready(result.params)
     training_seconds = time.perf_counter() - start
-    evaluation_steps = max(
-        args.evaluation_steps,
-        MINIMUM_EVALUATION_STEPS.get(args.environment, 0),
+    if args.evaluation_episodes_per_env < 1:
+        raise ValueError("evaluation_episodes_per_env must be positive")
+    maximum_episode_steps = MAX_EPISODE_STEPS[args.environment]
+    evaluation_steps = (
+        args.evaluation_episodes_per_env * maximum_episode_steps
     )
     evaluation = learner.evaluate(
         result.params,
         key=random.PRNGKey(args.seed + 50_000),
+        episodes_per_environment=args.evaluation_episodes_per_env,
         evaluation_steps=evaluation_steps,
     )
     record: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "development_pilot_not_for_paper",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "environment": args.environment,
@@ -319,7 +325,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "actual_environment_steps": (
             ppo_config.num_updates * ppo_config.steps_per_update
         ),
-        "actual_evaluation_steps": evaluation_steps,
+        "evaluation_episodes_per_environment": (
+            args.evaluation_episodes_per_env
+        ),
+        "evaluation_max_episode_steps": maximum_episode_steps,
+        "actual_evaluation_steps_per_environment": evaluation_steps,
+        "actual_evaluation_transitions": evaluation_steps * num_envs,
         "training_seconds": training_seconds,
         "training": finite_metrics(result.final_metrics),
         "evaluation": evaluation,
@@ -344,15 +355,7 @@ def main() -> None:
     parser.add_argument(
         "--environment",
         default="tmaze_10",
-        choices=(
-            "simple_chain",
-            "tmaze_10",
-            "rocksample_11_11",
-            "battleship_10",
-            "HalfCheetah-P-v0",
-            "HalfCheetah-V-v0",
-            "Navix-DMLab-Maze-01-v0",
-        ),
+        choices=tuple(MAX_EPISODE_STEPS),
     )
     parser.add_argument(
         "--model",
@@ -387,7 +390,12 @@ def main() -> None:
     parser.add_argument("--rollout-steps", type=int, default=64)
     parser.add_argument("--update-epochs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
-    parser.add_argument("--evaluation-steps", type=int, default=512)
+    parser.add_argument(
+        "--evaluation-episodes-per-env",
+        type=int,
+        default=4,
+        help="fixed completed episodes retained from each vector environment",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--require-gpu", action="store_true")

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from benchmarks.pobax.arcmind_reference import ReferenceConfig
 from benchmarks.pobax.baseline_cores import (
@@ -20,6 +22,7 @@ from benchmarks.pobax.baseline_cores import (
     match_baseline_width,
 )
 from benchmarks.pobax.policy_core import ArcMindPolicyCore, augment_policy_input
+from benchmarks.pobax.run_pilot import MAX_EPISODE_STEPS
 from benchmarks.pobax.sequence_cores import (
     DiagonalSSMPolicyCore,
     FullCausalTransformerPolicyCore,
@@ -29,11 +32,92 @@ from benchmarks.pobax.sequence_cores import (
     match_sequence_width,
 )
 from benchmarks.pobax.shared_ppo import (
+    PPOConfig,
+    Rollout,
+    SharedPPO,
     categorical_entropy,
     categorical_log_probability,
     gaussian_entropy,
     gaussian_log_probability,
 )
+
+
+class DummyObservation(NamedTuple):
+    obs: jax.Array
+    action_mask: jax.Array
+
+
+class IntegerRewardMaskedEnvironment:
+    """Minimal JAX environment matching POBAX's vector interface."""
+
+    action_dim = 4
+
+    @staticmethod
+    def reset(keys, params):
+        del params
+        batch_size = keys.shape[0]
+        return (
+            DummyObservation(
+                obs=jnp.zeros((batch_size, 1), dtype=jnp.float32),
+                action_mask=jnp.ones(
+                    (batch_size, IntegerRewardMaskedEnvironment.action_dim),
+                    dtype=jnp.bool_,
+                ),
+            ),
+            jnp.zeros((batch_size,), dtype=jnp.int32),
+        )
+
+    @staticmethod
+    def step(keys, state, action, params):
+        del keys, params
+        next_state = state + 1
+        action_mask = (
+            jnp.arange(IntegerRewardMaskedEnvironment.action_dim)[None, :]
+            != action[:, None]
+        )
+        observation = DummyObservation(
+            obs=next_state[:, None].astype(jnp.float32),
+            action_mask=action_mask,
+        )
+        reward = jnp.ones_like(state, dtype=jnp.int32)
+        done = jnp.zeros_like(state, dtype=jnp.bool_)
+        info = {
+            "returned_episode_returns": jnp.zeros_like(
+                state,
+                dtype=jnp.float32,
+            ),
+            "returned_episode": done,
+        }
+        return observation, next_state, reward, done, info
+
+
+class FixedHorizonEnvironment(IntegerRewardMaskedEnvironment):
+    """Two workers with deterministic two-step and three-step episodes."""
+
+    @staticmethod
+    def step(keys, state, action, params):
+        del keys, action, params
+        horizons = jnp.asarray([2, 3], dtype=jnp.int32)
+        next_elapsed = state + 1
+        done = next_elapsed >= horizons
+        next_state = jnp.where(done, 0, next_elapsed)
+        observation = DummyObservation(
+            obs=next_state[:, None].astype(jnp.float32),
+            action_mask=jnp.ones(
+                (state.shape[0], FixedHorizonEnvironment.action_dim),
+                dtype=jnp.bool_,
+            ),
+        )
+        reward = jnp.ones_like(state, dtype=jnp.float32)
+        info = {
+            "returned_episode_returns": jnp.where(
+                done,
+                next_elapsed.astype(jnp.float32),
+                0.0,
+            ),
+            "returned_episode": done,
+        }
+        return observation, next_state, reward, done, info
 
 
 def tiny_arcmind_config() -> ReferenceConfig:
@@ -567,6 +651,187 @@ def test_categorical_statistics() -> None:
         np.log(2.0),
         rtol=1e-6,
     )
+
+
+def test_masked_rollout_log_probabilities_match_before_update() -> None:
+    """PPO must recompute the same distribution support used at collection."""
+    time_steps = 3
+    batch_size = 2
+    action_dim = 4
+    core = MemorylessMLPPolicyCore(
+        input_dim=5,
+        action_dim=action_dim,
+        hidden_size=7,
+    )
+    params = core.initialize(jax.random.PRNGKey(601))
+    initial_state = core.initial_state(batch_size)
+    policy_inputs = jax.random.normal(
+        jax.random.PRNGKey(602),
+        (time_steps, batch_size, 5),
+    )
+    resets = jnp.asarray(
+        [[True, True], [False, False], [False, True]],
+    )
+    _, logits, values = core.apply_sequence(
+        params,
+        initial_state,
+        policy_inputs,
+        resets,
+    )
+    action_mask = jnp.asarray(
+        [
+            [[True, False, True, False], [False, True, True, False]],
+            [[False, True, False, True], [True, False, False, True]],
+            [[True, True, False, False], [False, False, True, True]],
+        ],
+    )
+    masked_logits = jnp.where(action_mask, logits, -1e9)
+    actions = jnp.argmax(masked_logits, axis=-1).astype(jnp.int32)
+    old_log_probability = categorical_log_probability(
+        masked_logits,
+        actions,
+    )
+    rollout = Rollout(
+        policy_input=policy_inputs,
+        reset=resets,
+        action=actions,
+        old_log_probability=old_log_probability,
+        old_value=values,
+        reward=jnp.zeros_like(values),
+        done=jnp.zeros_like(resets),
+        episode_return=jnp.zeros_like(values),
+        episode_complete=jnp.zeros_like(resets),
+        action_mask=action_mask,
+    )
+    learner = SharedPPO(
+        policy_core=core,
+        environment=None,
+        environment_params=None,
+        action_dim=action_dim,
+        config=PPOConfig(
+            total_steps=4,
+            num_envs=2,
+            rollout_steps=2,
+            num_minibatches=1,
+        ),
+    )
+    _, (_, _, _, approximate_kl) = learner._loss(
+        params,
+        initial_state,
+        rollout,
+        jnp.ones_like(values),
+        values,
+    )
+    np.testing.assert_allclose(approximate_kl, 0.0, atol=1e-7)
+
+
+def test_collection_preserves_varying_masks_and_casts_integer_rewards() -> None:
+    """Masked integer-reward environments must satisfy the recurrent scan."""
+    environment = IntegerRewardMaskedEnvironment()
+    core = MemorylessMLPPolicyCore(
+        input_dim=7,
+        action_dim=environment.action_dim,
+        hidden_size=7,
+    )
+    learner = SharedPPO(
+        policy_core=core,
+        environment=environment,
+        environment_params=None,
+        action_dim=environment.action_dim,
+        config=PPOConfig(
+            total_steps=4,
+            num_envs=2,
+            rollout_steps=2,
+            num_minibatches=1,
+        ),
+    )
+    params = core.initialize(jax.random.PRNGKey(610))
+    runner = learner.initialize_runner(jax.random.PRNGKey(611))
+    _, _, rollout, _ = learner._collect_jit(params, runner)
+    assert rollout.action_mask.shape == (2, 2, environment.action_dim)
+    assert not np.array_equal(
+        np.asarray(rollout.action_mask[0]),
+        np.asarray(rollout.action_mask[1]),
+    )
+    assert rollout.reward.dtype == jnp.float32
+    returns, completed = learner._evaluate_jit(
+        params,
+        jax.random.PRNGKey(612),
+        2,
+    )
+    assert returns.shape == completed.shape == (2, 2)
+
+
+def test_evaluation_keeps_equal_completed_episodes_per_environment() -> None:
+    environment = FixedHorizonEnvironment()
+    core = MemorylessMLPPolicyCore(
+        input_dim=7,
+        action_dim=environment.action_dim,
+        hidden_size=7,
+    )
+    learner = SharedPPO(
+        policy_core=core,
+        environment=environment,
+        environment_params=None,
+        action_dim=environment.action_dim,
+        config=PPOConfig(
+            total_steps=4,
+            num_envs=2,
+            rollout_steps=2,
+            num_minibatches=1,
+        ),
+    )
+    params = core.initialize(jax.random.PRNGKey(620))
+    result = learner.evaluate(
+        params,
+        key=jax.random.PRNGKey(621),
+        episodes_per_environment=2,
+        evaluation_steps=6,
+    )
+    assert result["episodes"] == 4
+    assert result["episodes_per_environment"] == 2
+    assert result["returns_by_environment"] == [[2.0, 2.0], [3.0, 3.0]]
+
+
+def test_evaluation_fails_when_any_environment_has_too_few_episodes() -> None:
+    environment = FixedHorizonEnvironment()
+    core = MemorylessMLPPolicyCore(
+        input_dim=7,
+        action_dim=environment.action_dim,
+        hidden_size=7,
+    )
+    learner = SharedPPO(
+        policy_core=core,
+        environment=environment,
+        environment_params=None,
+        action_dim=environment.action_dim,
+        config=PPOConfig(
+            total_steps=4,
+            num_envs=2,
+            rollout_steps=2,
+            num_minibatches=1,
+        ),
+    )
+    params = core.initialize(jax.random.PRNGKey(630))
+    with pytest.raises(RuntimeError, match=r"completed=\[2, 1\]"):
+        learner.evaluate(
+            params,
+            key=jax.random.PRNGKey(631),
+            episodes_per_environment=2,
+            evaluation_steps=5,
+        )
+
+
+def test_runner_horizons_cover_every_accepted_environment() -> None:
+    assert MAX_EPISODE_STEPS == {
+        "simple_chain": 10,
+        "tmaze_10": 1_000,
+        "rocksample_11_11": 1_000,
+        "battleship_10": 1_000,
+        "HalfCheetah-P-v0": 1_000,
+        "HalfCheetah-V-v0": 1_000,
+        "Navix-DMLab-Maze-01-v0": 2_000,
+    }
 
 
 def test_gaussian_statistics() -> None:

@@ -69,6 +69,7 @@ class Rollout(NamedTuple):
     done: Array
     episode_return: Array
     episode_complete: Array
+    action_mask: Array | None = None
 
 
 class PPOTrainResult(NamedTuple):
@@ -155,6 +156,16 @@ class SharedPPO:
             return logits
         return jnp.where(action_mask.astype(jnp.bool_), logits, -1e9)
 
+    def _mask_rollout_logits(
+        self,
+        action_mask: Array | None,
+        logits: Array,
+    ) -> Array:
+        """Restore the collection-time categorical support during PPO updates."""
+        if self.continuous_action or action_mask is None:
+            return logits
+        return jnp.where(action_mask.astype(jnp.bool_), logits, -1e9)
+
     def initialize_runner(self, key: Array) -> RunnerState:
         """Reset vector environments and the policy recurrence."""
         reset_key, runner_key = jax.random.split(key)
@@ -237,6 +248,7 @@ class SharedPPO:
                 action,
                 self.environment_params,
             )
+            reward = jnp.asarray(reward, dtype=jnp.float32)
             transition = Rollout(
                 policy_input=policy_input,
                 reset=carry.done,
@@ -247,6 +259,11 @@ class SharedPPO:
                 done=done,
                 episode_return=info["returned_episode_returns"],
                 episode_complete=info["returned_episode"],
+                action_mask=(
+                    None
+                    if self.continuous_action
+                    else carry.observation.action_mask
+                ),
             )
             new_carry = RunnerState(
                 observation=observation,
@@ -315,6 +332,7 @@ class SharedPPO:
             rollout.policy_input,
             rollout.reset,
         )
+        logits = self._mask_rollout_logits(rollout.action_mask, logits)
         if self.continuous_action:
             log_standard_deviation = params["distribution.log_std"]
             new_log_probability = gaussian_log_probability(
@@ -530,6 +548,7 @@ class SharedPPO:
                     self.environment_params,
                 )
             )
+            reward = jnp.asarray(reward, dtype=jnp.float32)
             new_carry = RunnerState(
                 observation=observation,
                 environment_state=environment_state,
@@ -557,20 +576,46 @@ class SharedPPO:
         params: Params,
         *,
         key: Array,
+        episodes_per_environment: int,
         evaluation_steps: int,
-    ) -> dict[str, float | int | None]:
-        """Evaluate the deterministic policy on fresh environment seeds."""
+    ) -> dict[str, object]:
+        """Evaluate the first fixed number of episodes from every environment."""
+        if episodes_per_environment < 1:
+            raise ValueError("episodes_per_environment must be positive")
+        if evaluation_steps < 1:
+            raise ValueError("evaluation_steps must be positive")
         returns, completed = self._evaluate_jit(params, key, evaluation_steps)
         completed_host = np.asarray(completed, dtype=bool)
-        return_host = np.asarray(returns)[completed_host]
-        if return_host.size == 0:
-            return {
-                "mean_return": None,
-                "median_return": None,
-                "episodes": 0,
-            }
+        returns_host = np.asarray(returns)
+        completed_counts = np.sum(completed_host, axis=0)
+        if np.any(completed_counts < episodes_per_environment):
+            raise RuntimeError(
+                "Evaluation scan did not complete the required episodes in "
+                "every vector environment: "
+                f"required={episodes_per_environment}, "
+                f"completed={completed_counts.tolist()}, "
+                f"scan_steps={evaluation_steps}"
+            )
+
+        selected_returns = np.stack(
+            [
+                returns_host[
+                    np.flatnonzero(completed_host[:, environment_index])[
+                        :episodes_per_environment
+                    ],
+                    environment_index,
+                ]
+                for environment_index in range(self.config.num_envs)
+            ],
+            axis=0,
+        )
+        flat_returns = selected_returns.reshape(-1)
         return {
-            "mean_return": float(np.mean(return_host)),
-            "median_return": float(np.median(return_host)),
-            "episodes": int(return_host.size),
+            "mean_return": float(np.mean(flat_returns)),
+            "median_return": float(np.median(flat_returns)),
+            "episodes": int(flat_returns.size),
+            "episodes_per_environment": episodes_per_environment,
+            "num_environments": self.config.num_envs,
+            "scan_steps_per_environment": evaluation_steps,
+            "returns_by_environment": selected_returns.tolist(),
         }

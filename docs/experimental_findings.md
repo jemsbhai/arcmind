@@ -234,6 +234,60 @@ with each actual experiment.
   passes audit. Replace it only by adding new entries, never by deleting the
   historical absence.
 
+### F-DIAG-004: Clean-release delayed-recall replication
+
+- Class: `diagnostic evidence`
+- Status: completed, one seed, not for a paper claim
+- Date planned: 2026-07-23, before outcome inspection
+- Code: clean `v0.2.0` checkout at commit
+  `302e70f373ad308a7c65946d07003df8d7aeda0d`
+- Task: delayed sensor recall with 4,096 training examples, 1,024 validation
+  examples, 2,048 test examples, 20 epochs, and seed `2207`
+- Models: memoryless MLP, GRU, LSTM, causal Transformer, ArcMind SSM-only,
+  unordered ArcMind, and ordered ArcMind
+- Selection: minimum validation NLL, followed by exactly one test evaluation
+- Prediction: full causal attention will remain strongest. ArcMind will
+  improve short-lag accuracy relative to its SSM-only ablation, but long-lag
+  accuracy will remain near chance. The ordered and unordered variants will
+  have no practically clear separation in this single seed.
+- Decision rule: if exact recall does not improve short-lag accuracy over the
+  SSM-only ablation, inspect addressing and optimization before any registered
+  diagnostic. If it improves short-lag but not long-lag accuracy, narrow the
+  mechanism claim to bounded recall. Do not use one seed to infer an ordering
+  effect.
+- Raw artifact directory:
+  `benchmark_results/delayed_recall/dev-v0.2.0-seed2207-full`
+- Observation: the causal Transformer reached `0.9994` test accuracy,
+  ArcMind reached `0.7745`, unordered ArcMind reached `0.7292`, the SSM-only
+  ablation reached `0.6481`, GRU reached `0.4821`, LSTM reached `0.4765`, and
+  the memoryless MLP reached `0.2518`. ArcMind short-lag accuracy was `0.9991`,
+  compared with `0.6925` for SSM-only and `0.9350` for unordered ArcMind.
+  ArcMind long-lag accuracy was `0.2519`, compared with `0.5446` for SSM-only,
+  `0.2504` for unordered ArcMind, and `0.9996` for the Transformer.
+- Prediction check: the prediction was partly supported. Full causal
+  attention remained strongest, and ArcMind improved short-lag recall while
+  remaining at chance on long lags. Contrary to the implicit expectation that
+  adding recall would not damage the recurrent path, SSM-only was `0.2927`
+  more accurate than ArcMind on long lags. Ordered ArcMind was `0.0453` more
+  accurate overall and `0.0641` more accurate on short lags than unordered
+  ArcMind, which is a visible one-seed difference but not evidence of a
+  general ordering effect.
+- Interpretation: the exact-recall path solves queries whose relevant writes
+  remain inside its bounded window, but the current fusion does not preserve
+  the SSM-only model's longer-lag behavior. The result points to interference
+  in recall or gating, not a broad memory advantage. The Transformer result
+  remains a strong falsification pressure test.
+- Required follow-up: stratify by exact decision lag and overwrite count,
+  verify the latest-value oracle, add a gate diagnostic that reports fast and
+  slow path contributions at query time, and test whether recall can abstain
+  outside its valid window. Do not expand to registered seeds before this
+  interference is understood.
+- Provenance: all seven raw records identify the clean release commit and
+  `dirty: false`. File hashes are recorded in `checksums.sha256`; the aggregate
+  is `summary.json`. The seven cells used 1,032.47 local GPU training seconds.
+- Evidence restriction: this run is development evidence and is not eligible
+  for a paper performance table.
+
 ## Finding promotion checklist
 
 A finding may be cited as registered evidence only when all answers are yes:

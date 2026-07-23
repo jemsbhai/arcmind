@@ -68,29 +68,51 @@ something to add without a controlled comparison.
 
 ### Track A: memory mechanism (primary)
 
-Use [POBAX](https://openreview.net/forum?id=HUTCbYOW5E) as the primary suite.
+Use the published
+[POBAX benchmark](https://rlj.cs.umass.edu/2025/papers/RLJ_RLC_2025_153.pdf)
+as the primary suite, with the
+[official source pinned to commit
+`a5e1d62d14e4efe783885b9d4f19cffa2a568eec`](https://github.com/taodav/pobax/tree/a5e1d62d14e4efe783885b9d4f19cffa2a568eec).
 POBAX was designed around two requirements ArcMind needs: coverage of distinct
 forms of partial observability and a measurable gap between memoryless and
-more-informed agents. Use representative tasks from localization/mapping,
-visual or state control, games, and information omission. Prefer
-low-dimensional observations for the first paper; a vision encoder would
-confound the backbone comparison. The initial task set is Simple Chain,
-T-Maze-10, RockSample 11x11, Battleship-10, the position-only and
-velocity-only masked MuJoCo tasks, and DMLab MiniGrid Maze-01. Pixel control
-and no-inventory Crafter are held out for a later encoder study.
+more-informed agents. Prefer low-dimensional observations for the first paper;
+a vision encoder would confound the backbone comparison.
+
+The registered low-dimensional task set is:
+
+- `tmaze_10`, which tests object uncertainty and tracking;
+- `rocksample_11_11`, which tests object uncertainty;
+- `battleship_10`, which tests spatial uncertainty and episode
+  nonstationarity;
+- `Walker-V-v0` and `HalfCheetah-V-v0`, which retain only velocity features,
+  require history to infer missing position information, and test the moment
+  features category; and
+- `Navix-DMLab-Maze-01-v0`, which tests spatial uncertainty and episode
+  nonstationarity.
+
+The environment identifiers above are the names used by the pinned source.
+`HalfCheetah-P-v0` is exposed by the library but is not one of the two masked
+MuJoCo tasks validated for the published POBAX benchmark. Simple Chain has one
+action and remains an infrastructure check only. Pixel control and
+no-inventory Crafter are held out for a later encoder study.
 
 Use [POPGym](https://arxiv.org/abs/2303.01859) as the controlled memory suite
-and [Memory Maze](https://arxiv.org/abs/2210.13383) only as a stretch
-evaluation after the low-dimensional claim is established.
+and [Memory Gym](https://www.jmlr.org/papers/v26/24-0043.html) as the first
+external stress suite. Memory Gym supplies finite and endless 2D tasks with
+official GRU and Transformer-XL references. Use
+[Memory Maze](https://openreview.net/pdf?id=yHLvIlE9RGN) only as a later 3D
+stretch evaluation after the low-dimensional claim is established.
 
 Mandatory controls and baselines:
 
-- memoryless MLP and fixed frame stack;
+- memoryless MLP, positional MLP, and fixed frame stack;
 - Elman RNN, GRU, and LSTM;
 - TCN;
-- memory traces, LRU, S4D, S5/S5RL, and a modern stable diagonal SSM;
+- Fast and Forgetful Memory, Stable Hadamard Memory, memory traces, LRU, S4D,
+  S5/S5RL, and a modern stable diagonal SSM;
 - the repository's selective SSM without exact recall;
-- causal Transformer or GTrXL at matched parameter count;
+- a full-window causal Transformer and the published POBAX Transformer-XL
+  configuration at matched parameter count;
 - ArcMind without age encoding, without episodic memory, without gating, and
   without the SSM path;
 - a fully observable policy or privileged-state upper reference where the
@@ -100,9 +122,34 @@ POBAX is JAX-native. All accuracy comparisons must use one PPO
 implementation, optimizer, rollout collector, and update schedule. The ArcMind
 recurrence therefore requires a JAX benchmark implementation with numerical
 parity tests against this PyTorch package; comparing separate PyTorch and JAX
-learners would introduce an unacceptable framework confound. Include POBAX's
-native recurrent PPO, memoryless PPO, GTrXL, and lambda-discrepancy results
-under the same tuning budget.
+learners would introduce an unacceptable framework confound.
+
+[Fast and Forgetful Memory](https://proceedings.neurips.cc/paper_files/paper/2023/hash/e3bf2f0f10774c474de22a12cb060e2c-Abstract-Conference.html)
+has an
+[official JAX recurrence at commit
+`b3f94d2a0f35ba05089faf19ab1df846057cf8b6`](https://github.com/proroklab/ffm/tree/b3f94d2a0f35ba05089faf19ab1df846057cf8b6/standalone_jax).
+It accepts recurrent state and episode-done flags, so it can be ported as a
+policy core without changing PPO. The port still requires parameter, reset,
+sequence, and gradient parity tests against the official implementation.
+
+[Stable Hadamard Memory](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf)
+has [official PyTorch code at release `v1.1`, commit
+`40d73d44936e47a29e2c76a481d93c434b857ea1`](https://github.com/thaihungle/SHM/tree/40d73d44936e47a29e2c76a481d93c434b857ea1).
+Its memory equations can also serve as a policy core without adding an
+auxiliary loss or changing PPO. The repository includes PyTorch benchmark
+adapters with explicit recurrent state, but it does not expose a JAX streaming
+interface. A fair comparison therefore requires a JAX port with explicit
+initial state, asynchronous reset masks, explicit random-address keys, and a
+time-major scan. Test deterministic equations with a fixed address sequence
+against the released PyTorch adapter, and test stochastic addressing
+distributionally, before any benchmark result is eligible for the main table.
+
+POBAX reports recurrent PPO, lambda discrepancy with recurrent PPO, and
+Transformer-XL with PPO. Its repository enables GRU-style gates in the
+Transformer implementation by default. The paper must call a result
+Transformer-XL unless the exact gating configuration is recorded and verified
+as the GTrXL architecture. Published author results remain compatibility
+references unless ArcMind reproduces their complete tuning protocol.
 
 Contextual reference methods, when their code and task protocol can be
 reproduced, are
@@ -125,10 +172,29 @@ Primary metrics:
 - parameter count, peak accelerator memory, environment steps per second, and
   single-environment streaming latency.
 
-Run at least 10 paired training seeds per method-task cell for inexpensive
-POPGym tasks and at least 5 for the more expensive POBAX tasks. Use identical
-environment seeds and training budgets across models. The reporting procedure
-follows the uncertainty-aware recommendations in
+Classify every run before execution:
+
+- A smoke run checks imports, shapes, resets, compilation, gradients, and
+  artifact creation. Quick or 131,072-step cells are smoke evidence only.
+- A pilot run checks learnability and freezes architecture and tuning choices.
+  It may use shortened budgets and three to five development seeds, but it is
+  not paper evidence.
+- A registered final run uses frozen choices, paired seed manifests, and the
+  published interaction budget for every method in a task cell.
+
+The published POBAX budgets are 1 million steps for T-Maze-10, 5 million for
+RockSample11, 10 million for Battleship-10, 50 million each for Walker-V and
+HalfCheetah-V, and 10 million for Navix-01. The paper uses 5 tuning seeds for
+T-Maze, RockSample, masked MuJoCo, and Navix, 10 tuning seeds for Battleship,
+then 30 final seeds for every reported environment. ArcMind targets 30 paired
+final seeds per main method-task cell. A preliminary table may use 10 paired
+seeds, but it must not be described as matching the published POBAX final
+protocol.
+
+Use identical environment seeds and training budgets across models. Give every
+architecture the same number of tuning trials, even when its search space
+differs. The reporting procedure follows the uncertainty-aware recommendations
+in
 [Deep Reinforcement Learning at the Edge of the Statistical
 Precipice](https://proceedings.neurips.cc/paper/2021/hash/f514cec81cb148559cf475e7426eed5e-Abstract.html).
 
