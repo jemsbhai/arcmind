@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import asdict
 
 import jax
 import jax.numpy as jnp
@@ -20,6 +21,7 @@ from benchmarks.pobax.shared_ppo import (
 from benchmarks.pobax.shm_core import (
     POPGYM_SHM_MEMORY_SIZE,
     SHM_ADDRESS_ROWS,
+    SHM_MEMORY_CLIP,
     SHM_SOURCE_COMMIT,
     SHMPolicyCore,
     match_shm_hidden_size,
@@ -115,6 +117,18 @@ def test_source_pin_and_scientific_defaults_are_explicit():
     assert core.address_mode == "paper_uniform"
     assert core.memory_size == POPGYM_SHM_MEMORY_SIZE == 16
     assert SHM_ADDRESS_ROWS == 128
+    assert SHM_MEMORY_CLIP == 100.0
+    assert core.memory_clip == SHM_MEMORY_CLIP
+    assert asdict(core)["memory_clip"] == SHM_MEMORY_CLIP
+
+    compat = SHMPolicyCore(
+        input_dim=7,
+        action_dim=2,
+        hidden_size=9,
+        address_mode="v1_1_popgym_compat",
+    )
+    assert compat.memory_clip is None
+    assert asdict(compat)["memory_clip"] is None
 
 
 def test_initialization_has_pinned_parameterization_and_source_distributions():
@@ -564,6 +578,102 @@ def test_step_sequence_and_keyed_collection_are_jittable_and_differentiable():
     assert float(jnp.linalg.norm(gradients["shm.calibration.kernel"])) > 0.0
     assert float(jnp.linalg.norm(gradients["actor.kernel"])) > 0.0
     assert float(jnp.linalg.norm(gradients["critic.kernel"])) > 0.0
+
+
+def test_released_memory_clamp_prevents_long_sequence_overflow():
+    core = SHMPolicyCore(
+        input_dim=2,
+        action_dim=2,
+        hidden_size=3,
+        memory_size=2,
+    )
+    params = core.initialize(jax.random.PRNGKey(221))
+    params = {
+        **params,
+        "shm.norm.scale": jnp.ones((2,)),
+        "shm.norm.bias": jnp.zeros((2,)),
+        "shm.key.kernel": jnp.array([[1.0, 1.0], [-1.0, -1.0]]),
+        "shm.query.kernel": jnp.array([[1.0, 1.0], [-1.0, -1.0]]),
+        "shm.value.kernel": jnp.array([[1.0, 1.0], [-1.0, -1.0]]),
+        "shm.calibration.kernel": jnp.array([[20.0, 20.0], [-20.0, -20.0]]),
+        "shm.eta.kernel": jnp.ones((2, 1)),
+        "shm.theta": jnp.ones((SHM_ADDRESS_ROWS, 2)),
+    }
+    time_steps = 1_024
+    policy_inputs = jnp.tile(jnp.array([[1.0, -1.0]]), (time_steps, 1, 1))
+    resets = jnp.zeros((time_steps, 1), dtype=jnp.bool_)
+    addresses = jnp.zeros((time_steps, 1), dtype=jnp.int32)
+
+    def loss(candidate_params):
+        final_state, logits, values = core.apply_sequence(
+            candidate_params,
+            core.initial_state(1),
+            policy_inputs,
+            resets,
+            addresses,
+        )
+        return (
+            jnp.mean(jnp.square(final_state))
+            + jnp.mean(jnp.square(logits))
+            + jnp.mean(jnp.square(values))
+        )
+
+    final_state, logits, values = jax.jit(core.apply_sequence)(
+        params,
+        core.initial_state(1),
+        policy_inputs,
+        resets,
+        addresses,
+    )
+    gradients = jax.jit(jax.grad(loss))(params)
+
+    assert float(jnp.max(jnp.abs(final_state))) == SHM_MEMORY_CLIP
+    assert bool(jnp.all(jnp.isfinite(final_state)))
+    assert bool(jnp.all(jnp.isfinite(logits)))
+    assert bool(jnp.all(jnp.isfinite(values)))
+    assert bool(jnp.isfinite(loss(params)))
+    assert all(bool(jnp.all(jnp.isfinite(gradient))) for gradient in jax.tree.leaves(gradients))
+
+
+def test_popgym_compat_preserves_unclamped_recurrence():
+    core = SHMPolicyCore(
+        input_dim=2,
+        action_dim=2,
+        hidden_size=3,
+        memory_size=2,
+        address_mode="v1_1_popgym_compat",
+    )
+    params = core.initialize(jax.random.PRNGKey(222))
+    params = {
+        **params,
+        "shm.norm.scale": jnp.ones((2,)),
+        "shm.norm.bias": jnp.zeros((2,)),
+        "shm.key.kernel": jnp.array([[1.0, 1.0], [-1.0, -1.0]]),
+        "shm.query.kernel": jnp.array([[1.0, 1.0], [-1.0, -1.0]]),
+        "shm.value.kernel": jnp.array([[1.0, 1.0], [-1.0, -1.0]]),
+        "shm.calibration.kernel": jnp.array([[20.0, 20.0], [-20.0, -20.0]]),
+        "shm.eta.kernel": jnp.ones((2, 1)),
+        "shm.theta": jnp.ones((SHM_ADDRESS_ROWS, 2)),
+    }
+    time_steps = 16
+    policy_inputs = jnp.tile(jnp.array([[1.0, -1.0]]), (time_steps, 1, 1))
+    resets = jnp.zeros((time_steps, 1), dtype=jnp.bool_)
+    addresses = core.sample_addresses(jax.random.PRNGKey(223), resets.shape)
+
+    final_state, logits, values = jax.jit(core.apply_sequence)(
+        params,
+        core.initial_state(1),
+        policy_inputs,
+        resets,
+        addresses,
+    )
+
+    assert core.memory_clip is None
+    np.testing.assert_array_equal(addresses, 0)
+    assert float(jnp.max(jnp.abs(final_state))) > SHM_MEMORY_CLIP
+    assert bool(jnp.all(jnp.isfinite(final_state)))
+    assert bool(jnp.all(jnp.isfinite(logits)))
+    assert bool(jnp.all(jnp.isfinite(values)))
 
 
 def test_accepts_the_registered_augmented_policy_input():

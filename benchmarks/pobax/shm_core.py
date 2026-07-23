@@ -1,8 +1,8 @@
 """Source-audited Stable Hadamard Memory policy core.
 
-This module translates the SHM POPGym cell released in ``thaihungle/SHM`` at
-commit ``40d73d44936e47a29e2c76a481d93c434b857ea1``. The translated memory
-equations are:
+This module translates the SHM cells released in ``thaihungle/SHM`` at commit
+``40d73d44936e47a29e2c76a481d93c434b857ea1``. The shared memory equations
+are:
 
 ```
 x_hat = LayerNorm(x)
@@ -25,6 +25,9 @@ The released sources disagree about address sampling. The paper and POMDP
 adapter sample uniformly from all 128 rows. The standalone and POPGym v1.1
 paths use ``uniform_(0, 1).long()``, which always selects row zero. Both
 behaviors are named here, with the paper mechanism as the scientific default.
+The POMDP adapter also clamps its recurrent matrix to ``[-100, 100]`` after
+each write, while the POPGym v1.1 path does not. The named modes preserve this
+second source distinction as well.
 
 Addresses are explicit inputs to ``step`` and ``apply_sequence``. Convenience
 methods can sample them from a key and return the sampled values, but callers
@@ -36,7 +39,7 @@ loss recomputation.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Literal, Mapping, Sequence
 
 import jax
@@ -50,6 +53,7 @@ SHM_SOURCE_COMMIT = "40d73d44936e47a29e2c76a481d93c434b857ea1"
 SHM_ADDRESS_BITS = 7
 SHM_ADDRESS_ROWS = 2**SHM_ADDRESS_BITS
 POPGYM_SHM_MEMORY_SIZE = 16
+SHM_MEMORY_CLIP = 100.0
 
 _LAYER_NORM_EPSILON = 1e-5
 _SUM_NORMALIZATION_EPSILON = 1e-5
@@ -125,6 +129,7 @@ class SHMPolicyCore:
     hidden_size: int
     memory_size: int = POPGYM_SHM_MEMORY_SIZE
     address_mode: AddressMode = "paper_uniform"
+    memory_clip: float | None = field(init=False)
     requires_policy_aux_replay: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
@@ -133,9 +138,14 @@ class SHMPolicyCore:
                 raise ValueError(f"{name} must be positive")
         if self.address_mode not in _VALID_ADDRESS_MODES:
             raise ValueError("address_mode must be 'paper_uniform' or 'v1_1_popgym_compat'")
+        object.__setattr__(
+            self,
+            "memory_clip",
+            SHM_MEMORY_CLIP if self.address_mode == "paper_uniform" else None,
+        )
 
     def initialize(self, key: Array) -> dict[str, Array]:
-        """Initialize the pinned POPGym cell and shared policy heads."""
+        """Initialize the pinned SHM projections and shared policy heads."""
         keys = iter(jax.random.split(key, 14))
         params = {
             "shm.norm.scale": jnp.ones((self.input_dim,)),
@@ -227,7 +237,7 @@ class SHMPolicyCore:
         reset: Array,
         addresses: Array,
     ) -> tuple[Array, Array]:
-        """Apply the pinned POPGym SHM equations at fixed addresses."""
+        """Apply the pinned SHM equations and active source mode."""
         normalized_input = _layer_norm(params, policy_input)
         key = jax.nn.relu(_linear_without_bias(params, "shm.key", normalized_input))
         query = jax.nn.relu(_linear_without_bias(params, "shm.query", normalized_input))
@@ -247,6 +257,16 @@ class SHMPolicyCore:
         )
         write = (eta * value)[..., :, None] * key[..., None, :]
         new_state = retained_state * calibration + write
+        if self.memory_clip is not None:
+            # The released POMDP SHM cell clamps the recurrent matrix after
+            # every calibration and write. This is distinct from learner-side
+            # gradient clipping: the recurrence can otherwise overflow during
+            # its forward pass, before an optimizer sees the gradients.
+            new_state = jnp.clip(
+                new_state,
+                min=-self.memory_clip,
+                max=self.memory_clip,
+            )
         memory_read = jnp.einsum(
             "...ij,...j->...i",
             new_state,
