@@ -3,13 +3,13 @@ Slow path: Tiny exact attention.
 
 Implements a small number of exact self-attention layers that run at
 decision rate (1-10 Hz) over a curated context: compressed SSM snapshots
-(episodic memory slots) plus the current instruction/goal embedding.
+(episodic memory slots) plus the current decision state.
 
-Design rationale:
-- Only 1-2 layers with 2-4 heads, based on Retrieval-Aware Distillation
-  (Feb 2026) showing 2-3 attention heads suffice for recall in SSM hybrids.
-- Sliding window attention (not full context) for memory efficiency.
-- Cross-conditions the fast SSM path via learned gating.
+The memory context is bounded and temporally ordered:
+- only the newest ``attn_window_size`` valid memory slots are visible;
+- learned relative-age embeddings distinguish otherwise permutation-invariant
+  memory reads; and
+- causal local attention is used within multi-token query sequences.
 """
 
 import math
@@ -33,7 +33,8 @@ class SlowAttentionLayer(nn.Module):
         self.window_size = config.attn_window_size
 
         assert config.d_model % config.num_attn_heads == 0, (
-            f"d_model ({config.d_model}) must be divisible by num_attn_heads ({config.num_attn_heads})"
+            f"d_model ({config.d_model}) must be divisible by "
+            f"num_attn_heads ({config.num_attn_heads})"
         )
 
         self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
@@ -92,26 +93,25 @@ class SlowAttentionLayer(nn.Module):
         scale = math.sqrt(self.head_dim)
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) / scale
 
-        # Causal mask (only for the non-memory portion)
+        query_positions = torch.arange(seq_len, device=x.device).unsqueeze(1)
+        key_positions = torch.arange(seq_len, device=x.device).unsqueeze(0)
+        local_causal_mask = (
+            (key_positions <= query_positions)
+            & (key_positions > query_positions - self.window_size)
+        )
+
+        # Memory is pre-trimmed by SlowAttention. It is fully visible to each
+        # query, while the query sequence itself uses causal local attention.
         if memory is not None:
             mem_len = memory.shape[1]
-            # Allow full attention to memory, causal within sequence
             causal_mask = torch.ones(seq_len, kv_len, device=x.device, dtype=torch.bool)
-            # Causal within the sequence portion (after memory)
-            seq_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-                diagonal=1,
-            )
-            causal_mask[:, mem_len:] = ~seq_mask
-            # Memory portion: always visible
+            causal_mask[:, mem_len:] = local_causal_mask
             causal_mask[:, :mem_len] = True
-            attn_weights = attn_weights.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+            causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+            attn_weights = attn_weights.masked_fill(~causal_mask, float("-inf"))
         else:
-            causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-                diagonal=1,
-            )
-            attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+            causal_mask = local_causal_mask.unsqueeze(0).unsqueeze(0)
+            attn_weights = attn_weights.masked_fill(~causal_mask, float("-inf"))
 
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_output = torch.matmul(attn_weights, v)
@@ -133,9 +133,34 @@ class SlowAttention(nn.Module):
     def __init__(self, config: ArcMindConfig):
         super().__init__()
         self.config = config
+        self.memory_age_embedding = nn.Embedding(
+            config.num_memory_slots,
+            config.d_model,
+        )
+        nn.init.normal_(self.memory_age_embedding.weight, std=0.02)
         self.layers = nn.ModuleList(
             [SlowAttentionLayer(config) for _ in range(config.num_attn_layers)]
         )
+
+    def _prepare_memory(self, memory: torch.Tensor | None) -> torch.Tensor | None:
+        """Apply the bounded window and encode age relative to the query."""
+        if memory is None or memory.shape[1] == 0:
+            return None
+
+        memory = memory[:, -self.config.attn_window_size :, :]
+        if self.config.ablate_temporal_encoding:
+            return memory
+
+        memory_len = memory.shape[1]
+        # Memory arrives oldest-to-newest. Age zero denotes the newest prior
+        # decision state; larger indices denote progressively older states.
+        ages = torch.arange(
+            memory_len - 1,
+            -1,
+            -1,
+            device=memory.device,
+        )
+        return memory + self.memory_age_embedding(ages).unsqueeze(0)
 
     def forward(
         self,
@@ -150,6 +175,7 @@ class SlowAttention(nn.Module):
         Returns:
             Output tensor, shape (batch, seq_len, d_model).
         """
+        memory = self._prepare_memory(memory)
         for layer in self.layers:
             x = layer(x, memory=memory)
         return x

@@ -91,8 +91,12 @@ class ArcMindModel(nn.Module):
         """
         Full forward pass over a sensor sequence.
 
-        In training, processes the entire sequence at once.
-        The slow path runs at strided intervals (every decision_stride steps).
+        In training, processes the entire sequence at once. Each call is
+        stateless: episodic slots are local to the supplied sequence and never
+        leak across independent minibatches.
+        The slow path runs at strided intervals (every decision_stride steps)
+        and its latest output is held between decisions. Memory is updated
+        causally so a timestep can never attend to a future snapshot.
         Ablation flags in config control which components are active.
 
         Args:
@@ -102,7 +106,7 @@ class ArcMindModel(nn.Module):
         Returns:
             Actions, shape (batch, seq_len, action_dim).
         """
-        batch, seq_len, _ = sensor_input.shape
+        _, seq_len, _ = sensor_input.shape
         cfg = self.config
 
         # Step 1: Tokenize sensor input
@@ -119,27 +123,58 @@ class ArcMindModel(nn.Module):
             # Skip attention entirely, use fast output for action head
             fused = fast_output
         else:
-            # Write periodic snapshots to memory
+            # Recall from strictly prior decision states, then write the
+            # current snapshot. This avoids duplicating the current state as
+            # both query and memory key. Batch memory remains differentiable
+            # and local to this call. Persistent runtime memory is reserved
+            # for the explicit streaming API.
             effective_memory = use_memory and not cfg.ablate_memory
-            if effective_memory:
-                for t in range(0, seq_len, self.decision_stride):
-                    snapshot = fast_output[:, t, :]
-                    self.memory.write(snapshot)
+            memory_slots: list[torch.Tensor] = []
 
-            memory_slots = self.memory.read() if effective_memory else None
-            slow_output = self.slow_attention(fast_output, memory=memory_slots)
+            fused_segments = []
+            for start in range(0, seq_len, self.decision_stride):
+                end = min(start + self.decision_stride, seq_len)
+                snapshot = fast_output[:, start, :]
 
-            # Step 5: Gate fast and slow outputs (unless ablated)
-            if cfg.ablate_ssm:
-                # No fast path to gate with — use slow output directly
-                fused = slow_output
-            elif cfg.ablate_gating:
-                # Simple average instead of learned gate
-                fused = 0.5 * fast_output + 0.5 * slow_output
-            else:
-                combined = torch.cat([fast_output, slow_output], dim=-1)
-                gate_values = self.gate(combined)
-                fused = gate_values * slow_output + (1 - gate_values) * fast_output
+                if effective_memory:
+                    memory_context = (
+                        torch.stack(memory_slots, dim=1)
+                        if memory_slots
+                        else None
+                    )
+                else:
+                    memory_context = None
+
+                # Attention is evaluated once per decision interval, matching
+                # streaming inference rather than every sensor-rate timestep.
+                slow_decision = self.slow_attention(
+                    snapshot.unsqueeze(1),
+                    memory=memory_context,
+                )
+
+                if effective_memory:
+                    compressed = self.memory.compressor(snapshot)
+                    memory_slots.append(compressed)
+                    memory_slots = memory_slots[-cfg.num_memory_slots :]
+
+                segment_fast = fast_output[:, start:end, :]
+                segment_slow = slow_decision.expand(-1, end - start, -1)
+
+                if cfg.ablate_ssm:
+                    fused_segment = segment_slow
+                elif cfg.ablate_gating:
+                    fused_segment = 0.5 * segment_fast + 0.5 * segment_slow
+                else:
+                    combined = torch.cat([segment_fast, segment_slow], dim=-1)
+                    gate_values = self.gate(combined)
+                    fused_segment = (
+                        gate_values * segment_slow
+                        + (1 - gate_values) * segment_fast
+                    )
+
+                fused_segments.append(fused_segment)
+
+            fused = torch.cat(fused_segments, dim=1)
 
         # Step 6: Action prediction
         actions = self.action_head(fused)
@@ -147,7 +182,7 @@ class ArcMindModel(nn.Module):
         return actions
 
     def reset_memory(self, batch_size: int = 1) -> None:
-        """Reset episodic memory for a new episode."""
+        """Reset persistent episodic memory used by streaming inference."""
         self.memory.reset(batch_size=batch_size, device=next(self.parameters()).device)
 
     def init_streaming(self, batch_size: int = 1) -> None:
@@ -158,12 +193,17 @@ class ArcMindModel(nn.Module):
         Initializes SSM hidden state, resets memory, and resets the
         internal step counter.
         """
-        device = next(self.parameters()).device
-        self.ssm_core.init_state(batch_size, device)
+        parameter = next(self.parameters())
+        device = parameter.device
+        dtype = parameter.dtype
+        self.ssm_core.init_state(batch_size, device, dtype=dtype)
         self.memory.reset(batch_size=batch_size, device=device)
         self._step_counter = 0
         self._last_slow_output = torch.zeros(
-            batch_size, self.config.d_model, device=device
+            batch_size,
+            self.config.d_model,
+            device=device,
+            dtype=dtype,
         )
 
     def step(self, sensor_frame: torch.Tensor) -> torch.Tensor:
@@ -198,15 +238,22 @@ class ArcMindModel(nn.Module):
             fused = fast_output
         else:
             if self._step_counter % self.decision_stride == 0:
-                # Write snapshot to memory
+                # Recall strictly prior snapshots. The current decision state
+                # is written only after attention has produced its output.
+                memory_slots = (
+                    self.memory.read(valid_only=True)
+                    if not cfg.ablate_memory
+                    else None
+                )
+                query = fast_output.unsqueeze(1)  # (batch, 1, d_model)
+                slow_out = self.slow_attention(
+                    query,
+                    memory=memory_slots,
+                )  # (batch, 1, d_model)
+                self._last_slow_output = slow_out.squeeze(1)  # (batch, d_model)
+
                 if not cfg.ablate_memory:
                     self.memory.write(fast_output)
-
-                # Run attention: current SSM output as query over memory
-                memory_slots = self.memory.read() if not cfg.ablate_memory else None
-                query = fast_output.unsqueeze(1)  # (batch, 1, d_model)
-                slow_out = self.slow_attention(query, memory=memory_slots)  # (batch, 1, d_model)
-                self._last_slow_output = slow_out.squeeze(1)  # (batch, d_model)
 
             # Gate fast and slow
             if cfg.ablate_ssm:

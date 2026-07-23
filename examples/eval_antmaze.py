@@ -1,9 +1,9 @@
 """Quick eval of saved AntMaze checkpoint."""
 
-import numpy as np
-import torch
 import gymnasium
 import gymnasium_robotics  # noqa: F401 — registers AntMaze envs
+import numpy as np
+import torch
 
 from arcmind import ArcMindConfig, ArcMindModel
 
@@ -20,7 +20,7 @@ def evaluate_online(model, norm_stats, device, num_episodes=20, max_steps=700):
 
     for ep in range(num_episodes):
         obs_dict, _ = env.reset()
-        model.reset_memory(batch_size=1)
+        model.init_streaming(batch_size=1)
         episode_return = 0.0
 
         for step in range(max_steps):
@@ -30,13 +30,13 @@ def evaluate_online(model, norm_stats, device, num_episodes=20, max_steps=700):
                 obs_dict["desired_goal"],
             ]).astype(np.float32)
 
-            obs_tensor = torch.tensor(obs_flat, device=device).unsqueeze(0).unsqueeze(0)
+            obs_tensor = torch.tensor(obs_flat, device=device).unsqueeze(0)
             obs_tensor = (obs_tensor - obs_mean) / obs_std
 
-            with torch.no_grad():
-                pred = model(obs_tensor, use_memory=True)
+            with torch.inference_mode():
+                pred = model.step(obs_tensor)
 
-            action = pred.squeeze(0).squeeze(0).cpu().numpy()
+            action = pred.squeeze(0).cpu().numpy()
             action = np.clip(action, -1.0, 1.0)
 
             obs_dict, reward, terminated, truncated, info = env.step(action)
@@ -58,7 +58,11 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    ckpt = torch.load("checkpoints/antmaze_iot_tiny_full.pt", map_location=device, weights_only=False)
+    ckpt = torch.load(
+        "checkpoints/antmaze_iot_tiny_full.pt",
+        map_location=device,
+        weights_only=False,
+    )
 
     config = ArcMindConfig(**ckpt["config"])
     model = ArcMindModel(config).to(device)

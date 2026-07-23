@@ -64,10 +64,11 @@ checkpoints/
 wandb/
 runs/
 logs/
+benchmark_results/
 *.onnx
 
 # === Data (large files) ===
-data/
+/data/
 *.h5
 *.hdf5
 *.csv

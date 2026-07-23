@@ -1,43 +1,64 @@
 # ArcMind
 
-**Dual-timescale hybrid SSM+Attention architecture for efficient robotics and IoT.**
+**A causal, dual-rate sequence backbone for streaming sensor policies.**
 
 [![PyPI version](https://img.shields.io/pypi/v/arcmind)](https://pypi.org/project/arcmind/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen.svg)]()
 
-> ⚠️ **Alpha release** — architecture is functional and tested, pretrained weights coming soon. API may change.
+> **Alpha research release.** The architecture and streaming API are tested.
+> Existing experimental checkpoints predate the current causal-memory revision
+> and are not paper results. APIs may change before 1.0.
 
-## What is ArcMind?
+## Overview
 
-ArcMind is a neural architecture purpose-built for robotics and IoT edge deployment. It combines a fast State Space Model (SSM) path for continuous sensor stream processing with a slow exact attention path for episodic memory recall — all at 245K to 10.3M parameters.
+ArcMind is an experimental backbone for low-dimensional sensor streams under
+partial observability. It combines:
 
-### The problem
+- a selective state-space fast path that updates on every sensor frame;
+- a lower-rate exact-attention path over a bounded ring buffer of compressed,
+  strictly prior decision states;
+- learned relative-age embeddings that make memory order observable; and
+- a learned gate that fuses recurrent and recalled representations.
 
-Current approaches to "LMs for robotics" fall into two camps:
+The implementation is sensor-to-action: raw floating-point channels are
+projected directly into the model dimension and the output head predicts a
+continuous action vector. ArcMind is not currently a language model,
+vision-language-action model, or offline-RL algorithm.
 
-1. **Massive VLA models** (RT-2, OpenVLA, Pi-Zero) — 7B–55B parameters, cloud-dependent, text-centric tokenization. Can't run on edge hardware.
-2. **Shoehorned text SLMs** (quantized Phi, TinyLlama on Jetson) — general-purpose text models forced onto constrained devices. Not designed for sensor streams.
+```text
+sensor frame -> tokenizer -> selective SSM ----------------------+
+                              |                                  |
+                              +-> periodic compressed memory     |
+                                      |                          |
+current decision state -> bounded exact recall over prior slots  |
+                              |                                  |
+                              +---------- learned fusion <-------+
+                                             |
+                                          action
+```
 
-Neither is purpose-built for the sensor-stream → reasoning → action loop that robotics and IoT actually need.
-
-### The approach
-
-ArcMind introduces a **dual-timescale hybrid** that mirrors how robotic control actually works:
-
-- **Fast path (SSM):** Processes every sensor frame at hardware rate (100–1000 Hz). O(n) time, O(1) decode memory, no KV cache. Produces smooth, physically plausible control signals.
-- **Slow path (Attention):** Tiny exact attention (1–2 layers, 2–4 heads) runs at decision rate (1–10 Hz) over an episodic memory buffer for precise spatial/temporal recall.
-- **Sensor-native tokenization:** Raw sensor frames projected directly into model dimension via learned linear layers. No vocabulary table — eliminates the ~40% parameter overhead of embedding tables in small text LMs.
-- **Episodic memory:** Fixed-size ring buffer of compressed environment state snapshots. Enables landmark recall and obstacle memory without a growing KV cache.
+For a fixed configuration, recurrent state and episodic memory remain bounded
+during streaming inference. Performance and hardware suitability are empirical
+questions covered by the
+[research protocol](https://github.com/jemsbhai/arcmind/blob/master/docs/research_protocol.md);
+this README intentionally does not claim state-of-the-art results.
 
 ## Installation
 
-**Requirements:** Python ≥ 3.10, PyTorch ≥ 2.1
+Requirements: Python 3.10 or newer and PyTorch 2.1 or newer.
 
 ```bash
 pip install arcmind
 ```
+
+The optional Minari-backed offline-control adapters are installed with:
+
+```bash
+pip install "arcmind[datasets]"
+```
+
+Benchmark authoring utilities are available through `arcmind[benchmarks]`.
 
 For development:
 
@@ -45,106 +66,146 @@ For development:
 git clone https://github.com/jemsbhai/arcmind.git
 cd arcmind
 pip install -e ".[dev]"
-pytest tests/ -v  # 44 tests, all passing
+pytest
 ```
 
-## Quick Start
+## Batch use
 
 ```python
 import torch
+
 from arcmind import ArcMindConfig, ArcMindModel
 
-# Create a model from a preset
 config = ArcMindConfig.robotics_small()
 model = ArcMindModel(config)
 
-# Simulate a sensor stream (batch=1, 100 timesteps, 12 channels)
-sensor_data = torch.randn(1, 100, config.num_sensor_channels)
-
-# Forward pass
-model.reset_memory(batch_size=1)
+sensor_data = torch.randn(2, 100, config.num_sensor_channels)
 actions = model(sensor_data)
-print(actions.shape)  # (1, 100, 6)
 
-# Inspect parameter breakdown
-for component, count in model.count_parameters().items():
-    print(f"  {component}: {count:,}")
+assert actions.shape == (2, 100, config.action_dim)
 ```
 
-### Custom Configuration
+The batch path is causal and stateless across calls. Slow-path decisions occur at
+`sensor_freq_hz / decision_freq_hz`, and each decision can recall only snapshots
+written by earlier decisions.
+
+## Streaming use
 
 ```python
-# Build a custom config for your specific robot/sensor setup
+model.eval()
+model.init_streaming(batch_size=1)
+
+with torch.no_grad():
+    for sensor_frame in sensor_stream:
+        action = model.step(sensor_frame)
+        actuator.send(action)
+```
+
+Call `init_streaming()` at every episode boundary. It clears the SSM state,
+episodic memory, held slow-path output, and step counter. Unit tests require the
+streaming recurrence to match causal batch execution.
+
+## Custom configuration
+
+```python
 config = ArcMindConfig(
-    num_sensor_channels=9,    # e.g., 3-axis accel + 3-axis gyro + 3-axis mag
+    num_sensor_channels=9,
     d_model=96,
     num_ssm_layers=6,
     ssm_state_dim=12,
     num_attn_layers=1,
     num_attn_heads=3,
-    num_memory_slots=32,
-    action_dim=4,             # e.g., 4 motor commands
+    attn_window_size=32,
+    num_memory_slots=64,
+    memory_compress_ratio=4,
+    action_dim=4,
     sensor_freq_hz=200.0,
     decision_freq_hz=20.0,
 )
 model = ArcMindModel(config)
 ```
 
-## Model Presets
+`attn_window_size` is the maximum number of recent decision snapshots visible
+to exact recall. `num_memory_slots` controls retained episode history and may be
+larger than that window.
 
-All parameter counts independently verified via test suite.
+The registered ablations are available through configuration flags:
+`ablate_ssm`, `ablate_attention`, `ablate_memory`, `ablate_gating`, and
+`ablate_temporal_encoding`.
 
-| Preset | Params | SSM | Attention | Tokenizer | Target Hardware |
-|--------|--------|-----|-----------|-----------|-----------------|
-| `iot_tiny` | 245K | 73.5% | 20.3% | 0.2% | Cortex-M7, ESP32-S3 |
-| `robotics_small` | 1.7M | 84.7% | 11.7% | 0.1% | Jetson Orin Nano, RPi 5 |
-| `robotics_medium` | 10.3M | 82.4% | 15.3% | 0.1% | Desktop GPU, Jetson AGX |
+## Presets
 
-Key property: the sensor tokenizer is consistently <1% of total parameters, confirming the embedding-table-free design eliminates the parameter overhead that dominates sub-100M text LMs.
+Counts are generated from the current source and checked by the test suite.
+Hardware labels are intentionally omitted until matched-device measurements
+exist.
 
-## Architecture
+| Preset | Parameters | SSM share | Exact-attention share |
+|---|---:|---:|---:|
+| `iot_tiny` | 246,356 | 73.2% | 20.6% |
+| `robotics_small` | 1,692,070 | 84.2% | 12.2% |
+| `robotics_medium` | 10,354,252 | 82.1% | 15.6% |
 
-```
-Sensor Stream → SensorTokenizer → SSMCore (fast, 100-1000 Hz)
-                                      ↓ periodic snapshot
-                                 EpisodicMemory (ring buffer)
-                                      ↓ read
-SSM output → SlowAttention (slow, 1-10 Hz) ← memory slots
-                   ↓ gated fusion
-              ActionHead → action output
-```
+The fast path is a compact, pure-PyTorch input-dependent selective SSM. It is
+inspired by selective state-space modeling but is not the published Mamba or
+Mamba-2 block and does not use their optimized kernels.
 
-**Design rationale:**
+## Research and reproducibility
 
-- SSM:Attention parameter ratio of ~5:1 to ~8:1 extends the Granite 4 (9:1) and Jamba (7:1) ratios, justified by sensor streams being temporally smoother than text.
-- Only 2–4 attention heads for recall, based on retrieval-aware distillation research showing 2–3 heads suffice for recall in SSM hybrids.
-- Episodic ring buffer adapted from Expansion Span's reserved attention context for distant retrieval, applied here to compressed environment state snapshots.
+The
+[research protocol](https://github.com/jemsbhai/arcmind/blob/master/docs/research_protocol.md)
+defines the falsifiable claim, required baselines, benchmark families,
+ablations, statistics, efficiency measurements, and prohibited claims.
+The companion
+[benchmark audit](https://github.com/jemsbhai/arcmind/blob/master/docs/literature_and_baselines.md)
+records the primary-source rationale, implementation status, and
+like-for-like versus contextual comparison boundary.
 
-## Project Status
+The planned evidence has three tracks:
 
-- [x] Core architecture (SSM + Attention + Memory + Gating)
-- [x] Sensor-native tokenizer
-- [x] Three validated presets (IoT, Robotics-S, Robotics-M)
-- [x] Full test suite (44 tests)
-- [x] PyPI package
-- [ ] Training pipeline
-- [ ] Benchmark evaluation (MuJoCo, sensor datasets)
-- [ ] Pretrained weights on HuggingFace
-- [ ] Research paper
+1. POBAX and POPGym for the memory mechanism;
+2. low-dimensional RoboMimic for state-based robot imitation; and
+3. UEA plus MONSTER for multivariate sensor classification diagnostics.
+
+UCI HAR, Opportunity, MuJoCo, and AntMaze examples remain development smoke
+tests. They are not sufficient evidence for the proposed contribution.
+
+No existing checkpoint or metric should be cited as a result of the current
+architecture. Paper results must be regenerated from committed configurations,
+seed manifests, immutable dataset identifiers, and machine-readable raw output.
+
+## Project status
+
+- [x] Causal batch and recurrent execution
+- [x] Selective SSM fast path
+- [x] Bounded, chronological, time-aware exact recall
+- [x] Learned memory compression and fast/slow gating
+- [x] Configuration presets and component ablations
+- [x] PyPI package, reproducible artifacts, and release-gated unit tests
+- [x] Pre-registered research and evaluation protocol
+- [x] Local delayed-recall benchmark, matched baselines, and aggregation
+- [x] Commit-pinned JAX/POBAX environment and streaming inference parity
+- [x] Shared discrete/continuous JAX PPO learner
+- [x] Parameter-matched recurrent, convolutional, SSM, and attention controls
+- [x] Registered ArcMind ablation adapters with effective parameter counts
+- [x] S5RL reset-aware structured-SSM policy adapter
+- [ ] Privileged-observation reference adapters
+- [ ] Registered multi-seed experiments
+- [ ] Reproducible paper tables and figures
+- [ ] Pretrained weights
 
 ## Citation
 
-Paper forthcoming. For now:
+A paper citation will be added after the registered experiments. Until then:
 
 ```bibtex
 @software{arcmind2026,
-  title={ArcMind: Dual-Timescale Hybrid SSM+Attention for Efficient Robotics and IoT},
-  author={Syed, Muntaser},
-  year={2026},
-  url={https://github.com/jemsbhai/arcmind},
+  title  = {ArcMind: A Dual-Rate Sequence Backbone for Streaming Sensor Policies},
+  author = {Syed, Muntaser},
+  year   = {2026},
+  url    = {https://github.com/jemsbhai/arcmind}
 }
 ```
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+ArcMind is released under the MIT License. See [LICENSE](LICENSE).

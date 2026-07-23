@@ -1,0 +1,5 @@
+# Linux/WSL2 CUDA benchmark environment.
+# Keep the benchmark source revisions immutable even when their default branches move.
+jax[cuda12]==0.6.2
+pobax @ git+https://github.com/taodav/pobax.git@a5e1d62d14e4efe783885b9d4f19cffa2a568eec
+navix @ git+https://github.com/taodav/navix.git@6f8bf656dfc3b4bf3aeba24ad8a3914047fcd7d6

@@ -1,0 +1,100 @@
+protocol_version: 1
+status: development
+target_venue: ICLR
+cloud_budget_usd: 10
+
+principles:
+  model_selection:
+    delayed_sensor_recall: validation_nll_only
+    pomdp: fixed_interaction_budget_no_return_based_checkpoint_selection
+    robot_imitation: heldout_demonstration_validation_metric
+  test_evaluation: once_after_selection_or_fixed_budget
+  paired_data: true
+  report_uncertainty: true
+  preserve_raw_per_seed_results: true
+
+stages:
+  local_diagnostic:
+    benchmark: delayed_sensor_recall
+    purpose: isolate fading-memory and exact-recall contributions
+    exact_recall_window: 8
+    retained_memory_slots: 16
+    train_examples: 4096
+    validation_examples: 1024
+    test_examples: 2048
+    seeds: [1103, 2207, 3301, 4409, 5519]
+    models:
+      - memoryless_mlp
+      - gru
+      - lstm
+      - causal_transformer
+      - arcmind_ssm_only
+      - arcmind_unordered
+      - arcmind
+    selection_metric: nll
+    metrics:
+      - accuracy
+      - nll
+      - short_lag_accuracy
+      - long_lag_accuracy
+      - parameter_count
+      - train_seconds
+      - inference_examples_per_second
+
+  pomdp_pilot:
+    benchmark: POBAX
+    implementation: shared_jax_ppo
+    result_status: development_only_until_all_adapters_and_hyperparameters_are_frozen
+    seeds: [1103, 2207, 3301]
+    validated_policy_cores:
+      - memoryless_mlp
+      - frame_stack_mlp
+      - memory_trace_mlp
+      - elman_rnn
+      - gru
+      - lstm
+      - tcn
+      - s4d
+      - ms4
+      - ms4n
+      - lru
+      - s5rl
+      - causal_transformer
+      - transformer_xl
+      - gtrxl
+      - arcmind
+      - arcmind_unordered
+      - arcmind_no_memory
+      - arcmind_no_ssm
+      - arcmind_no_gate
+      - arcmind_ssm_only
+    remaining_required_adapters:
+      - privileged_observation_upper_references
+    tasks:
+      - simple_chain
+      - tmaze_10
+      - rocksample_11_11
+      - battleship_10
+      - HalfCheetah-P-v0
+      - HalfCheetah-V-v0
+      - Navix-DMLab-Maze-01-v0
+    note: Quick cells validate infrastructure only and are prohibited as paper results.
+
+  pomdp_registered:
+    benchmark: POBAX
+    implementation: shared_jax_ppo
+    seeds: [1103, 2207, 3301, 4409, 5519]
+    minimum_seeds_for_inexpensive_tasks: 10
+    policy_selection: final_policy_after_fixed_interaction_budget
+    tuning_seeds: [1103, 2207, 3301]
+    note: >-
+      Freeze one equal-cardinality tuning grid on the tuning seeds before
+      registered evaluation. Never choose checkpoints or hyperparameters from
+      registered-seed evaluation returns. Expand seeds only after the pilot
+      freezes hyperparameters.
+
+statistics:
+  bootstrap_resamples: 10000
+  confidence_level: 0.95
+  aggregate_metrics: [mean, median, iqm]
+  paired_environment_seeds: true

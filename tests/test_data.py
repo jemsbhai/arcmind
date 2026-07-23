@@ -3,8 +3,7 @@
 import pytest
 import torch
 
-from arcmind.data.uci_har import UCIHARDataset, ACTIVITY_LABELS
-
+from arcmind.data.uci_har import UCIHARDataset
 
 # Mark all tests in this file as requiring network/download
 pytestmark = pytest.mark.slow
@@ -14,12 +13,14 @@ class TestUCIHARDataset:
     """Tests that require downloading the dataset (run with pytest -m slow)."""
 
     @pytest.fixture(scope="class")
-    def train_dataset(self, tmp_path_factory):
+    @classmethod
+    def train_dataset(cls, tmp_path_factory):
         data_dir = tmp_path_factory.mktemp("uci_har")
         return UCIHARDataset(data_dir=data_dir, split="train")
 
     @pytest.fixture(scope="class")
-    def test_dataset(self, tmp_path_factory):
+    @classmethod
+    def test_dataset(cls, tmp_path_factory):
         data_dir = tmp_path_factory.mktemp("uci_har_test")
         return UCIHARDataset(data_dir=data_dir, split="test")
 

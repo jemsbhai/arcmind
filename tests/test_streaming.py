@@ -1,5 +1,7 @@
 """Tests for streaming (recurrent) inference mode."""
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -66,6 +68,26 @@ class TestSSMLayerStep:
             out2 = layer.step(x)
 
         assert torch.allclose(out1, out2, atol=1e-6)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_step_uses_model_dtype(self, streaming_config, dtype):
+        from arcmind.models.ssm_core import SSMLayer
+
+        layer = SSMLayer(streaming_config).to(dtype=dtype)
+        layer.eval()
+        layer.init_state(
+            batch_size=1,
+            device=torch.device("cpu"),
+            dtype=dtype,
+        )
+        x = torch.randn(1, streaming_config.d_model, dtype=dtype)
+
+        with torch.no_grad():
+            out = layer.step(x)
+
+        assert out.dtype == dtype
+        assert layer._ssm_state.dtype == dtype
+        assert layer._conv_state.dtype == dtype
 
 
 class TestSSMCoreStep:
@@ -167,3 +189,59 @@ class TestArcMindStreaming:
         assert torch.allclose(batch_action, step_action, atol=1e-5), (
             f"Batch: {batch_action}\nStep:  {step_action}"
         )
+
+    def test_step_matches_forward_sequence(self, streaming_config):
+        """Batched and recurrent inference should implement the same model."""
+        torch.manual_seed(123)
+        model = ArcMindModel(streaming_config)
+        model.eval()
+        # Six decisions with four slots also exercises ring-buffer wrap.
+        frames = torch.randn(1, 27, streaming_config.num_sensor_channels)
+
+        model.reset_memory(batch_size=1)
+        with torch.no_grad():
+            batch_actions = model(frames)
+
+        model.init_streaming(batch_size=1)
+        step_actions = []
+        with torch.no_grad():
+            for frame in frames.unbind(dim=1):
+                step_actions.append(model.step(frame))
+        streaming_actions = torch.stack(step_actions, dim=1)
+
+        assert torch.allclose(batch_actions, streaming_actions, atol=1e-5)
+
+    def test_width_one_convolution_matches_batch(self, streaming_config):
+        config = replace(streaming_config, ssm_conv_width=1)
+        torch.manual_seed(321)
+        model = ArcMindModel(config)
+        model.eval()
+        frames = torch.randn(1, 12, config.num_sensor_channels)
+
+        with torch.no_grad():
+            batch_actions = model(frames)
+
+        model.init_streaming(batch_size=1)
+        step_actions = []
+        with torch.no_grad():
+            for frame in frames.unbind(dim=1):
+                step_actions.append(model.step(frame))
+        streaming_actions = torch.stack(step_actions, dim=1)
+
+        assert torch.allclose(batch_actions, streaming_actions, atol=1e-5)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_streaming_supports_reduced_precision(self, streaming_config, dtype):
+        model = ArcMindModel(streaming_config).to(dtype=dtype)
+        model.eval()
+        model.init_streaming(batch_size=1)
+        frame = torch.randn(
+            1,
+            streaming_config.num_sensor_channels,
+            dtype=dtype,
+        )
+
+        with torch.no_grad():
+            action = model.step(frame)
+
+        assert action.dtype == dtype

@@ -31,7 +31,7 @@ def demo_preset(name: str, config: ArcMindConfig, seq_len: int = 100) -> None:
 
     # Parameter breakdown
     counts = model.count_parameters()
-    print(f"\n  Parameters:")
+    print("\n  Parameters:")
     for component, count in counts.items():
         if component == "total":
             print(f"    {'─' * 38}")
@@ -41,30 +41,33 @@ def demo_preset(name: str, config: ArcMindConfig, seq_len: int = 100) -> None:
     # Sensor input simulation
     batch_size = 1
     sensor_data = torch.randn(batch_size, seq_len, config.num_sensor_channels)
-    print(f"\n  Input:")
+    print("\n  Input:")
     print(f"    Sensor channels:    {config.num_sensor_channels}")
     print(f"    Sequence length:    {seq_len} frames")
     print(f"    Sensor rate:        {config.sensor_freq_hz} Hz")
     print(f"    Decision rate:      {config.decision_freq_hz} Hz")
-    print(f"    Decision stride:    {model.decision_stride} (1 slow step per {model.decision_stride} fast steps)")
+    print(
+        f"    Decision stride:    {model.decision_stride} "
+        f"(1 slow step per {model.decision_stride} fast steps)"
+    )
     print(f"    Simulated duration: {seq_len / config.sensor_freq_hz:.2f} seconds")
 
-    # Forward pass with timing
-    model.reset_memory(batch_size=batch_size)
+    # Forward pass with timing. Batch calls use sequence-local memory and do
+    # not mutate persistent streaming state.
     with torch.no_grad():
         start = time.perf_counter()
         actions = model(sensor_data)
         elapsed_ms = (time.perf_counter() - start) * 1000
 
-    print(f"\n  Output:")
+    print("\n  Output:")
     print(f"    Action shape:       {tuple(actions.shape)}")
     print(f"    Action dim:         {config.action_dim}")
     print(f"    Inference time:     {elapsed_ms:.1f} ms (CPU, batch={batch_size})")
     print(f"    Per-frame:          {elapsed_ms / seq_len:.2f} ms/frame")
 
-    # Memory state
+    # Persistent memory remains empty after stateless batch execution.
     occupancy = model.memory.get_occupancy()
-    print(f"\n  Episodic Memory:")
+    print("\n  Persistent Streaming Memory:")
     print(f"    Slots total:        {config.num_memory_slots}")
     print(f"    Slots written:      {occupancy}")
     print(f"    Buffer shape:       {tuple(model.memory.read().shape)}")
@@ -89,19 +92,17 @@ def demo_custom_config() -> None:
 
     model = ArcMindModel(config)
     total = model.count_parameters()["total"]
-    print(f"\n  Config: 9ch input, d_model=96, 6 SSM layers, 1 attn layer")
+    print("\n  Config: 9ch input, d_model=96, 6 SSM layers, 1 attn layer")
     print(f"  Total parameters: {total:,}")
 
     # Simulate 2 seconds of sensor data at 200 Hz
     sensor_data = torch.randn(1, 400, config.num_sensor_channels)
-    model.reset_memory(batch_size=1)
-
     with torch.no_grad():
         actions = model(sensor_data)
 
     print(f"  Input:  {tuple(sensor_data.shape)} (2 seconds at 200 Hz)")
     print(f"  Output: {tuple(actions.shape)} (7-DOF joint commands)")
-    print(f"  Memory: {model.memory.get_occupancy()}/{config.num_memory_slots} slots used")
+    print("  Batch memory: sequence-local and cleared when forward() returns")
 
 
 def demo_episodic_memory() -> None:
@@ -121,10 +122,13 @@ def demo_episodic_memory() -> None:
         if i < 5 or i >= config.num_memory_slots - 1:
             print(f"    Write #{i + 1:3d}  →  occupancy: {model.memory.get_occupancy()}")
         elif i == 5:
-            print(f"    ...")
+            print("    ...")
 
-    print(f"\n  After {config.num_memory_slots + 5} writes, occupancy caps at {model.memory.get_occupancy()}")
-    print(f"  Oldest entries have been overwritten (FIFO ring buffer)")
+    print(
+        f"\n  After {config.num_memory_slots + 5} writes, "
+        f"occupancy caps at {model.memory.get_occupancy()}"
+    )
+    print("  Oldest entries have been overwritten (FIFO ring buffer)")
 
 
 def main():

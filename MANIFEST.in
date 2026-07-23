@@ -1,0 +1,4 @@
+include CHANGELOG.md
+include LICENSE
+recursive-include benchmarks *.in *.md *.py *.txt *.yaml
+recursive-include docs *.md

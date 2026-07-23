@@ -5,11 +5,9 @@ Stores compressed snapshots of the SSM hidden state at regular intervals,
 forming a fixed-size ring buffer of environment state "memories." The slow
 attention path can attend over these slots for precise spatial/temporal recall.
 
-Design rationale:
-- Inspired by Expansion Span (AWS, Dec 2024): reserves attention context
-  for tokens retrieved from arbitrarily distant past.
-- Fixed-size ring buffer (not growing KV cache) ensures O(1) memory at inference.
-- Learned MLP compressor reduces SSM state snapshots to memory slot dimension.
+The fixed-size ring buffer bounds inference memory. Learned compression maps
+decision snapshots back into model dimension, while chronological reads support
+relative-age encoding in the exact-recall path.
 """
 
 import torch
@@ -67,29 +65,72 @@ class EpisodicMemory(nn.Module):
     def reset(self, batch_size: int = 1, device: torch.device | None = None) -> None:
         """Reset the memory buffer for a new episode."""
         dev = device or self.buffer.device
-        self.buffer = torch.zeros(batch_size, self.num_slots, self.d_model, device=dev)
+        self.buffer = torch.zeros(
+            batch_size,
+            self.num_slots,
+            self.d_model,
+            device=dev,
+            dtype=self.buffer.dtype,
+        )
         self.write_ptr = torch.zeros(1, dtype=torch.long, device=dev)
 
-    def write(self, snapshot: torch.Tensor) -> None:
+    def write(self, snapshot: torch.Tensor) -> torch.Tensor:
         """
         Write a compressed snapshot into the next ring buffer slot.
 
         Args:
             snapshot: SSM output to compress and store, shape (batch, d_model).
-        """
-        compressed = self.compressor(snapshot)
-        idx = (self.write_ptr % self.num_slots).long().item()
-        self.buffer[:, idx, :] = compressed.detach()
-        self.write_ptr += 1
-
-    def read(self) -> torch.Tensor:
-        """
-        Read all memory slots for attention.
 
         Returns:
-            Memory tensor, shape (batch, num_slots, d_model).
+            The differentiable compressed snapshot. The runtime copy stored in
+            the ring buffer is detached because it is episode state, not model
+            state. Batched training can use the returned tensor to preserve
+            gradient flow through the compressor.
         """
-        return self.buffer
+        compressed = self.compressor(snapshot)
+        self.write_compressed(compressed)
+        return compressed
+
+    def write_compressed(self, compressed: torch.Tensor) -> None:
+        """Store an already-compressed snapshot as detached runtime state."""
+        expected_shape = (self.buffer.shape[0], self.d_model)
+        if compressed.shape != expected_shape:
+            raise ValueError(
+                f"compressed snapshot must have shape {expected_shape}, "
+                f"got {tuple(compressed.shape)}"
+            )
+
+        idx = (self.write_ptr % self.num_slots).long().item()
+        with torch.no_grad():
+            self.buffer[:, idx, :].copy_(compressed)
+            self.write_ptr.add_(1)
+
+    def read(self, valid_only: bool = False) -> torch.Tensor:
+        """
+        Read memory slots.
+
+        Args:
+            valid_only: If False, return the fixed-size physical buffer. If
+                True, omit unwritten slots and return entries in chronological
+                order (oldest to newest), including after ring-buffer wrap.
+
+        Returns:
+            Memory tensor with shape (batch, slots, d_model).
+        """
+        if not valid_only:
+            return self.buffer
+
+        occupancy = self.get_occupancy()
+        if occupancy < self.num_slots:
+            return self.buffer[:, :occupancy, :]
+
+        oldest = int((self.write_ptr % self.num_slots).item())
+        if oldest == 0:
+            return self.buffer
+        return torch.cat(
+            [self.buffer[:, oldest:, :], self.buffer[:, :oldest, :]],
+            dim=1,
+        )
 
     def get_occupancy(self) -> int:
         """Return the number of slots that have been written to."""

@@ -21,11 +21,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
 from arcmind import ArcMindConfig, ArcMindModel
-from arcmind.data.antmaze import AntMazeDataset, NUM_OBS_CHANNELS, ACTION_DIM
+from arcmind.data.antmaze import ACTION_DIM, NUM_OBS_CHANNELS, AntMazeDataset
 
 
 def set_seed(seed: int) -> None:
@@ -60,7 +59,11 @@ def build_config(preset: str) -> ArcMindConfig:
     return config
 
 
-def masked_mse_loss(predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def masked_mse_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
     """
     MSE loss computed only over valid (non-padded) timesteps.
 
@@ -154,7 +157,7 @@ def evaluate_online(model, config, norm_stats, device, num_episodes=20, max_step
 
     for ep in range(num_episodes):
         obs_dict, _ = env.reset()
-        model.reset_memory(batch_size=1)
+        model.init_streaming(batch_size=1)
         episode_return = 0.0
         done = False
 
@@ -166,11 +169,12 @@ def evaluate_online(model, config, norm_stats, device, num_episodes=20, max_step
                 obs_dict["desired_goal"],
             ]).astype(np.float32)
 
-            obs_tensor = torch.tensor(obs_flat, device=device).unsqueeze(0).unsqueeze(0)  # (1, 1, 31)
+            obs_tensor = torch.tensor(obs_flat, device=device).unsqueeze(0)
             obs_tensor = (obs_tensor - obs_mean) / obs_std
 
-            pred = model(obs_tensor, use_memory=True)  # (1, 1, 8)
-            action = pred.squeeze(0).squeeze(0).cpu().numpy()
+            with torch.inference_mode():
+                pred = model.step(obs_tensor)
+            action = pred.squeeze(0).cpu().numpy()
             action = np.clip(action, -1.0, 1.0)
 
             obs_dict, reward, terminated, truncated, info = env.step(action)
@@ -194,8 +198,18 @@ def evaluate_online(model, config, norm_stats, device, num_episodes=20, max_step
 
 def main():
     parser = argparse.ArgumentParser(description="Train ArcMind on D4RL AntMaze")
-    parser.add_argument("--variant", type=str, default="umaze", choices=["umaze", "medium-play", "large-diverse"])
-    parser.add_argument("--preset", type=str, default="iot_tiny", choices=["iot_tiny", "robotics_small", "robotics_medium"])
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="umaze",
+        choices=["umaze", "medium-play", "large-diverse"],
+    )
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default="iot_tiny",
+        choices=["iot_tiny", "robotics_small", "robotics_medium"],
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -335,7 +349,7 @@ def main():
 
     # Final report
     print(f"\n{'=' * 50}")
-    print(f"Training complete.")
+    print("Training complete.")
     print(f"Best val MSE: {best_val_loss:.6f} (epoch {best_epoch})")
 
     # Load best model for online evaluation

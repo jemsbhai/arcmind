@@ -4,7 +4,6 @@ Fast path: SSM core.
 Implements a stack of selective state-space layers for processing
 continuous sensor streams at high frequency. The default implementation
 is a pure-PyTorch SSM that runs on CPU/GPU without custom CUDA kernels.
-When mamba-ssm is available, it can be swapped for hardware-optimized kernels.
 
 Supports two modes:
 - forward(): batch processing of full sequences (training)
@@ -12,10 +11,10 @@ Supports two modes:
 
 Design rationale:
 - SSM provides O(n) time and O(1) per-token decode (no KV cache).
-- Selective (input-dependent) gating follows Mamba's design.
+- State transitions use input-dependent discretization.
 - step() mode enables real-time streaming at sensor rate.
-- Produces smoother, more physically plausible control outputs than
-  Transformers (Tsuji, IEEE Access 2025).
+
+This is not an implementation of the published Mamba or Mamba-2 blocks.
 """
 
 import torch
@@ -67,13 +66,27 @@ class SSMLayer(nn.Module):
         self._ssm_state: torch.Tensor | None = None
         self._conv_state: torch.Tensor | None = None
 
-    def init_state(self, batch_size: int, device: torch.device) -> None:
+    def init_state(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         """Initialize recurrent state for streaming inference."""
+        state_dtype = dtype or self.A_log.dtype
         self._ssm_state = torch.zeros(
-            batch_size, self.d_inner, self.state_dim, device=device
+            batch_size,
+            self.d_inner,
+            self.state_dim,
+            device=device,
+            dtype=state_dtype,
         )
         self._conv_state = torch.zeros(
-            batch_size, self.d_inner, self.conv_width - 1, device=device
+            batch_size,
+            self.d_inner,
+            self.conv_width - 1,
+            device=device,
+            dtype=state_dtype,
         )
 
     def reset_state(self) -> None:
@@ -163,10 +176,14 @@ class SSMLayer(nn.Module):
         x_conv = F.silu(x_conv)
 
         # Update conv state: shift left, append current input
-        self._conv_state = torch.cat(
-            [self._conv_state[:, :, 1:], x_branch.unsqueeze(-1)],
-            dim=-1,
-        )  # (batch, d_inner, conv_width-1)
+        if self.conv_width > 1:
+            self._conv_state = conv_input[:, :, 1:]
+        else:
+            self._conv_state = x_branch.new_empty(
+                x_branch.shape[0],
+                self.d_inner,
+                0,
+            )
 
         # SSM step
         A = -torch.exp(self.A_log)  # (d_inner, state_dim)
@@ -230,10 +247,15 @@ class SSMCore(nn.Module):
             x = layer.step(x)
         return x
 
-    def init_state(self, batch_size: int, device: torch.device) -> None:
+    def init_state(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         """Initialize recurrent state for all layers."""
         for layer in self.layers:
-            layer.init_state(batch_size, device)
+            layer.init_state(batch_size, device, dtype=dtype)
 
     def reset_state(self) -> None:
         """Clear recurrent state for all layers."""

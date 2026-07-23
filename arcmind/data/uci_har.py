@@ -15,7 +15,6 @@ Reference: Anguita et al., "A Public Domain Dataset for Human Activity Recogniti
 Using Smartphones", ESANN 2013.
 """
 
-import os
 import zipfile
 from pathlib import Path
 from urllib.request import urlretrieve
@@ -24,8 +23,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
-UCI_HAR_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
+UCI_HAR_URL = (
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
+)
 
 ACTIVITY_LABELS = {
     1: "WALKING",
@@ -151,7 +151,7 @@ class UCIHARDataset(Dataset):
             if split == "train":
                 # Compute stats from training data
                 self._mean = self.signals.mean(axis=(0, 1))  # (6,)
-                self._std = self.signals.std(axis=(0, 1))     # (6,)
+                self._std = self.signals.std(axis=(0, 1))  # (6,)
                 self._std[self._std < 1e-8] = 1.0  # prevent division by zero
             else:
                 # For test set, load training data to compute stats

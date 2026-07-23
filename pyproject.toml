@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "arcmind"
-version = "0.1.0"
-description = "Dual-timescale hybrid SSM+Attention architecture for efficient robotics and IoT language models"
+dynamic = ["version"]
+description = "Causal dual-rate sequence backbone for streaming sensor policies"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     {name = "Muntaser Syed"},
@@ -15,19 +16,16 @@ authors = [
 keywords = [
     "deep-learning",
     "state-space-model",
-    "mamba",
     "attention",
     "robotics",
     "iot",
     "edge-ai",
-    "language-model",
     "sensor-fusion",
     "tiny-ml",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -37,15 +35,15 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.1.0",
-    "einops>=0.7.0",
     "numpy>=1.24.0",
-    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-mamba = [
-    "mamba-ssm>=2.0.0",
-    "causal-conv1d>=1.2.0",
+datasets = [
+    "minari>=0.5.0",
+]
+benchmarks = [
+    "pyyaml>=6.0",
 ]
 dev = [
     "pytest>=8.0",
@@ -53,8 +51,9 @@ dev = [
     "ruff>=0.4.0",
     "build>=1.0",
     "twine>=5.0",
+    "pyyaml>=6.0",
 ]
-all = ["arcmind[mamba,dev]"]
+all = ["arcmind[benchmarks,datasets,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/jemsbhai/arcmind"
@@ -63,6 +62,9 @@ Issues = "https://github.com/jemsbhai/arcmind/issues"
 
 [tool.setuptools.packages.find]
 include = ["arcmind*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "arcmind.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

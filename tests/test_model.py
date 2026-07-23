@@ -1,14 +1,14 @@
 """Unit tests for ArcMind model components."""
 
-import pytest
+from dataclasses import replace
+
 import torch
 
 from arcmind import ArcMindConfig, ArcMindModel, __version__
-from arcmind.models.tokenizer import SensorTokenizer
-from arcmind.models.ssm_core import SSMCore, SSMLayer
 from arcmind.models.attention import SlowAttention, SlowAttentionLayer
 from arcmind.models.memory import EpisodicMemory, MemoryCompressor
-
+from arcmind.models.ssm_core import SSMCore, SSMLayer
+from arcmind.models.tokenizer import SensorTokenizer
 
 # ============================================================
 # Package-level tests
@@ -186,6 +186,21 @@ class TestSlowAttentionLayer:
         # We check the first position which should be identical
         assert torch.allclose(out_full[:, 0, :], out_trunc[:, 0, :], atol=1e-5)
 
+    def test_local_window_excludes_distant_query_tokens(self, tiny_config):
+        """Tokens older than the configured local window must not affect a query."""
+        config = replace(tiny_config, attn_window_size=3)
+        layer = SlowAttentionLayer(config)
+        layer.eval()
+        original = torch.randn(1, 8, config.d_model)
+        changed = original.clone()
+        changed[:, :5, :] += 100.0
+
+        with torch.no_grad():
+            original_last = layer(original)[:, -1, :]
+            changed_last = layer(changed)[:, -1, :]
+
+        assert torch.allclose(original_last, changed_last, atol=1e-5)
+
 
 class TestSlowAttention:
     def test_output_shape(self, tiny_config):
@@ -197,6 +212,46 @@ class TestSlowAttention:
     def test_num_layers(self, tiny_config):
         attn = SlowAttention(tiny_config)
         assert len(attn.layers) == tiny_config.num_attn_layers
+
+    def test_temporal_encoding_makes_memory_order_observable(self, tiny_config):
+        attn = SlowAttention(tiny_config)
+        attn.eval()
+        query = torch.randn(1, 1, tiny_config.d_model)
+        memory = torch.randn(1, 4, tiny_config.d_model)
+
+        with torch.no_grad():
+            chronological = attn(query, memory=memory)
+            reversed_order = attn(query, memory=memory.flip(1))
+
+        assert not torch.allclose(chronological, reversed_order, atol=1e-6)
+
+    def test_unordered_ablation_is_permutation_invariant(self, tiny_config):
+        config = replace(tiny_config, ablate_temporal_encoding=True)
+        attn = SlowAttention(config)
+        attn.eval()
+        query = torch.randn(1, 1, config.d_model)
+        memory = torch.randn(1, 4, config.d_model)
+
+        with torch.no_grad():
+            chronological = attn(query, memory=memory)
+            reversed_order = attn(query, memory=memory.flip(1))
+
+        assert torch.allclose(chronological, reversed_order, atol=1e-5)
+
+    def test_memory_window_excludes_older_slots(self, tiny_config):
+        config = replace(tiny_config, attn_window_size=2, num_memory_slots=6)
+        attn = SlowAttention(config)
+        attn.eval()
+        query = torch.randn(1, 1, config.d_model)
+        memory = torch.randn(1, 6, config.d_model)
+        changed = memory.clone()
+        changed[:, :-2, :] += 100.0
+
+        with torch.no_grad():
+            original = attn(query, memory=memory)
+            old_slots_changed = attn(query, memory=changed)
+
+        assert torch.allclose(original, old_slots_changed, atol=1e-6)
 
 
 # ============================================================
@@ -245,6 +300,31 @@ class TestEpisodicMemory:
         buf = mem.read()
         assert buf.shape == (3, tiny_config.num_memory_slots, tiny_config.d_model)
 
+    def test_valid_read_omits_empty_slots(self, tiny_config):
+        mem = EpisodicMemory(tiny_config)
+        mem.reset(batch_size=1)
+        assert mem.read(valid_only=True).shape == (1, 0, tiny_config.d_model)
+
+        mem.write(torch.randn(1, tiny_config.d_model))
+        assert mem.read(valid_only=True).shape == (1, 1, tiny_config.d_model)
+
+    def test_valid_read_is_chronological_after_wrap(self, tiny_config):
+        mem = EpisodicMemory(tiny_config)
+        mem.compressor = torch.nn.Identity()
+        mem.reset(batch_size=1)
+
+        for value in range(tiny_config.num_memory_slots + 2):
+            snapshot = torch.full((1, tiny_config.d_model), float(value))
+            mem.write(snapshot)
+
+        chronological = mem.read(valid_only=True)[0, :, 0]
+        expected = torch.arange(
+            2,
+            tiny_config.num_memory_slots + 2,
+            dtype=torch.float32,
+        )
+        assert torch.equal(chronological, expected)
+
     def test_reset_clears_buffer(self, tiny_config):
         mem = EpisodicMemory(tiny_config)
         mem.reset(batch_size=1)
@@ -262,10 +342,29 @@ class TestEpisodicMemory:
 class TestArcMindModel:
     def test_output_shape(self, tiny_config, batch_sensor_input):
         model = ArcMindModel(tiny_config)
-        model.reset_memory(batch_size=batch_sensor_input.shape[0])
         out = model(batch_sensor_input)
         batch, seq_len, _ = batch_sensor_input.shape
         assert out.shape == (batch, seq_len, tiny_config.action_dim)
+
+    def test_fresh_model_accepts_arbitrary_batch_size(
+        self,
+        tiny_config,
+        batch_sensor_input,
+    ):
+        model = ArcMindModel(tiny_config)
+        out = model(batch_sensor_input)
+        assert out.shape[0] == batch_sensor_input.shape[0]
+
+    def test_batch_forward_is_stateless(self, tiny_config, batch_sensor_input):
+        model = ArcMindModel(tiny_config)
+        model.eval()
+
+        with torch.no_grad():
+            first = model(batch_sensor_input)
+            second = model(batch_sensor_input)
+
+        assert torch.equal(first, second)
+        assert model.memory.get_occupancy() == 0
 
     def test_output_shape_no_memory(self, tiny_config, batch_sensor_input):
         model = ArcMindModel(tiny_config)
@@ -281,13 +380,68 @@ class TestArcMindModel:
     def test_gradient_flow_full_model(self, tiny_config, batch_sensor_input):
         """Gradients should flow from action output back to sensor input."""
         model = ArcMindModel(tiny_config)
-        model.reset_memory(batch_size=batch_sensor_input.shape[0])
         sensor_input = batch_sensor_input.clone().requires_grad_(True)
         out = model(sensor_input)
         loss = out.sum()
         loss.backward()
         assert sensor_input.grad is not None
         assert sensor_input.grad.abs().sum() > 0
+
+    def test_gradient_reaches_memory_compressor(self, tiny_config, batch_sensor_input):
+        """The learned episodic compressor must participate in training."""
+        model = ArcMindModel(tiny_config)
+        out = model(batch_sensor_input)
+        out.square().mean().backward()
+
+        compressor_grads = [
+            parameter.grad
+            for parameter in model.memory.compressor.parameters()
+            if parameter.requires_grad
+        ]
+        assert compressor_grads
+        assert all(grad is not None for grad in compressor_grads)
+        assert sum(grad.abs().sum() for grad in compressor_grads) > 0
+
+    def test_recall_reads_only_prior_decision_states(
+        self,
+        tiny_config,
+        batch_sensor_input,
+    ):
+        """The current snapshot is written after, not before, exact recall."""
+        model = ArcMindModel(tiny_config)
+        observed_memory_lengths = []
+        original_forward = model.slow_attention.forward
+
+        def record_memory_length(x, memory=None):
+            observed_memory_lengths.append(0 if memory is None else memory.shape[1])
+            return original_forward(x, memory=memory)
+
+        model.slow_attention.forward = record_memory_length
+        model(batch_sensor_input)
+
+        assert observed_memory_lengths == [0, 1]
+
+    def test_forward_is_causal(self, tiny_config, batch_sensor_input):
+        """Changing future sensor frames must not alter earlier actions."""
+        model = ArcMindModel(tiny_config)
+        model.eval()
+        prefix_len = model.decision_stride
+
+        original = batch_sensor_input.clone()
+        changed_future = original.clone()
+        changed_future[:, prefix_len:, :] += 100.0
+
+        with torch.no_grad():
+            model.reset_memory(batch_size=original.shape[0])
+            original_actions = model(original)
+            model.reset_memory(batch_size=changed_future.shape[0])
+            changed_actions = model(changed_future)
+
+        assert torch.allclose(
+            original_actions[:, :prefix_len, :],
+            changed_actions[:, :prefix_len, :],
+            atol=1e-6,
+        )
 
     def test_parameter_count(self, tiny_config):
         model = ArcMindModel(tiny_config)
@@ -303,17 +457,24 @@ class TestArcMindModel:
         assert total < 1_000_000, f"Tiny config has {total} params — too large"
 
     def test_reset_memory(self, tiny_config, batch_sensor_input):
-        """Reset should clear memory between episodes."""
+        """Reset should clear persistent streaming memory."""
         model = ArcMindModel(tiny_config)
         model.reset_memory(batch_size=batch_sensor_input.shape[0])
-        model(batch_sensor_input)
+        model.memory.write(
+            torch.randn(batch_sensor_input.shape[0], tiny_config.d_model)
+        )
         assert model.memory.get_occupancy() > 0
         model.reset_memory(batch_size=batch_sensor_input.shape[0])
         assert model.memory.get_occupancy() == 0
 
     def test_all_presets_instantiate(self):
         """All config presets should produce valid models."""
-        for preset_fn in [ArcMindConfig.iot_tiny, ArcMindConfig.robotics_small, ArcMindConfig.robotics_medium]:
+        preset_functions = [
+            ArcMindConfig.iot_tiny,
+            ArcMindConfig.robotics_small,
+            ArcMindConfig.robotics_medium,
+        ]
+        for preset_fn in preset_functions:
             config = preset_fn()
             model = ArcMindModel(config)
             x = torch.randn(1, 10, config.num_sensor_channels)

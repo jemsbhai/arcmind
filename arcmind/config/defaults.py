@@ -1,18 +1,12 @@
 """
 ArcMind model configuration.
 
-Design rationale (with literature support):
-- SSM:Attention ratio 12:1 to 15:1: Extends Granite 4's 9:1 and Jamba's 7:1
-  ratios further, justified by sensor streams being temporally smoother than text.
-- 2-4 attention heads for recall: Retrieval-Aware Distillation (Feb 2026) shows
-  only 2-3 "Gather-and-Aggregate" heads are needed for recall in SSM hybrids.
-- Memory slots 32-128: Expansion Span (AWS, Dec 2024) reserves attention context
-  for distant retrieval; we adapt this to a fixed ring buffer for robotics.
-- Sensor-native tokenization: Bypasses embedding table (which consumes 40%+ of
-  parameters in sub-100M text LMs like MobileLLM).
+The presets are engineering starting points. Their dimensions and timescale
+ratios are hypotheses to evaluate under the registered benchmark protocol, not
+literature-derived optima.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -32,7 +26,7 @@ class ArcMindConfig:
 
     # === Fast path: SSM core ===
     num_ssm_layers: int = 8
-    """Number of Mamba-2 SSM layers in the fast (sensor-rate) path."""
+    """Number of selective SSM layers in the fast (sensor-rate) path."""
 
     ssm_state_dim: int = 16
     """State dimension per channel in the SSM recurrence."""
@@ -48,10 +42,10 @@ class ArcMindConfig:
     """Number of exact attention layers in the slow (decision-rate) path."""
 
     num_attn_heads: int = 2
-    """Number of attention heads. Literature suggests 2-3 suffice for recall."""
+    """Number of heads in each exact-attention layer."""
 
     attn_window_size: int = 64
-    """Local sliding window size for the attention layers."""
+    """Maximum exact-recall slots and local query attention width."""
 
     decision_freq_hz: float = 10.0
     """Decision-rate frequency in Hz (how often the slow path runs)."""
@@ -83,6 +77,9 @@ class ArcMindConfig:
 
     ablate_gating: bool = False
     """If True, replace learned gating with simple 0.5/0.5 average."""
+
+    ablate_temporal_encoding: bool = False
+    """If True, omit relative-age embeddings from episodic memory."""
 
     # === Presets ===
     @classmethod
