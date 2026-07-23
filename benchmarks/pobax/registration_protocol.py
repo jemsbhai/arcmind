@@ -69,8 +69,7 @@ def validate_comparison_profile(registration: Mapping[str, Any]) -> str | None:
     profile = registration.get("comparison_profile")
     if profile not in COMPARISON_PROFILES:
         raise ValueError(
-            "comparison_profile must be 'pobax_author_semantics' or "
-            "'arcmind_shared_comparison'"
+            "comparison_profile must be 'pobax_author_semantics' or 'arcmind_shared_comparison'"
         )
     return str(profile)
 
