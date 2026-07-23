@@ -1,13 +1,20 @@
-"""Source-audited Mamba-1 policy core for the shared POBAX PPO harness.
+"""Source-audited Mamba-1 policy backbone for the shared POBAX PPO harness.
 
-The recurrent update is a JAX translation of the official Mamba-1 slow
-``step`` path. The policy adaptation adds only an input encoder and the common
-actor and critic heads. There is one Mamba block, with the official default
-``expand=2``, ``d_state=16``, ``d_conv=4``, and automatic
-``dt_rank=ceil(d_model / 16)``.
+The mixer is a JAX translation of the official Mamba-1 slow ``step`` path.
+The one-layer backbone follows the official ``Block`` and ``MixerModel``:
+pre-normalize with RMSNorm, apply the mixer, add the residual, and apply the
+final RMSNorm. The policy adaptation adds only an input encoder and the common
+actor and critic heads. The mixer uses the official default ``expand=2``,
+``d_state=16``, ``d_conv=4``, and automatic
+``dt_rank=ceil(d_model / 16)``. RMSNorm and the float32 residual follow the
+official ``MambaConfig`` defaults used by ``MambaLMHeadModel``.
 
 Audited source:
 https://github.com/state-spaces/mamba/blob/10b5d6358f27966f6a40e4bf0baa17a460688128/mamba_ssm/modules/mamba_simple.py
+https://github.com/state-spaces/mamba/blob/10b5d6358f27966f6a40e4bf0baa17a460688128/mamba_ssm/modules/block.py
+https://github.com/state-spaces/mamba/blob/10b5d6358f27966f6a40e4bf0baa17a460688128/mamba_ssm/models/mixer_seq_simple.py
+https://github.com/state-spaces/mamba/blob/10b5d6358f27966f6a40e4bf0baa17a460688128/mamba_ssm/models/config_mamba.py
+https://github.com/state-spaces/mamba/blob/10b5d6358f27966f6a40e4bf0baa17a460688128/mamba_ssm/ops/triton/layer_norm.py
 """
 
 from __future__ import annotations
@@ -27,9 +34,14 @@ MAMBA_VERSION = "2.2.6.post3"
 MAMBA_AUDITED_COMMIT = "10b5d6358f27966f6a40e4bf0baa17a460688128"
 MAMBA_SIMPLE_SHA256 = "a17e4c51b582dc0d4d690a649eba521cd0c1ee3dc8f0473a0967cdc9ec0874e3"
 MAMBA_SOURCE_PATH = "mamba_ssm/modules/mamba_simple.py"
+MAMBA_BLOCK_SHA256 = "b62e755195c277a027c5d9cc8d576a8ae4a1d1317143b91370b2f8ce683b4cc1"
+MAMBA_MIXER_MODEL_SHA256 = "13409d7044e930ea3271e4b8ddceaf8155ec49b8e5ac299fba7bb0df6d80cb21"
+MAMBA_RMSNORM_SHA256 = "006fb18f7098fc244a318c899841ad4c1a6ea0f614dfe7a1feb4e2e38185235f"
+MAMBA_CONFIG_SHA256 = "2a72c1686f775b56547e39ca4406ba10148d12fd7a791c57ce2ba85126010fcd"
 MAMBA_D_STATE = 16
 MAMBA_D_CONV = 4
 MAMBA_EXPAND = 2
+MAMBA_NORM_EPSILON = 1e-5
 
 
 def _xavier(key: Array, input_features: int, output_features: int) -> Array:
@@ -53,6 +65,15 @@ def _linear(params: Params, prefix: str, values: Array) -> Array:
 def _inverse_softplus(values: Array) -> Array:
     """Stable inverse of softplus, matching the audited PyTorch initializer."""
     return values + jnp.log(-jnp.expm1(-values))
+
+
+def _rms_norm(values: Array, weight: Array) -> Array:
+    """Official scale-only RMSNorm with no centering and no bias."""
+    input_dtype = values.dtype
+    normalized = values * jax.lax.rsqrt(
+        jnp.mean(jnp.square(values), axis=-1, keepdims=True) + MAMBA_NORM_EPSILON
+    )
+    return (normalized * weight).astype(input_dtype)
 
 
 class MambaState(NamedTuple):
@@ -126,6 +147,7 @@ class MambaPolicyCore:
         return {
             "encoder.kernel": _xavier(encoder_key, self.input_dim, self.hidden_size),
             "encoder.bias": jnp.zeros((self.hidden_size,)),
+            "layers.0.norm.weight": jnp.ones((self.hidden_size,)),
             "mamba.in_proj.kernel": jax.random.uniform(
                 in_proj_key,
                 (self.hidden_size, 2 * self.d_inner),
@@ -168,6 +190,7 @@ class MambaPolicyCore:
                 minval=-inner_projection_bound,
                 maxval=inner_projection_bound,
             ),
+            "norm_f.weight": jnp.ones((self.hidden_size,)),
             "actor.kernel": 0.01 * _xavier(actor_key, self.hidden_size, self.action_dim),
             "actor.bias": jnp.zeros((self.action_dim,)),
             "critic.kernel": _xavier(critic_key, self.hidden_size, 1),
@@ -253,8 +276,21 @@ class MambaPolicyCore:
         policy_input: Array,
         reset: Array,
     ) -> tuple[MambaState, Array, Array]:
-        hidden = _linear(params, "encoder", policy_input)
-        new_state, features = self.block_step(params, state, hidden, reset)
+        residual = _linear(params, "encoder", policy_input)
+        normalized = _rms_norm(
+            residual.astype(params["layers.0.norm.weight"].dtype),
+            params["layers.0.norm.weight"],
+        )
+        new_state, mixer_output = self.block_step(
+            params,
+            state,
+            normalized,
+            reset,
+        )
+        features = _rms_norm(
+            residual.astype(jnp.float32) + mixer_output,
+            params["norm_f.weight"],
+        )
         logits = _linear(params, "actor", features)
         values = _linear(params, "critic", features)[..., 0]
         return new_state, logits, values
@@ -329,6 +365,7 @@ def mamba_parameter_count(
     dt_projection = dt_rank * d_inner + d_inner
     dynamics = d_inner * MAMBA_D_STATE + d_inner
     output_projection = d_inner * hidden_size
+    normalization = 2 * hidden_size
     heads = hidden_size * action_dim + action_dim + hidden_size + 1
     return (
         encoder
@@ -338,6 +375,7 @@ def mamba_parameter_count(
         + dt_projection
         + dynamics
         + output_projection
+        + normalization
         + heads
     )
 

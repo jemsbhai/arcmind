@@ -15,9 +15,14 @@ import pytest
 from benchmarks.pobax.arcmind_reference import ReferenceConfig
 from benchmarks.pobax.mamba_core import (
     MAMBA_AUDITED_COMMIT,
+    MAMBA_BLOCK_SHA256,
+    MAMBA_CONFIG_SHA256,
     MAMBA_D_CONV,
     MAMBA_D_STATE,
     MAMBA_EXPAND,
+    MAMBA_MIXER_MODEL_SHA256,
+    MAMBA_NORM_EPSILON,
+    MAMBA_RMSNORM_SHA256,
     MAMBA_SIMPLE_SHA256,
     MAMBA_VERSION,
     MambaPolicyCore,
@@ -46,6 +51,14 @@ def _assert_state_close(
     np.testing.assert_allclose(actual.ssm, expected.ssm, rtol=rtol, atol=atol)
 
 
+def _official_rms_norm(values, weight):
+    return (
+        values
+        * jax.lax.rsqrt(jnp.mean(jnp.square(values), axis=-1, keepdims=True) + MAMBA_NORM_EPSILON)
+        * weight
+    )
+
+
 def test_fixture_is_immutable_and_names_the_exact_audited_source() -> None:
     fixture_bytes = FIXTURE_PATH.read_bytes()
     assert hashlib.sha256(fixture_bytes).hexdigest() == FIXTURE_SHA256
@@ -56,6 +69,22 @@ def test_fixture_is_immutable_and_names_the_exact_audited_source() -> None:
     assert provenance["commit"] == MAMBA_AUDITED_COMMIT
     assert provenance["source_sha256"] == MAMBA_SIMPLE_SHA256
     assert provenance["execution_path"] == "Mamba.step dependency-light PyTorch slow path"
+
+
+def test_wrapper_sources_are_pinned_to_the_audited_official_files() -> None:
+    assert MAMBA_BLOCK_SHA256 == (
+        "b62e755195c277a027c5d9cc8d576a8ae4a1d1317143b91370b2f8ce683b4cc1"
+    )
+    assert MAMBA_MIXER_MODEL_SHA256 == (
+        "13409d7044e930ea3271e4b8ddceaf8155ec49b8e5ac299fba7bb0df6d80cb21"
+    )
+    assert MAMBA_RMSNORM_SHA256 == (
+        "006fb18f7098fc244a318c899841ad4c1a6ea0f614dfe7a1feb4e2e38185235f"
+    )
+    assert MAMBA_CONFIG_SHA256 == (
+        "2a72c1686f775b56547e39ca4406ba10148d12fd7a791c57ce2ba85126010fcd"
+    )
+    assert MAMBA_NORM_EPSILON == 1e-5
 
 
 def test_block_step_matches_official_pytorch_outputs_with_transplanted_weights() -> None:
@@ -133,6 +162,86 @@ def test_initialization_preserves_official_mamba1_defaults_and_special_parameter
     assert bool(jnp.all(dt <= core.dt_max))
     assert params["mamba.in_proj.kernel"].shape == (17, 68)
     assert params["mamba.x_proj.kernel"].shape == (34, 34)
+    np.testing.assert_array_equal(
+        params["layers.0.norm.weight"],
+        jnp.ones((core.hidden_size,)),
+    )
+    np.testing.assert_array_equal(
+        params["norm_f.weight"],
+        jnp.ones((core.hidden_size,)),
+    )
+
+
+def test_policy_step_matches_canonical_one_block_wrapper_equation() -> None:
+    core = _core()
+    params = core.initialize(jax.random.PRNGKey(17))
+    state = MambaState(
+        convolution=jax.random.normal(
+            jax.random.PRNGKey(18),
+            (3, core.d_inner, MAMBA_D_CONV),
+        ),
+        ssm=jax.random.normal(
+            jax.random.PRNGKey(19),
+            (3, core.d_inner, MAMBA_D_STATE),
+        ),
+    )
+    policy_input = jax.random.normal(jax.random.PRNGKey(20), (3, core.input_dim))
+    reset = jnp.asarray([False, True, False])
+
+    residual = policy_input @ params["encoder.kernel"] + params["encoder.bias"]
+    normalized = _official_rms_norm(
+        residual.astype(params["layers.0.norm.weight"].dtype),
+        params["layers.0.norm.weight"],
+    )
+    expected_state, mixer_output = core.block_step(
+        params,
+        state,
+        normalized,
+        reset,
+    )
+    expected_features = _official_rms_norm(
+        residual.astype(jnp.float32) + mixer_output,
+        params["norm_f.weight"],
+    )
+    expected_logits = expected_features @ params["actor.kernel"] + params["actor.bias"]
+    expected_values = (expected_features @ params["critic.kernel"] + params["critic.bias"])[..., 0]
+
+    actual_state, actual_logits, actual_values = core.step(
+        params,
+        state,
+        policy_input,
+        reset,
+    )
+
+    _assert_state_close(actual_state, expected_state)
+    np.testing.assert_allclose(actual_logits, expected_logits, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(actual_values, expected_values, rtol=1e-6, atol=1e-7)
+
+
+def test_zero_mixer_preserves_residual_and_rmsnorm_does_not_center() -> None:
+    core = MambaPolicyCore(input_dim=3, action_dim=3, hidden_size=3)
+    params = dict(core.initialize(jax.random.PRNGKey(21)))
+    params["encoder.kernel"] = jnp.eye(3)
+    params["encoder.bias"] = jnp.zeros((3,))
+    params["mamba.out_proj.kernel"] = jnp.zeros_like(params["mamba.out_proj.kernel"])
+    params["norm_f.weight"] = jnp.asarray([1.0, 2.0, 3.0])
+    params["actor.kernel"] = jnp.eye(3)
+    params["actor.bias"] = jnp.zeros((3,))
+    policy_input = jnp.full((1, 3), 2.0)
+
+    _, logits, _ = core.step(
+        params,
+        core.initial_state(1),
+        policy_input,
+        jnp.asarray([True]),
+    )
+    expected = _official_rms_norm(
+        policy_input,
+        params["norm_f.weight"],
+    )
+
+    np.testing.assert_allclose(logits, expected, rtol=1e-6, atol=1e-6)
+    assert bool(jnp.all(jnp.abs(logits) > 0.5))
 
 
 def test_apply_sequence_matches_repeated_steps_with_asynchronous_resets() -> None:
@@ -319,6 +428,8 @@ def test_jitted_outputs_and_gradients_are_finite() -> None:
         "mamba.x_proj.kernel",
         "mamba.dt_proj.kernel",
         "mamba.A_log",
+        "layers.0.norm.weight",
+        "norm_f.weight",
     ):
         assert float(jnp.linalg.norm(gradients[name])) > 0.0
 
@@ -341,6 +452,7 @@ def test_parameter_and_cache_counts_are_exact() -> None:
         + inner * 16
         + inner
         + inner * hidden
+        + 2 * hidden
         + hidden * core.action_dim
         + core.action_dim
         + hidden
