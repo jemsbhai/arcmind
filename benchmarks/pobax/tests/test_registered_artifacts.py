@@ -11,6 +11,7 @@ from benchmarks.pobax.registered_artifacts import (
     ArtifactChecksumError,
     ExistingArtifactMismatchError,
     RegisteredArtifactError,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
     canonical_json_sha256,
@@ -98,6 +99,17 @@ def test_atomic_json_write_skips_identical_and_refuses_mismatch(tmp_path: Path) 
         atomic_write_json(target, {"seed": 2207, "result": [9]})
     assert target.read_bytes() == b'{"result":[1,2],"seed":2207}\n'
     assert not list(target.parent.glob("*.tmp"))
+
+
+def test_atomic_byte_write_is_immutable(tmp_path: Path) -> None:
+    target = tmp_path / "cell.log"
+    first = atomic_write_bytes(target, b"training log\n")
+
+    assert first.written is True
+    assert first.sha256 == hashlib.sha256(b"training log\n").hexdigest()
+    assert atomic_write_bytes(target, b"training log\n").written is False
+    with pytest.raises(ExistingArtifactMismatchError, match="refusing to replace"):
+        atomic_write_bytes(target, b"different\n")
 
 
 def test_dependency_and_artifact_checksums(tmp_path: Path) -> None:

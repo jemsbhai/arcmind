@@ -12,6 +12,7 @@ from typing import Any
 
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_sha256,
     registered_cell_id,
@@ -374,6 +375,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     and candidate["seed"] == seed
                 )
                 artifact_path = output_root / cell["artifact_path"]
+                log_path = artifact_path.with_suffix(".log")
                 artifact = _load_matching_artifact(
                     artifact_path,
                     expected_status=expected_status,
@@ -399,10 +401,14 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     process = subprocess.run(
                         _command_for_cell(cell_args),
                         check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
                     )
+                    atomic_write_bytes(log_path, process.stdout)
                     if process.returncode != 0:
                         raise RuntimeError(
-                            f"cell failed with exit code {process.returncode}: {cell['cell_id']}"
+                            f"cell failed with exit code {process.returncode}: "
+                            f"{cell['cell_id']}; log={log_path}"
                         )
                     artifact = _load_matching_artifact(
                         artifact_path,
@@ -417,10 +423,14 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     )
                     if artifact is None:
                         raise RuntimeError(f"cell completed without creating {artifact_path}")
+                if not log_path.is_file():
+                    raise RuntimeError(f"completed cell is missing its immutable log: {log_path}")
                 completed_cells.append(
                     {
                         **cell,
                         "artifact_sha256": sha256_file(artifact_path),
+                        "log_path": log_path.relative_to(output_root).as_posix(),
+                        "log_sha256": sha256_file(log_path),
                     }
                 )
 

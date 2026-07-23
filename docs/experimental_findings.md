@@ -332,7 +332,7 @@ with each actual experiment.
 - Replay check: the SHM unit test reconstructs collection logits with stored
   addresses and obtains zero approximate KL before an update. The real smoke
   completed with finite loss and final approximate KL `0.00092`.
-- Test coverage: the unified POBAX suite passed all 145 tests on CUDA and CPU.
+- Test coverage: the unified POBAX suite passed all 148 tests on CUDA and CPU.
   These include source-equation fixtures, asynchronous reset, step-scan
   agreement, JIT, gradients, parameter matching, SHM address distribution,
   source-compatible row-zero addressing, and exact address replay.
@@ -384,6 +384,105 @@ with each actual experiment.
     `1c871aabe995f4a2c32bce5c7ecd230c3c40b69c75d52f352c0518eec93172b8`.
 - Disposition: include Walker-V in the pilot task set. Report Walker-F only in
   a separately labeled upper-reference table.
+
+### F-SMOKE-006: The frozen matrix launcher completes and resumes cleanly
+
+- Class: `development smoke`
+- Status: infrastructure validation only
+- Date: 2026-07-23
+- Source commit:
+  `de799c334072e270bce9102a04765e75f5943020`, clean detached worktree
+- Task: T-Maze-10, seed `1103`, ten policy cores, 8,192 environment
+  transitions per cell, and exactly one retained evaluation episode for each
+  of 32 vector environments
+- First attempt: a worktree created by Windows Git embedded a Windows absolute
+  Git-directory pointer that WSL Git could not resolve. The launcher stopped
+  during provenance discovery before creating an output directory or running
+  a cell. Recreating the same detached worktree with WSL Git resolved the
+  platform-path mismatch.
+- Completed matrix:
+
+  | Model | Parameters | Ratio | Training episodes | Evaluation episodes | Mean return |
+  |---|---:|---:|---:|---:|---:|
+  | ArcMind | 28,717 | 1.0000 | 10 | 32 | 0.0000 |
+  | ArcMind SSM only | 28,717 | 1.0000 | 13 | 32 | 0.0000 |
+  | FFM | 28,577 | 0.9951 | 30 | 32 | 0.0000 |
+  | GRU | 28,893 | 1.0061 | 30 | 32 | 0.0000 |
+  | LSTM | 28,840 | 1.0043 | 20 | 32 | 0.0000 |
+  | Memoryless MLP | 28,663 | 0.9981 | 29 | 32 | 2.0781 |
+  | Positional MLP | 28,526 | 0.9933 | 31 | 32 | 0.0000 |
+  | S5RL | 28,617 | 0.9965 | 21 | 32 | 0.0000 |
+  | SHM | 28,727 | 1.0003 | 143 | 32 | 2.0781 |
+  | Transformer-XL | 28,869 | 1.0053 | 8 | 32 | 0.0000 |
+- Execution: the complete launcher used 240.5 wall-clock seconds, while the
+  ten recorded training intervals summed to 107.2 local GPU seconds. A second
+  invocation resumed all ten cells without retraining in 28.6 seconds.
+- Integrity:
+  - completion status was `complete` with 10 planned and 10 completed cells;
+  - canonical matrix-manifest SHA256 was
+    `07845dfff52ba337bcc7027301dd8a9ace2fd57693f7a1f93e22de3069f6257a`;
+  - frozen-manifest file SHA256 was
+    `1a0cd352663bd98d395ebb92b5d7324c44f4647e0a90cab903d953c4b9039f77`;
+  - checksum-manifest SHA256 was
+    `22a71ce3ed04a50dd311f247c41f966c2251800de382e7bf1673f0a588f0b1a3`;
+    and
+  - `sha256sum -c` verified the registration, frozen manifest, completion
+    index, and all ten cell artifacts before and after resume.
+- Runtime notes: optional Warp imports were unavailable, and XLA emitted
+  nonfatal autotuning fallback warnings during ArcMind compilation. Every
+  selected cell still completed with finite training and evaluation metrics.
+- Interpretation: this validates clean provenance discovery, frozen Cartesian
+  expansion, fresh-process isolation, complete runtime fingerprints,
+  collision-safe artifact creation, checksum generation, and idempotent
+  resume. The return differences are not comparative evidence because this is
+  a one-seed development smoke at less than one percent of the registered
+  T-Maze interaction budget.
+- Raw artifact directory:
+  `benchmark_results/pobax/matrix-smoke-controls-v1-de799c3`
+- Disposition: use the launcher for a predeclared multi-seed T-Maze pilot.
+  Create WSL worktrees with WSL Git whenever WSL executes the experiment.
+
+### F-PILOT-001: T-Maze multi-seed viability screen
+
+- Class: `development smoke`
+- Status: planned and frozen before outcome inspection
+- Date planned: 2026-07-23
+- Question: do the ten required low-dimensional controls train stably and
+  complete independent evaluation under a shared configuration long enough to
+  justify full-budget registered execution?
+- Prediction: ArcMind, its SSM-only ablation, and every required source-audited
+  control will complete all three paired seeds with finite losses and exactly
+  128 evaluation episodes per seed. No directional performance claim is
+  preregistered for this development screen.
+- Cells: T-Maze-10 crossed with memoryless MLP, positional MLP, FFM, SHM
+  `paper_uniform`, GRU, LSTM, S5RL, Transformer-XL, ArcMind SSM-only, and
+  ArcMind on seeds `1103`, `2207`, and `3301`, for 30 cells total.
+- Training contract:
+  - 250,000 exact environment transitions per cell;
+  - eight vector environments and 125 rollout steps, giving exactly 1,000
+    transitions per update and 250 updates;
+  - four PPO update epochs, four environment-axis minibatches, learning rate
+    `0.00025`, environment gamma `0.99`, no checkpoint selection, and the final
+    policy only; and
+  - parameter matching to the ArcMind cell within ten percent, with the
+    source-defined FFM and SHM memory structures held fixed.
+- Evaluation contract: 16 deterministic episodes from each of eight fresh
+  vector environments, or 128 episodes per model and seed, with the full
+  source-defined 1,000-step horizon.
+- Frozen registration:
+  `benchmarks/pobax/manifests/tmaze_pilot_v1.json`
+- Decision rules:
+  - any crash, nonfinite required metric, incomplete evaluation count,
+    provenance drift, or missing artifact fails that cell;
+  - do not delete or replace a low-return method;
+  - if a method fails for an implementation reason, repair it and rerun all
+    three cells for that method under a new manifest rather than cherry-pick a
+    seed;
+  - retain every required baseline for final registration regardless of pilot
+    rank; and
+  - treat all return differences as development evidence that cannot enter a
+    paper table, abstract, or conclusion.
+- Compute: local GPU only, expected external cost `$0`.
 
 ### F-REG-000: No registered performance finding exists
 

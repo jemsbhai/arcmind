@@ -165,6 +165,11 @@ python -m benchmarks.pobax.run_matrix \
   --output-root benchmark_results/pobax/smoke-controls-v1
 ```
 
+The first predeclared multi-seed pilot uses
+`benchmarks/pobax/manifests/tmaze_pilot_v1.json`. It trains ten controls for
+250,000 exact environment transitions on the three development seeds. Its
+pilot status remains ineligible for paper performance claims.
+
 The launcher first describes every cell, hashes the expanded manifest, and
 then starts each model in a fresh process. It requires clean Git provenance,
 skips only identity-, configuration-, and provenance-compatible completed
@@ -175,6 +180,9 @@ Every registration declares `matrix_kind`. A `primary_comparison` matrix must
 include ArcMind. An `upper_reference` matrix contains only the memoryless
 policy on its separately labeled privileged or full-observation task. A
 registered-final matrix is accepted only with exactly 30 paired seeds.
+Each child process writes an immutable per-cell log beside its JSON artifact.
+The completion index records both hashes, and the directory checksum covers
+the logs as well as the structured results.
 
 A completed registered-final matrix is aggregated with:
 

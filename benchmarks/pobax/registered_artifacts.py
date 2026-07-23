@@ -353,6 +353,16 @@ def atomic_write_json(
     return _atomic_create(Path(path), canonical_json_bytes(value) + b"\n")
 
 
+def atomic_write_bytes(
+    path: str | os.PathLike[str],
+    content: bytes,
+) -> ArtifactWriteResult:
+    """Atomically create an arbitrary byte artifact without replacement."""
+    if not isinstance(content, bytes):
+        raise TypeError("content must be bytes")
+    return _atomic_create(Path(path), content)
+
+
 def verify_artifact_checksum(
     path: str | os.PathLike[str],
     expected_sha256: str,
@@ -405,6 +415,7 @@ __all__ = [
     "ArtifactWriteResult",
     "ExistingArtifactMismatchError",
     "RegisteredArtifactError",
+    "atomic_write_bytes",
     "atomic_write_json",
     "canonical_json_bytes",
     "canonical_json_sha256",

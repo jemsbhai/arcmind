@@ -1,4 +1,4 @@
-protocol_version: 3
+protocol_version: 4
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -63,6 +63,16 @@ stages:
     implementation: shared_jax_ppo
     result_status: development_only_until_all_adapters_and_hyperparameters_are_frozen
     seeds: [1103, 2207, 3301]
+    first_frozen_matrix:
+      manifest: benchmarks/pobax/manifests/tmaze_pilot_v1.json
+      environment: tmaze_10
+      train_steps: 250000
+      num_envs: 8
+      rollout_steps: 125
+      exact_steps_per_update: 1000
+      update_epochs: 4
+      evaluation_episodes_per_environment: 16
+      total_evaluation_episodes_per_seed: 128
     validated_policy_cores:
       - memoryless_mlp
       - frame_stack_mlp

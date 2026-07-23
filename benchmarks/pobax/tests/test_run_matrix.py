@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
@@ -38,6 +39,16 @@ def _registration() -> dict[str, object]:
         "require_gpu": True,
         "quick": False,
     }
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["smoke_controls_v1.json", "tmaze_pilot_v1.json"],
+)
+def test_repository_registrations_are_valid(filename: str):
+    manifest_path = Path(__file__).resolve().parents[1] / "manifests" / filename
+
+    assert _load_registration(manifest_path)["status"] == "frozen"
 
 
 def test_registration_accepts_a_complete_paired_matrix(tmp_path):
