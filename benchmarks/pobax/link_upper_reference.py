@@ -23,6 +23,7 @@ from benchmarks.pobax.registered_artifacts import (
     sha256_file,
 )
 from benchmarks.pobax.registration_protocol import (
+    normalize_final_selection_binding,
     normalize_learner,
     realized_environment_steps,
     registration_fields,
@@ -58,6 +59,7 @@ _MANIFEST_KEYS = {
     "provenance",
     "cells",
 }
+_MANIFEST_KEYS_V4 = _MANIFEST_KEYS | {"tuning_selection"}
 _CELL_KEYS = {
     "cell_id",
     "environment",
@@ -65,6 +67,12 @@ _CELL_KEYS = {
     "seed",
     "configuration_sha256",
     "artifact_path",
+}
+_CELL_KEYS_V4 = _CELL_KEYS | {
+    "candidate_id",
+    "model_family",
+    "implementation_model",
+    "tuning_aggregate_sha256",
 }
 _COMPLETION_KEYS = {
     "schema_version",
@@ -75,6 +83,11 @@ _COMPLETION_KEYS = {
     "cells",
 }
 _COMPLETED_CELL_KEYS = _CELL_KEYS | {
+    "artifact_sha256",
+    "log_path",
+    "log_sha256",
+}
+_COMPLETED_CELL_KEYS_V4 = _CELL_KEYS_V4 | {
     "artifact_sha256",
     "log_path",
     "log_sha256",
@@ -241,17 +254,53 @@ def _validate_registration(root: Path) -> tuple[dict[str, Any], str]:
     if tier == "registered_final" and len(seeds) != 30:
         raise UpperReferenceLinkError("registered_final requires exactly 30 paired seeds")
     try:
-        learner = normalize_learner(
-            raw["learner"],
-            schema_version=schema_version,
-        )
-        for environment in environments:
-            realized_environment_steps(
-                environment["total_steps"],
-                num_envs=int(learner["num_envs"]),
-                rollout_steps=int(learner["rollout_steps"]),
-                comparison_profile=comparison_profile,
+        if schema_version == 4:
+            if (
+                tier != "registered_final"
+                or matrix_kind != "primary_comparison"
+                or comparison_profile != "arcmind_shared_comparison"
+            ):
+                raise ValueError(
+                    "schema-v4 registration requires a registered-final primary "
+                    "comparison with arcmind_shared_comparison"
+                )
+            binding = normalize_final_selection_binding(raw["tuning_selection"])
+            selections = list(binding["selections"])
+            expected_selection_identities = [
+                (environment, model) for environment in environment_ids for model in models
+            ]
+            actual_selection_identities = [
+                (selection["environment"], selection["implementation_model"])
+                for selection in selections
+            ]
+            if actual_selection_identities != expected_selection_identities:
+                raise ValueError(
+                    "schema-v4 tuning selections must exactly cover the ordered "
+                    "environment and model product"
+                )
+            environment_budgets = {
+                environment["id"]: environment["total_steps"] for environment in environments
+            }
+            for selection in selections:
+                learner = selection["learner"]
+                realized_environment_steps(
+                    environment_budgets[selection["environment"]],
+                    num_envs=int(learner["num_envs"]),
+                    rollout_steps=int(learner["rollout_steps"]),
+                    comparison_profile=comparison_profile,
+                )
+        else:
+            learner = normalize_learner(
+                raw["learner"],
+                schema_version=schema_version,
             )
+            for environment in environments:
+                realized_environment_steps(
+                    environment["total_steps"],
+                    num_envs=int(learner["num_envs"]),
+                    rollout_steps=int(learner["rollout_steps"]),
+                    comparison_profile=comparison_profile,
+                )
     except ValueError as error:
         raise UpperReferenceLinkError(str(error)) from error
     evaluation_episodes = raw["evaluation_episodes_per_env"]
@@ -266,6 +315,8 @@ def _validate_registration(root: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(raw["require_gpu"], bool) or not isinstance(raw["quick"], bool):
         raise UpperReferenceLinkError("registration boolean fields must be booleans")
     if raw["quick"]:
+        if schema_version == 4:
+            raise UpperReferenceLinkError("schema-v4 registration cannot be quick")
         if tier != "smoke":
             raise UpperReferenceLinkError("quick registration is valid only for smoke")
         if any(environment["total_steps"] != 8_192 for environment in environments):
@@ -287,7 +338,12 @@ def _validate_manifest(
         _load_json(root / "frozen_manifest.json", field="frozen manifest"),
         field="frozen_manifest",
     )
-    _exact_keys(raw, _MANIFEST_KEYS, field="frozen_manifest")
+    schema_version = registration["schema_version"]
+    _exact_keys(
+        raw,
+        _MANIFEST_KEYS_V4 if schema_version == 4 else _MANIFEST_KEYS,
+        field="frozen_manifest",
+    )
     if raw["schema_version"] != registration["schema_version"] or raw["status"] != "frozen":
         raise UpperReferenceLinkError("frozen_manifest schema must match its frozen registration")
     manifest_sha256 = _sha256(
@@ -309,6 +365,8 @@ def _validate_manifest(
     actual_identity = {key: raw[key] for key in expected_identity}
     if actual_identity != expected_identity:
         raise UpperReferenceLinkError("frozen_manifest identity drifts from registration")
+    if schema_version == 4 and raw["tuning_selection"] != registration["tuning_selection"]:
+        raise UpperReferenceLinkError("frozen_manifest tuning_selection drifts from registration")
 
     models = registration["models"]
     environments = expected_identity["environments"]
@@ -328,7 +386,8 @@ def _validate_manifest(
     for index, raw_cell in enumerate(raw_cells):
         field = f"frozen_manifest.cells[{index}]"
         cell = _mapping(raw_cell, field=field)
-        _exact_keys(cell, _CELL_KEYS, field=field)
+        cell_keys = _CELL_KEYS_V4 if schema_version == 4 else _CELL_KEYS
+        _exact_keys(cell, cell_keys, field=field)
         identity = _cell_identity(cell, field=field)
         if identity not in expected_cells or identity in cells:
             raise UpperReferenceLinkError(f"{field} has an invalid or duplicate identity")
@@ -348,6 +407,26 @@ def _validate_manifest(
             raise UpperReferenceLinkError(f"{field} duplicates a cell ID or artifact path")
         seen_cell_ids.add(cell_id)
         seen_artifact_paths.add(relative_path)
+        if schema_version == 4:
+            selection = next(
+                (
+                    item
+                    for item in registration["tuning_selection"]["selections"]
+                    if item["environment"] == identity[0]
+                    and item["implementation_model"] == identity[1]
+                ),
+                None,
+            )
+            if selection is None or (
+                cell["candidate_id"] != selection["candidate_id"]
+                or cell["model_family"] != selection["model_family"]
+                or cell["implementation_model"] != identity[1]
+                or cell["tuning_aggregate_sha256"]
+                != registration["tuning_selection"]["aggregate_sha256"]
+            ):
+                raise UpperReferenceLinkError(
+                    f"{field} tuning-selection identity drifts from registration"
+                )
         cells[identity] = {
             **dict(cell),
             "artifact_path": relative_path,
@@ -389,13 +468,16 @@ def _validate_completion_and_checksums(
     for index, raw_completed in enumerate(raw_index["cells"]):
         field = f"completion_index.cells[{index}]"
         completed = _mapping(raw_completed, field=field)
-        _exact_keys(completed, _COMPLETED_CELL_KEYS, field=field)
+        schema_version = manifest["schema_version"]
+        completed_keys = _COMPLETED_CELL_KEYS_V4 if schema_version == 4 else _COMPLETED_CELL_KEYS
+        frozen_cell_keys = _CELL_KEYS_V4 if schema_version == 4 else _CELL_KEYS
+        _exact_keys(completed, completed_keys, field=field)
         identity = _cell_identity(completed, field=field)
         if identity not in cells or identity in indexed:
             raise UpperReferenceLinkError(f"{field} has an invalid or duplicate identity")
         indexed.add(identity)
         frozen = cells[identity]
-        for key in _CELL_KEYS:
+        for key in frozen_cell_keys:
             if key == "artifact_path":
                 expected = frozen["artifact_path"]
             else:
@@ -498,6 +580,43 @@ def _task_contracts(
             )
         contracts[environment] = contract
     return contracts
+
+
+def _task_contracts_by_model(
+    cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    contracts: dict[tuple[str, str], dict[str, Any]] = {}
+    for identity, cell in cells.items():
+        artifact = _mapping(
+            _load_json(cell["resolved_artifact_path"], field=f"artifact{identity!r}"),
+            field=f"artifact{identity!r}",
+        )
+        configuration = _mapping(
+            artifact.get("configuration"),
+            field=f"artifact{identity!r}.configuration",
+        )
+        ppo = _mapping(configuration.get("ppo"), field=f"artifact{identity!r}.configuration.ppo")
+        contract = {
+            "ppo": dict(ppo),
+            "evaluation_episodes_per_environment": configuration.get(
+                "evaluation_episodes_per_environment"
+            ),
+            "evaluation_max_episode_steps": configuration.get("evaluation_max_episode_steps"),
+        }
+        environment_model = identity[:2]
+        if environment_model in contracts and contracts[environment_model] != contract:
+            raise UpperReferenceLinkError(
+                f"learner or evaluation contract differs across seeds for {environment_model!r}"
+            )
+        contracts[environment_model] = contract
+    return contracts
+
+
+def _evaluation_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "evaluation_episodes_per_environment": contract["evaluation_episodes_per_environment"],
+        "evaluation_max_episode_steps": contract["evaluation_max_episode_steps"],
+    }
 
 
 def _runtime_without_device(value: Any, *, field: str) -> dict[str, Any]:
@@ -604,17 +723,28 @@ def build_upper_reference_link(
     tier = primary_registration["evidence_tier"]
     if upper_registration["evidence_tier"] != tier:
         raise UpperReferenceLinkError("paired matrices have different evidence tiers")
-    if primary_registration["schema_version"] != upper_registration[
+    selected_primary_to_author_upper = (
+        tier == "registered_final"
+        and primary_registration["schema_version"] == 4
+        and primary_registration.get("comparison_profile") == "arcmind_shared_comparison"
+        and upper_registration["schema_version"] == 2
+        and upper_registration.get("comparison_profile") == "pobax_author_semantics"
+    )
+    legacy_matching_contract = primary_registration["schema_version"] == upper_registration[
         "schema_version"
-    ] or primary_registration.get("comparison_profile") != upper_registration.get(
+    ] and primary_registration.get("comparison_profile") == upper_registration.get(
         "comparison_profile"
-    ):
+    )
+    if not selected_primary_to_author_upper and not legacy_matching_contract:
         raise UpperReferenceLinkError(
             "paired matrices have different registration schemas or comparison profiles"
         )
     if primary_registration["seeds"] != upper_registration["seeds"]:
         raise UpperReferenceLinkError("paired matrices must use the same ordered seed list")
-    if primary_registration["learner"] != upper_registration["learner"]:
+    if (
+        not selected_primary_to_author_upper
+        and primary_registration["learner"] != upper_registration["learner"]
+    ):
         raise UpperReferenceLinkError("paired matrices have different learner registrations")
     if (
         primary_registration["evaluation_episodes_per_env"]
@@ -639,24 +769,106 @@ def build_upper_reference_link(
         )
 
     _validate_registered_budgets(tier, primary_registration, upper_registration)
-    primary_contracts = _task_contracts(primary_cells)
-    upper_contracts = _task_contracts(upper_cells)
     alias_mapping: list[dict[str, str]] = []
-    for upper_environment, primary_environment in zip(
-        upper_environments,
-        primary_environments,
-    ):
-        if upper_contracts[upper_environment] != primary_contracts[primary_environment]:
-            raise UpperReferenceLinkError(
-                "learner or evaluation contract differs for paired environments "
-                f"{primary_environment!r} and {upper_environment!r}"
-            )
+    for upper_environment, primary_environment in zip(upper_environments, primary_environments):
         alias_mapping.append(
             {
                 "upper_reference_environment": upper_environment,
                 "primary_environment": primary_environment,
             }
         )
+    if selected_primary_to_author_upper:
+        primary_model_contracts = _task_contracts_by_model(primary_cells)
+        upper_model_contracts = _task_contracts_by_model(upper_cells)
+        for mapping in alias_mapping:
+            primary_environment = mapping["primary_environment"]
+            upper_environment = mapping["upper_reference_environment"]
+            upper_contract = upper_model_contracts[(upper_environment, "memoryless_mlp")]
+            for model in primary_registration["models"]:
+                primary_contract = primary_model_contracts[(primary_environment, model)]
+                if _evaluation_contract(primary_contract) != _evaluation_contract(upper_contract):
+                    raise UpperReferenceLinkError(
+                        "evaluation contract differs for paired environments "
+                        f"{primary_environment!r} and {upper_environment!r}"
+                    )
+        binding = normalize_final_selection_binding(primary_registration["tuning_selection"])
+        learner_contract = {
+            "pairing_mode": "selected_primary_to_pobax_author_upper_reference",
+            "primary": {
+                "comparison_profile": primary_registration["comparison_profile"],
+                "tuning_selection_binding": {
+                    "raw_matrix_path": binding["raw_matrix_path"],
+                    "aggregate_path": binding["aggregate_path"],
+                    "aggregate_sha256": binding["aggregate_sha256"],
+                    "source_registration_sha256": binding["source_registration_sha256"],
+                    "source_manifest_sha256": binding["source_manifest_sha256"],
+                },
+                "evaluation_episodes_per_environment": primary_registration[
+                    "evaluation_episodes_per_env"
+                ],
+                "quick": primary_registration["quick"],
+                "selections": [
+                    {
+                        "environment": selection["environment"],
+                        "model_family": selection["model_family"],
+                        "implementation_model": selection["implementation_model"],
+                        "candidate_id": selection["candidate_id"],
+                        "learner": dict(selection["learner"]),
+                    }
+                    for selection in binding["selections"]
+                ],
+                "task_contracts": [
+                    {
+                        "primary_environment": environment,
+                        "model": model,
+                        **primary_model_contracts[(environment, model)],
+                    }
+                    for environment in primary_environments
+                    for model in primary_registration["models"]
+                ],
+            },
+            "upper_reference": {
+                "comparison_profile": upper_registration["comparison_profile"],
+                "learner": upper_registration["learner"],
+                "evaluation_episodes_per_environment": upper_registration[
+                    "evaluation_episodes_per_env"
+                ],
+                "quick": upper_registration["quick"],
+                "task_contracts": [
+                    {
+                        "upper_reference_environment": environment,
+                        "model": "memoryless_mlp",
+                        **upper_model_contracts[(environment, "memoryless_mlp")],
+                    }
+                    for environment in upper_environments
+                ],
+            },
+        }
+    else:
+        primary_contracts = _task_contracts(primary_cells)
+        upper_contracts = _task_contracts(upper_cells)
+        for mapping in alias_mapping:
+            primary_environment = mapping["primary_environment"]
+            upper_environment = mapping["upper_reference_environment"]
+            if upper_contracts[upper_environment] != primary_contracts[primary_environment]:
+                raise UpperReferenceLinkError(
+                    "learner or evaluation contract differs for paired environments "
+                    f"{primary_environment!r} and {upper_environment!r}"
+                )
+        learner_contract = {
+            "learner": primary_registration["learner"],
+            "evaluation_episodes_per_environment": primary_registration[
+                "evaluation_episodes_per_env"
+            ],
+            "quick": primary_registration["quick"],
+            "task_contracts": [
+                {
+                    "primary_environment": mapping["primary_environment"],
+                    **primary_contracts[mapping["primary_environment"]],
+                }
+                for mapping in alias_mapping
+            ],
+        }
 
     primary_provenance = _mapping(
         primary_aggregate["provenance"],
@@ -677,20 +889,7 @@ def build_upper_reference_link(
         "statistical_unit": "seed",
         "seeds": list(primary_registration["seeds"]),
         "alias_mapping": alias_mapping,
-        "learner_contract": {
-            "learner": primary_registration["learner"],
-            "evaluation_episodes_per_environment": primary_registration[
-                "evaluation_episodes_per_env"
-            ],
-            "quick": primary_registration["quick"],
-            "task_contracts": [
-                {
-                    "primary_environment": mapping["primary_environment"],
-                    **primary_contracts[mapping["primary_environment"]],
-                }
-                for mapping in alias_mapping
-            ],
-        },
+        "learner_contract": learner_contract,
         "primary": {
             "registration_sha256": primary_registration_sha256,
             "matrix_manifest_sha256": primary_manifest["manifest_sha256"],

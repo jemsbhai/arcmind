@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import benchmarks.pobax.link_upper_reference as linker
 from benchmarks.pobax.link_upper_reference import (
     REGISTERED_TRAIN_STEPS,
     UpperReferenceLinkError,
@@ -78,7 +79,9 @@ def _configuration(
     provenance: dict[str, Any],
     schema_version: int = 1,
     comparison_profile: str | None = None,
+    total_steps: int | None = None,
 ) -> dict[str, Any]:
+    selected_total_steps = PILOT_BUDGETS[environment] if total_steps is None else total_steps
     configuration = {
         "schema_version": schema_version,
         "evidence_tier": tier,
@@ -92,7 +95,7 @@ def _configuration(
         "arcmind_target_parameter_count": 100,
         "parameter_ratio": 1.0,
         "ppo": {
-            "total_steps": PILOT_BUDGETS[environment],
+            "total_steps": selected_total_steps,
             **learner,
             "num_minibatches": 1,
             "gamma": 0.99,
@@ -109,8 +112,8 @@ def _configuration(
         "navix_commit": provenance["navix_commit"],
         "runtime_contract": deepcopy(provenance["runtime_contract"]),
     }
-    if schema_version == 2:
-        requested_steps = PILOT_BUDGETS[environment]
+    if schema_version in {2, 4}:
+        requested_steps = selected_total_steps
         realized_steps = requested_steps // 4 * 4
         configuration["ppo"].update(
             anneal_learning_rate=learner["anneal_learning_rate"],
@@ -138,51 +141,63 @@ def _write_matrix(
     provenance: dict[str, Any] | None = None,
     schema_version: int = 1,
     comparison_profile: str | None = None,
+    models: list[str] | None = None,
+    learners: dict[str, dict[str, Any]] | None = None,
+    tuning_selection: dict[str, Any] | None = None,
+    budgets: dict[str, int] | None = None,
 ) -> None:
     selected_seeds = seeds or SEEDS
     selected_environments = environments or (
         PRIMARY_ENVIRONMENTS if matrix_kind == "primary_comparison" else UPPER_ENVIRONMENTS
     )
-    models = ["arcmind"] if matrix_kind == "primary_comparison" else ["memoryless_mlp"]
+    selected_models = models or (
+        ["arcmind"] if matrix_kind == "primary_comparison" else ["memoryless_mlp"]
+    )
     selected_provenance = deepcopy(provenance or BASE_PROVENANCE)
-    learner = {
+    default_learner = {
         "num_envs": 2,
         "rollout_steps": 2,
         "update_epochs": 1,
         "learning_rate": learning_rate,
     }
-    if schema_version == 2:
-        learner.update(
+    if schema_version in {2, 4}:
+        default_learner.update(
             num_minibatches=1,
             gae_lambda=0.95,
             entropy_coefficient=0.01,
             anneal_learning_rate=True,
         )
+    selected_learners = learners or {model: deepcopy(default_learner) for model in selected_models}
+    selected_budgets = budgets or PILOT_BUDGETS
     registration = {
         "schema_version": schema_version,
         "status": "frozen",
         "evidence_tier": tier,
         "matrix_kind": matrix_kind,
-        "models": models,
+        "models": selected_models,
         "environments": [
-            {"id": environment, "total_steps": PILOT_BUDGETS[environment]}
+            {"id": environment, "total_steps": selected_budgets[environment]}
             for environment in selected_environments
         ],
         "seeds": selected_seeds,
-        "learner": learner,
         "evaluation_episodes_per_env": evaluation_episodes,
         "require_gpu": selected_provenance["runtime_contract"]["jax_backend"] == "gpu",
         "quick": False,
     }
-    if schema_version == 2:
+    if schema_version != 4:
+        registration["learner"] = default_learner
+    else:
+        registration["tuning_selection"] = tuning_selection
+    if schema_version in {2, 4}:
         registration["comparison_profile"] = comparison_profile
     atomic_write_json(root / "registration.json", registration)
 
     manifest_cells: list[dict[str, Any]] = []
     artifacts: dict[tuple[str, str, int], tuple[Path, dict[str, Any]]] = {}
     for environment in selected_environments:
-        for model in models:
+        for model in selected_models:
             for seed in selected_seeds:
+                learner = selected_learners[model]
                 configuration = _configuration(
                     environment,
                     model,
@@ -193,6 +208,7 @@ def _write_matrix(
                     provenance=selected_provenance,
                     schema_version=schema_version,
                     comparison_profile=comparison_profile,
+                    total_steps=selected_budgets[environment],
                 )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 identity = (environment, model, seed)
@@ -212,17 +228,32 @@ def _write_matrix(
                         "artifact_path": relative_path,
                     }
                 )
+                if schema_version == 4:
+                    selection = next(
+                        item
+                        for item in tuning_selection["selections"]
+                        if item["environment"] == environment
+                        and item["implementation_model"] == model
+                    )
+                    manifest_cells[-1].update(
+                        candidate_id=selection["candidate_id"],
+                        model_family=selection["model_family"],
+                        implementation_model=model,
+                        tuning_aggregate_sha256=tuning_selection["aggregate_sha256"],
+                    )
                 artifacts[identity] = (root / relative_path, configuration)
     manifest: dict[str, Any] = {
         "schema_version": schema_version,
         "status": "frozen",
         "matrix_kind": matrix_kind,
-        "models": models,
+        "models": selected_models,
         "environments": selected_environments,
         "seeds": selected_seeds,
         "provenance": selected_provenance,
         "cells": manifest_cells,
     }
+    if schema_version == 4:
+        manifest["tuning_selection"] = tuning_selection
     manifest["manifest_sha256"] = canonical_json_sha256(manifest)
     atomic_write_json(root / "frozen_manifest.json", manifest)
 
@@ -233,7 +264,7 @@ def _write_matrix(
         value = float(seed % 100)
         rows = [[value] * evaluation_episodes for _ in range(2)]
         artifact = {
-            "schema_version": 5 if schema_version == 2 else 4,
+            "schema_version": 7 if schema_version == 4 else 5 if schema_version == 2 else 4,
             "status": f"development_{tier}_not_for_paper",
             "matrix_manifest_sha256": manifest["manifest_sha256"],
             "cell_id": registered_cell_id(
@@ -254,7 +285,7 @@ def _write_matrix(
             "environment_source": configuration["environment_source"],
             "environment_reference": configuration["environment_reference"],
             "provenance": selected_provenance,
-            "actual_environment_steps": PILOT_BUDGETS[environment],
+            "actual_environment_steps": selected_budgets[environment],
             "ppo": configuration["ppo"],
             "evaluation_episodes_per_environment": evaluation_episodes,
             "evaluation_max_episode_steps": horizon,
@@ -273,16 +304,28 @@ def _write_matrix(
             "training_history": [
                 {
                     **OPTIMIZER_METRICS,
-                    "environment_steps": float(PILOT_BUDGETS[environment]),
+                    "environment_steps": float(selected_budgets[environment]),
                     "mean_recent_return": value,
                 }
             ],
         }
-        if schema_version == 2:
+        if schema_version in {2, 4}:
             artifact.update(
                 comparison_profile=comparison_profile,
                 requested_environment_steps=configuration["requested_environment_steps"],
                 realized_environment_steps=configuration["realized_environment_steps"],
+            )
+        if schema_version == 4:
+            selection = next(
+                item
+                for item in tuning_selection["selections"]
+                if item["environment"] == environment and item["implementation_model"] == model
+            )
+            artifact.update(
+                candidate_id=selection["candidate_id"],
+                model_family=selection["model_family"],
+                implementation_model=model,
+                tuning_aggregate_sha256=tuning_selection["aggregate_sha256"],
             )
         atomic_write_json(path, artifact)
 
@@ -336,6 +379,98 @@ def _paired_roots(
     upper_options.setdefault("provenance", upper_provenance)
     _write_matrix(upper, matrix_kind="upper_reference", **upper_options)
     return primary, upper
+
+
+def _schema_v4_registered_pair(tmp_path: Path) -> tuple[Path, Path]:
+    primary = tmp_path / "primary-v4"
+    upper = tmp_path / "upper-v2"
+    seeds = list(range(10_000, 10_030))
+    primary_environment = "tmaze_10"
+    upper_environment = "tmaze_10-perfect-memory"
+    arcmind_learner = {
+        "num_envs": 2,
+        "rollout_steps": 2,
+        "update_epochs": 1,
+        "num_minibatches": 1,
+        "learning_rate": 0.001,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": True,
+    }
+    gru_learner = {**arcmind_learner, "learning_rate": 0.002}
+    tuning_selection = {
+        "raw_matrix_path": "benchmark_results/pobax/tuning/raw",
+        "aggregate_path": "benchmark_results/pobax/tuning/aggregate.json",
+        "aggregate_sha256": "5" * 64,
+        "source_registration_sha256": "6" * 64,
+        "source_manifest_sha256": "7" * 64,
+        "selections": [
+            {
+                "environment": primary_environment,
+                "model_family": "ordered_memory",
+                "implementation_model": "arcmind",
+                "candidate_id": "ordered_memory.lr_selected",
+                "learner": arcmind_learner,
+            },
+            {
+                "environment": primary_environment,
+                "model_family": "recurrent",
+                "implementation_model": "gru",
+                "candidate_id": "recurrent.lr_selected",
+                "learner": gru_learner,
+            },
+        ],
+    }
+    budgets = {
+        primary_environment: REGISTERED_TRAIN_STEPS[primary_environment],
+        upper_environment: REGISTERED_TRAIN_STEPS[upper_environment],
+    }
+    _write_matrix(
+        primary,
+        matrix_kind="primary_comparison",
+        tier="registered_final",
+        schema_version=4,
+        comparison_profile="arcmind_shared_comparison",
+        seeds=seeds,
+        environments=[primary_environment],
+        models=["arcmind", "gru"],
+        learners={"arcmind": arcmind_learner, "gru": gru_learner},
+        tuning_selection=tuning_selection,
+        evaluation_episodes=128,
+        budgets=budgets,
+    )
+    upper_provenance = deepcopy(BASE_PROVENANCE)
+    upper_provenance["runtime_contract"]["jax_backend"] = "cpu"
+    upper_provenance["runtime_contract"]["devices"] = [
+        {"platform": "cpu", "device_kind": "Test CPU"}
+    ]
+    _write_matrix(
+        upper,
+        matrix_kind="upper_reference",
+        tier="registered_final",
+        schema_version=2,
+        comparison_profile="pobax_author_semantics",
+        seeds=seeds,
+        environments=[upper_environment],
+        evaluation_episodes=128,
+        learning_rate=0.003,
+        provenance=upper_provenance,
+        budgets=budgets,
+    )
+    return primary, upper
+
+
+def _stub_registered_aggregation(monkeypatch) -> list[Path]:
+    validated: list[Path] = []
+
+    def build_registered(manifest_path: Path) -> dict[str, Any]:
+        path = Path(manifest_path).resolve()
+        validated.append(path)
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        return {"provenance": manifest["provenance"]}
+
+    monkeypatch.setattr(linker, "build_registered_aggregate", build_registered)
+    return validated
 
 
 def _rewrite_json(path: Path, mutation: Any) -> None:
@@ -402,6 +537,69 @@ def test_schema_v2_matrices_link_only_with_the_same_comparison_profile(
     )
     with pytest.raises(UpperReferenceLinkError, match="comparison profiles"):
         build_upper_reference_link(mismatched_primary, mismatched_upper)
+
+
+def test_registered_schema_v4_primary_links_to_schema_v2_author_upper_reference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    primary, upper = _schema_v4_registered_pair(tmp_path)
+    validated = _stub_registered_aggregation(monkeypatch)
+
+    result = build_upper_reference_link(primary, upper)
+
+    assert validated == [
+        (primary / "frozen_manifest.json").resolve(),
+        (upper / "frozen_manifest.json").resolve(),
+    ]
+    assert result["status"] == "registered_final_primary_upper_reference_link"
+    assert result["paper_status"] == "eligible_only_after_all_other_release_gates_pass"
+    assert result["seeds"] == list(range(10_000, 10_030))
+    contract = result["learner_contract"]
+    assert contract["pairing_mode"] == "selected_primary_to_pobax_author_upper_reference"
+    assert contract["primary"]["comparison_profile"] == "arcmind_shared_comparison"
+    assert contract["upper_reference"]["comparison_profile"] == "pobax_author_semantics"
+    assert contract["primary"]["tuning_selection_binding"]["aggregate_sha256"] == "5" * 64
+    assert [
+        selection["learner"]["learning_rate"] for selection in contract["primary"]["selections"]
+    ] == [0.001, 0.002]
+    assert contract["upper_reference"]["learner"]["learning_rate"] == 0.003
+    assert [
+        (task["primary_environment"], task["model"])
+        for task in contract["primary"]["task_contracts"]
+    ] == [("tmaze_10", "arcmind"), ("tmaze_10", "gru")]
+
+
+def test_registered_schema_v4_completion_requires_exact_selection_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    primary, upper = _schema_v4_registered_pair(tmp_path)
+    _stub_registered_aggregation(monkeypatch)
+    _rewrite_json(
+        primary / "completion_index.json",
+        lambda value: value["cells"][0].update(candidate_id="ordered_memory.drifted"),
+    )
+    _refresh_checksums(primary)
+
+    with pytest.raises(UpperReferenceLinkError, match="candidate_id drifts"):
+        build_upper_reference_link(primary, upper)
+
+
+def test_registered_schema_v4_pair_requires_equal_evaluation_counts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    primary, upper = _schema_v4_registered_pair(tmp_path)
+    _stub_registered_aggregation(monkeypatch)
+    _rewrite_json(
+        upper / "registration.json",
+        lambda value: value.update(evaluation_episodes_per_env=64),
+    )
+    _refresh_checksums(upper)
+
+    with pytest.raises(UpperReferenceLinkError, match="evaluation registrations"):
+        build_upper_reference_link(primary, upper)
 
 
 @pytest.mark.parametrize("raw_root_name", ["primary", "upper"])
