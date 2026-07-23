@@ -188,7 +188,7 @@ seed manifests, immutable dataset identifiers, and machine-readable raw output.
 - [x] Parameter-matched recurrent, convolutional, SSM, and attention controls
 - [x] Registered ArcMind ablation adapters with effective parameter counts
 - [x] S5RL reset-aware structured-SSM policy adapter
-- [ ] Privileged-observation reference adapters
+- [x] Privileged-observation reference adapters and evidence-link gates
 - [ ] Registered multi-seed experiments
 - [ ] Reproducible paper tables and figures
 - [ ] Pretrained weights

@@ -227,8 +227,11 @@ explicit recurrent state but no JAX streaming interface. The implemented JAX
 core supplies initial state, asynchronous reset masks, explicit random
 addresses, and a time-major scan. It tests fixed-address equations and address
 sampling, and the shared learner replays collection-time addresses exactly.
-The registered scientific baseline uses `paper_uniform`; the released
-row-zero behavior remains a separately named compatibility check.
+The released POMDP path also clamps the recurrent matrix to `[-100, 100]`
+after each update, while the standalone and POPGym paths do not. The
+registered scientific baseline uses `paper_uniform`, including the POMDP
+clamp. The released row-zero, unclamped behavior remains a separately named
+compatibility check.
 
 POBAX reports recurrent PPO, lambda discrepancy with recurrent PPO, and
 Transformer-XL with PPO. Its repository enables GRU-style gates in the
