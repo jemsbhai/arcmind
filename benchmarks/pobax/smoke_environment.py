@@ -14,6 +14,7 @@ from jax import random
 from pobax.envs import get_env
 
 PINNED_POBAX_COMMIT = "a5e1d62d14e4efe783885b9d4f19cffa2a568eec"
+PINNED_NAVIX_COMMIT = "6f8bf656dfc3b4bf3aeba24ad8a3914047fcd7d6"
 
 
 def source_commit(distribution_name: str) -> str:
@@ -21,15 +22,11 @@ def source_commit(distribution_name: str) -> str:
     distribution = importlib.metadata.distribution(distribution_name)
     direct_url_text = distribution.read_text("direct_url.json")
     if direct_url_text is None:
-        raise RuntimeError(
-            f"{distribution_name} was not installed from the pinned VCS reference"
-        )
+        raise RuntimeError(f"{distribution_name} was not installed from the pinned VCS reference")
     direct_url = json.loads(direct_url_text)
     commit = direct_url.get("vcs_info", {}).get("commit_id")
     if not commit:
-        raise RuntimeError(
-            f"{distribution_name} installation does not record a VCS commit"
-        )
+        raise RuntimeError(f"{distribution_name} installation does not record a VCS commit")
     return str(commit)
 
 
@@ -41,9 +38,7 @@ def smoke_environment(*, require_gpu: bool) -> dict[str, object]:
 
     commit = source_commit("pobax")
     if commit != PINNED_POBAX_COMMIT:
-        raise RuntimeError(
-            f"POBAX commit drift: expected {PINNED_POBAX_COMMIT}, found {commit}"
-        )
+        raise RuntimeError(f"POBAX commit drift: expected {PINNED_POBAX_COMMIT}, found {commit}")
 
     environments: dict[str, object] = {}
     for index, environment_name in enumerate(("simple_chain", "tmaze_10")):

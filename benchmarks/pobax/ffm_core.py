@@ -29,6 +29,10 @@ Params = Mapping[str, Array]
 
 _MINIMUM_DECAY = -1e-6
 _LAYER_NORM_EPSILON = 1e-5
+POPGYM_MEMORY_SIZE = 32
+POPGYM_CONTEXT_SIZE = 4
+POPGYM_MIN_PERIOD = 1.0
+POPGYM_MAX_PERIOD = 1024.0
 
 
 def _xavier(key: Array, input_features: int, output_features: int) -> Array:
@@ -283,3 +287,48 @@ class FFMPolicyCore:
     def count_parameters(params: Params) -> int:
         """Count scalar trainable parameters, including both shared heads."""
         return sum(int(value.size) for value in jax.tree.leaves(params))
+
+
+def match_ffm_hidden_size(
+    *,
+    target_parameters: int,
+    input_dim: int,
+    action_dim: int,
+    memory_size: int = POPGYM_MEMORY_SIZE,
+    context_size: int = POPGYM_CONTEXT_SIZE,
+    maximum_width: int = 4096,
+) -> int:
+    """Find the closest FFM output width without changing memory structure.
+
+    Appendix D.2 of the FFM paper fixes the POPGym recurrent state at
+    ``m = 32`` traces and ``c = 4`` complex contexts. That is 128 complex
+    values, or 256 real scalar dimensions, matching the recurrent-state size
+    of the paper's controls. Parameter matching must not search over ``m`` or
+    ``c`` because doing so would alter the published decay and temporal-context
+    structure. Instead, this adapter searches only the Markov-state output
+    width shared by the actor and critic.
+    """
+    if target_parameters <= 0:
+        raise ValueError("target_parameters must be positive")
+    if input_dim <= 0:
+        raise ValueError("input_dim must be positive")
+    if action_dim <= 0:
+        raise ValueError("action_dim must be positive")
+    if memory_size <= 0:
+        raise ValueError("memory_size must be positive")
+    if context_size <= 0:
+        raise ValueError("context_size must be positive")
+    if maximum_width <= 0:
+        raise ValueError("maximum_width must be positive")
+
+    def parameter_count(hidden_size: int) -> int:
+        fixed_parameters = (
+            2 * input_dim * memory_size + 3 * memory_size + context_size + action_dim + 1
+        )
+        parameters_per_hidden_unit = 2 * input_dim + 2 * memory_size * context_size + action_dim + 4
+        return fixed_parameters + hidden_size * parameters_per_hidden_unit
+
+    return min(
+        range(1, maximum_width + 1),
+        key=lambda width: abs(parameter_count(width) - target_parameters),
+    )

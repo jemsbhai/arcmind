@@ -9,8 +9,19 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from benchmarks.pobax.ffm_core import FFMPolicyCore
+from benchmarks.pobax.ffm_core import (
+    POPGYM_CONTEXT_SIZE,
+    POPGYM_MAX_PERIOD,
+    POPGYM_MEMORY_SIZE,
+    POPGYM_MIN_PERIOD,
+    FFMPolicyCore,
+    match_ffm_hidden_size,
+)
 from benchmarks.pobax.policy_core import augment_policy_input
+from benchmarks.pobax.run_pilot import (
+    REFERENCE_IMPLEMENTATIONS,
+    build_policy_core,
+)
 
 
 def _linear(params, prefix, values):
@@ -314,6 +325,98 @@ def test_parameter_count_includes_ffm_and_intentional_shared_heads():
     assert "actor.kernel" in params
     assert "critic.kernel" in params
     assert core.count_parameters(params) == expected
+
+
+@pytest.mark.parametrize(
+    ("input_dim", "action_dim"),
+    [
+        (7, 3),
+        (9, 4),
+        (16, 6),
+        (128, 18),
+        (257, 18),
+    ],
+)
+def test_parameter_matching_preserves_published_popgym_structure(
+    input_dim,
+    action_dim,
+):
+    core, parameter_count, target_count = build_policy_core(
+        "ffm",
+        input_dim=input_dim,
+        action_dim=action_dim,
+        seed=17,
+    )
+
+    assert isinstance(core, FFMPolicyCore)
+    assert core.memory_size == POPGYM_MEMORY_SIZE == 32
+    assert core.context_size == POPGYM_CONTEXT_SIZE == 4
+    assert core.min_period == POPGYM_MIN_PERIOD == 1.0
+    assert core.max_period == POPGYM_MAX_PERIOD == 1024.0
+    assert 0.9 <= parameter_count / target_count <= 1.1
+
+
+def test_width_matcher_selects_globally_closest_positive_width():
+    input_dim = 11
+    action_dim = 5
+    target_core, target_count, _ = build_policy_core(
+        "arcmind",
+        input_dim=input_dim,
+        action_dim=action_dim,
+        seed=18,
+    )
+    del target_core
+    width = match_ffm_hidden_size(
+        target_parameters=target_count,
+        input_dim=input_dim,
+        action_dim=action_dim,
+    )
+
+    def count(candidate_width):
+        candidate = FFMPolicyCore(
+            input_dim=input_dim,
+            action_dim=action_dim,
+            hidden_size=candidate_width,
+            memory_size=POPGYM_MEMORY_SIZE,
+            context_size=POPGYM_CONTEXT_SIZE,
+            min_period=POPGYM_MIN_PERIOD,
+            max_period=POPGYM_MAX_PERIOD,
+        )
+        params = candidate.initialize(jax.random.PRNGKey(19))
+        return candidate.count_parameters(params)
+
+    selected_error = abs(count(width) - target_count)
+    if width > 1:
+        assert selected_error <= abs(count(width - 1) - target_count)
+    assert selected_error <= abs(count(width + 1) - target_count)
+
+
+def test_runner_records_audited_ffm_reference_metadata():
+    assert REFERENCE_IMPLEMENTATIONS["ffm"] == {
+        "repository": "https://github.com/proroklab/ffm",
+        "audited_commit": "b3f94d2a0f35ba05089faf19ab1df846057cf8b6",
+        "relationship": "shared-input and shared-head policy adaptation",
+    }
+
+
+def test_matcher_rejects_invalid_arguments():
+    valid = {
+        "target_parameters": 10_000,
+        "input_dim": 7,
+        "action_dim": 3,
+    }
+    for name in (
+        "target_parameters",
+        "input_dim",
+        "action_dim",
+        "memory_size",
+        "context_size",
+        "maximum_width",
+    ):
+        kwargs = dict(valid)
+        kwargs[name] = 0
+        with pytest.raises(ValueError, match=name):
+            match_ffm_hidden_size(**kwargs)
 
 
 @pytest.mark.parametrize(

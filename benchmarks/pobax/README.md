@@ -75,35 +75,43 @@ The development learner currently supports these parameter-matched policy
 cores through that common path:
 
 - memoryless MLP, four-frame MLP, and fixed exponential memory traces;
+- the source-verified POPGym positional MLP;
 - Elman RNN, GRU, and LSTM;
 - a three-layer causal dilated TCN;
+- Fast and Forgetful Memory (FFM);
+- Stable Hadamard Memory (SHM);
 - LRU, S5RL, recurrent S4D, MS4, and MS4N;
 - full-window causal Transformer, Transformer-XL, and GTrXL; and
 - ArcMind.
 
-Three required controls are not yet supported by the shared learner:
-
-- positional MLP, which gives the memoryless policy an explicit timestep or
-  position signal;
-- [Fast and Forgetful Memory](https://proceedings.neurips.cc/paper_files/paper/2023/hash/e3bf2f0f10774c474de22a12cb060e2c-Abstract-Conference.html);
-  and
-- [Stable Hadamard Memory](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf).
+The positional MLP follows the sinusoidal feature encoding, learned clipped
+blend, and reset-aware episode counter in pinned POPGym commit
+`410d5aa626dae8024f498354d8781a0d1870c399`. It is a shared-head JAX
+adaptation, not the unrelated Brax `backend="positional"` setting and not a
+scalar normalized timestep.
 
 The [official FFM source at commit
 `b3f94d2a0f35ba05089faf19ab1df846057cf8b6`](https://github.com/proroklab/ffm/tree/b3f94d2a0f35ba05089faf19ab1df846057cf8b6/standalone_jax)
 contains a JAX recurrence with explicit recurrent state and episode-done
-inputs. It can be adapted as a policy core without changing PPO, after
-initialization, reset, sequence, recurrent-state, and gradient parity tests.
+inputs. The shared core preserves the paper's POPGym setting of 32 decay
+traces and four complex temporal contexts. This is a 128-value complex state,
+equivalent to 256 real scalar dimensions. It also retains the official 1 to
+1024 period schedule. Parameter matching searches only the FFM output width,
+leaving the decay and context structure fixed. The FFM feature is intentionally
+shared by the common actor and critic heads. Initialization, reset, sequence,
+recurrent-state, equation, JIT, gradient, and parameter-count tests cover this
+adaptation.
 
 The [official SHM `v1.1` source at commit
 `40d73d44936e47a29e2c76a481d93c434b857ea1`](https://github.com/thaihungle/SHM/tree/40d73d44936e47a29e2c76a481d93c434b857ea1)
-is PyTorch. SHM can use the shared PPO loss, collector, and optimizer, but it
-needs a JAX policy-core port. The official repository has stateful PyTorch
-benchmark adapters but no JAX streaming adapter. The port must expose initial
-memory, handle asynchronous reset masks and explicit random-address keys, and
-use a time-major scan. It must match the released equations under a fixed
-address sequence and test stochastic addressing distributionally before it is
-eligible for registered evaluation.
+is PyTorch. The JAX core follows the pinned POPGym policy cell and exposes
+initial memory, asynchronous resets, explicit addresses, and a time-major
+scan. The paper and POMDP source sample uniformly from all 128 address rows,
+while the released standalone and POPGym source always select row zero.
+`shm` therefore names the scientific `paper_uniform` mode and
+`shm_v1_1_popgym_compat` names the source-compatible row-zero check. The
+collector stores every sampled address and PPO replays the same trace during
+loss recomputation. Unit tests require zero pre-update KL under that replay.
 
 S4D uses the recurrent zero-order-hold form of the diagonal SSM described by
 the [S4D paper](https://arxiv.org/abs/2206.11893) and initialized consistently
@@ -140,27 +148,65 @@ python -m benchmarks.pobax.run_pilot \
   --environment tmaze_10 \
   --model arcmind \
   --quick \
+  --evidence-tier smoke \
   --require-gpu
 ```
 
-`--quick` results are explicitly marked `development_pilot_not_for_paper`.
+`--quick` results are explicitly marked `development_smoke_not_for_paper`.
 They validate plumbing and learnability; they are not registered evidence.
 Each JSON artifact records the complete policy-core configuration, parameter
 match, PPO configuration, accelerator, and exact POBAX commit.
+
+Frozen Cartesian matrices use the fail-closed launcher:
+
+```bash
+python -m benchmarks.pobax.run_matrix \
+  --registration benchmarks/pobax/manifests/smoke_controls_v1.json \
+  --output-root benchmark_results/pobax/smoke-controls-v1
+```
+
+The launcher first describes every cell, hashes the expanded manifest, and
+then starts each model in a fresh process. It requires clean Git provenance,
+skips only identity-, configuration-, and provenance-compatible completed
+cells, refuses collisions, records the dependency lock, external source
+commits, and actual Python, package, JAX, backend, and accelerator identities,
+then writes a stable completion index plus checksum manifest.
+Every registration declares `matrix_kind`. A `primary_comparison` matrix must
+include ArcMind. An `upper_reference` matrix contains only the memoryless
+policy on its separately labeled privileged or full-observation task. A
+registered-final matrix is accepted only with exactly 30 paired seeds.
+
+A completed registered-final matrix is aggregated with:
+
+```bash
+python -m benchmarks.pobax.aggregate_registered \
+  benchmark_results/pobax/registered-final/frozen_manifest.json \
+  benchmark_results/pobax/registered-final-analysis/aggregate.json
+```
+
+The aggregator accepts registered-final artifacts only. It verifies the
+Cartesian matrix, configuration hashes, clean provenance, raw evaluation
+returns, episode counts, and within-task learning-curve grids before computing
+seed-level summaries and paired differences against ArcMind. Early curve
+entries with no completed episode remain JSON `null`; aggregation starts at
+the first step where every cell in that task has a finite return.
+Derived aggregates live outside the immutable raw-matrix directory so its
+checksum manifest continues to cover every file it was created to protect.
 
 The discrete development runner accepts `simple_chain`, `tmaze_10`,
 `rocksample_11_11`, `battleship_10`, and
 `Navix-DMLab-Maze-01-v0`. Simple Chain has one action, so it validates
 infrastructure rather than policy quality. The same learner supports
-`HalfCheetah-V-v0` through a learned state-independent diagonal-Gaussian
-action distribution. `Walker-V-v0` remains a required registered task after a
-runner adapter is added. `HalfCheetah-P-v0` is exposed by the library and may
-remain useful for development, but it is not a registered task from the
-published POBAX benchmark.
+`HalfCheetah-V-v0` and `Walker-V-v0` through a learned state-independent
+diagonal-Gaussian action distribution. Separately labeled `Walker-F-v0` and
+`HalfCheetah-F-v0` full-observation references use the common runner too.
+`HalfCheetah-P-v0` is exposed by the library and may remain useful for
+development, but it is not a registered task from the published POBAX
+benchmark.
 
-For the 1,000-step-horizon masked MuJoCo environments, evaluation is
-automatically raised to at least 1,024 transitions so every functioning
-rollout can complete an episode.
+For the 1,000-step masked MuJoCo horizon, each requested evaluation episode
+receives exactly 1,000 scan steps. Every vector worker must complete the
+requested count or the cell fails.
 
 ## Evidence tiers and published reference budgets
 

@@ -1,4 +1,4 @@
-protocol_version: 2
+protocol_version: 3
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -67,10 +67,13 @@ stages:
       - memoryless_mlp
       - frame_stack_mlp
       - memory_trace_mlp
+      - positional_mlp
       - elman_rnn
       - gru
       - lstm
       - tcn
+      - ffm
+      - shm_paper_uniform
       - s4d
       - ms4
       - ms4n
@@ -87,14 +90,12 @@ stages:
       - arcmind_ssm_only
     remaining_required_adapters:
       - privileged_observation_upper_references
-      - positional_mlp
-      - fast_and_forgetful_memory
-      - stable_hadamard_memory
     tasks:
       - simple_chain
       - tmaze_10
       - rocksample_11_11
       - battleship_10
+      - Walker-V-v0
       - HalfCheetah-V-v0
       - Navix-DMLab-Maze-01-v0
     note: >-
@@ -119,7 +120,7 @@ stages:
       - gru
       - lstm
       - fast_and_forgetful_memory
-      - stable_hadamard_memory
+      - stable_hadamard_memory_paper_uniform
       - lru
       - s4d
       - s5rl
@@ -154,7 +155,6 @@ stages:
         published_train_steps: 50000000
         published_tuning_seed_count: 5
         published_final_seed_count: 30
-        status: pending_runner_adapter
       halfcheetah_velocity_only:
         environment_id: HalfCheetah-V-v0
         category: moment_features

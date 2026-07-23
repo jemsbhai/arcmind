@@ -112,6 +112,93 @@ with each actual experiment.
 - Protocol:
   [benchmarks/pobax/README.md](../benchmarks/pobax/README.md)
 
+### F-ENG-002: Environment discount and runtime identity must be frozen
+
+- Class: `development smoke`
+- Status: protocol defect found and corrected before any registered run
+- Date: 2026-07-23
+- Source audit: the pinned POBAX PPO replaces the command-line discount with
+  the environment discount after construction
+  ([learner source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/algos/ppo.py#L169-L179)).
+  Battleship defines that discount as `1.0`
+  ([environment source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/battleship.py#L139-L166)).
+- Defect: the shared runner previously retained PPO's `0.99` default for every
+  task. This matched most current tasks but disagreed with Battleship. It also
+  recorded a dependency-lock hash without freezing the actual Python, JAX,
+  JAXlib, package, backend, and accelerator identities.
+- Correction:
+  - derive gamma from the constructed environment and include it in the
+    hashed PPO configuration;
+  - derive the evaluation horizon from
+    `environment_params.max_steps_in_episode`, assert it against the audited
+    task contract, and reuse it for positional encoding and evaluation;
+  - call PPO configuration validation before a matrix description can be
+    frozen; and
+  - include a stable installed-runtime contract in the configuration,
+    manifest provenance, cell provenance, resume checks, and registered
+    aggregator validation.
+- Verification: configuration-only execution resolves T-Maze to horizon
+  `1000` and gamma `0.99`, and Battleship to horizon `1000` and gamma `1.0`.
+- Interpretation: dependency source commits and a lockfile checksum identify
+  intent, while the installed-runtime fingerprint identifies execution.
+  Both are required to prevent silent mixing of incompatible cells.
+- Evidence restriction: no registered cell existed before the correction.
+  Any future artifact whose configuration omits the environment-derived
+  discount or runtime contract is ineligible for aggregation.
+
+### F-ENG-003: Registered labels require complete seed and matrix roles
+
+- Class: `development smoke`
+- Status: protocol defect found and corrected before any registered run
+- Date: 2026-07-23
+- Defect: the initial artifact schema allowed a clean full-budget cell to use
+  `registered_final_complete` even when its matrix contained fewer than the
+  published 30 final seeds. It also assumed every aggregate contained ArcMind,
+  which made separately labeled full-observation upper references impossible
+  to aggregate under the registered path.
+- Correction:
+  - a `registered_final` registration now requires exactly 30 unique paired
+    seeds, and the registered aggregator independently enforces the same
+    cardinality;
+  - every matrix declares either `primary_comparison` or `upper_reference`;
+  - primary matrices must include ArcMind and retain paired differences
+    against it;
+  - upper-reference matrices contain only the parameter-matched memoryless
+    policy, emit no misleading ArcMind pair, and accept only implemented
+    upper-reference environment adapters; and
+  - Walker-F and HalfCheetah-F inherit the 50 million interaction budget of
+    their corresponding primary tasks.
+- Interpretation: budget compliance alone is not final-evidence compliance.
+  Seed cardinality and the information role of each environment are part of
+  the evidence label and must fail closed.
+- Evidence restriction: no registered result existed before this gate.
+
+### F-ENG-004: A valid hash does not prove a completed experiment
+
+- Class: `development smoke`
+- Status: artifact-integrity defect found and corrected before any registered
+  run
+- Date: 2026-07-23
+- Defect: the initial registered aggregator verified that a configuration
+  matched its hash but did not interpret the configuration. A crafted or
+  partial artifact could therefore retain a self-consistent hash while using a
+  development evidence tier, mismatched cell identity or source provenance,
+  or a learning curve that stopped before the registered interaction budget.
+- Correction: aggregation now independently requires:
+  - `registered_final` inside the frozen cell configuration;
+  - exact agreement among configuration, artifact, and manifest environment,
+    model, seed, source commits, dependency lock, and runtime contract;
+  - the published task interaction budget in PPO configuration, top-level
+    actual steps, and the last learning-curve point;
+  - exact agreement between top-level and frozen PPO configurations; and
+  - consistent evaluation episodes, horizon, scan steps, vector-worker count,
+    and total evaluation transitions.
+- Verification: focused tests reject a pilot-tier frozen configuration and a
+  history ending one transition before the T-Maze registered budget.
+- Interpretation: canonical hashing establishes immutability, not scientific
+  completeness. Registered aggregation must validate both bytes and meaning.
+- Evidence restriction: no registered result existed before this gate.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`
@@ -221,6 +308,83 @@ with each actual experiment.
 - Disposition: add a registered rule for episode completion, horizon handling,
   and missing evaluation metrics before model comparisons.
 
+### F-SMOKE-004: Required memory controls execute through the shared learner
+
+- Class: `development smoke`
+- Status: infrastructure validation only
+- Date: 2026-07-23
+- Task: T-Maze-10, seed `1103`, 8,192 environment transitions, 32 vector
+  environments, and exactly one retained evaluation episode per environment
+- Controls:
+  - FFM with the published POPGym structure of 32 traces and four complex
+    contexts;
+  - the pinned POPGym sinusoidal positional MLP with a reset-aware episode
+    counter; and
+  - SHM in `paper_uniform` mode with 128 address rows, 16 by 16 memory, and
+    exact replay of collection-time addresses during PPO recomputation.
+- Observation:
+
+  | Control | Parameters | ArcMind target | Ratio | Training episodes | Evaluation episodes | Mean return |
+  |---|---:|---:|---:|---:|---:|---:|
+  | FFM | 28,577 | 28,717 | 0.9951 | 30 | 32 | 0.0000 |
+  | Positional MLP | 28,526 | 28,717 | 0.9933 | 31 | 32 | 0.0000 |
+  | SHM | 28,727 | 28,717 | 1.0003 | 143 | 32 | 2.0781 |
+- Replay check: the SHM unit test reconstructs collection logits with stored
+  addresses and obtains zero approximate KL before an update. The real smoke
+  completed with finite loss and final approximate KL `0.00092`.
+- Test coverage: the unified POBAX suite passed all 145 tests on CUDA and CPU.
+  These include source-equation fixtures, asynchronous reset, step-scan
+  agreement, JIT, gradients, parameter matching, SHM address distribution,
+  source-compatible row-zero addressing, and exact address replay.
+- Interpretation: all three controls now satisfy the common learner interface,
+  parameter tolerance, and fixed evaluation episode-count contract. The
+  different smoke returns are not comparative evidence because this run is
+  short, single-seed, and executed during development.
+- Raw artifacts and SHA256:
+  - `benchmark_results/pobax/smoke-ffm-20260723.json`,
+    `93320e4d9acf543bb98d08686d0352830e16dc06a054dab5bfec47ffd0548d1e`;
+  - `benchmark_results/pobax/smoke-positional-20260723.json`,
+    `53b5d6f55ea5060beb93092ab3101344649c98f0672f8e0ee50157ec486ded8b`;
+    and
+  - `benchmark_results/pobax/smoke-shm-replay-20260723.json`,
+    `5bfb800c4178caf265833329f21461d2cd6af969978e6f51c2798a1b0af85068`.
+- Disposition: retain FFM, positional MLP, and SHM `paper_uniform` in the
+  pilot matrix. Keep `v1_1_popgym_compat` as a source-compatibility check, not
+  the scientific SHM baseline.
+
+### F-SMOKE-005: Walker partial and full observation adapters execute
+
+- Class: `development smoke`
+- Status: infrastructure validation only
+- Date: 2026-07-23
+- Task: Walker2d, seed `1103`, 8,192 environment transitions, and exactly one
+  retained evaluation episode for each of 32 vector environments
+- Observation:
+  - `Walker-V-v0` exposed nine observation values and a six-value continuous
+    action, giving the common ArcMind policy input width 17;
+  - `Walker-F-v0` exposed all 17 observation values and the same action,
+    giving the memoryless policy input width 25;
+  - the full-observation memoryless policy was matched to the partial-task
+    ArcMind target, not to a larger full-input ArcMind model. It used 28,965
+    parameters against the 29,013 target, a ratio of `0.9983`;
+  - both cells completed finite PPO updates and exactly 32 evaluation
+    episodes; and
+  - the short-run mean returns were `276.49` for partial-observation ArcMind
+    and `243.01` for the full-observation memoryless reference.
+- Interpretation: the result validates observation slicing, continuous action
+  handling, exact evaluation counts, and the primary-task parameter target.
+  The return ordering reinforces why a full-observation trained policy is not
+  a guaranteed empirical ceiling. It is not performance evidence because the
+  runs are short, single-seed, and use different policy classes by design.
+- Raw artifacts and SHA256:
+  - `benchmark_results/pobax/smoke-walker-v-arcmind-20260723.json`,
+    `025a0a7c3c59ced88d8ee7e770a578f799e6fb4519190e51711422fba256f3d8`;
+    and
+  - `benchmark_results/pobax/smoke-walker-f-memoryless-20260723.json`,
+    `1c871aabe995f4a2c32bce5c7ecd230c3c40b69c75d52f352c0518eec93172b8`.
+- Disposition: include Walker-V in the pilot task set. Report Walker-F only in
+  a separately labeled upper-reference table.
+
 ### F-REG-000: No registered performance finding exists
 
 - Class: `registered evidence`
@@ -318,8 +482,9 @@ with each actual experiment.
 ### F-DIAG-005: Predeclared fusion-interference controls
 
 - Class: `diagnostic evidence`
-- Status: planned, not yet executed
+- Status: completed as planned
 - Date planned: 2026-07-23, before outcome inspection
+- Date completed: 2026-07-23
 - Task: the F-DIAG-004 delayed-recall task, seed `2207`, 4,096 training
   examples, 1,024 validation examples, 2,048 test examples, 20 epochs, and
   validation-NLL checkpoint selection
@@ -355,6 +520,57 @@ with each actual experiment.
   - no one-seed outcome is an inferential or paper-ready claim.
 - Raw artifact directory:
   `benchmark_results/delayed_recall/dev-fusion-seed2207`
+- Provenance: all five cells ran from clean commit
+  `f49fb789d788da90c4ba83c21cdf013581730ae2` on an NVIDIA GeForce RTX
+  4090 Laptop GPU. The five training runs used 1,802.10 local GPU seconds in
+  total.
+- Completed results:
+
+  | Cell | Test accuracy | Short lag | Long lag | Test NLL | Best epoch |
+  |---|---:|---:|---:|---:|---:|
+  | ArcMind | 0.7745 | 0.9991 | 0.2519 | 0.4215 | 18 |
+  | SSM only | 0.6481 | 0.6925 | 0.5446 | 0.7795 | 20 |
+  | Fast start | 0.7746 | 0.9988 | 0.2531 | 0.4215 | 18 |
+  | Fast auxiliary | 0.7739 | 0.9992 | 0.2499 | 0.4237 | 18 |
+  | Match abstention | 0.7744 | 0.9999 | 0.2497 | 0.4177 | 18 |
+- Passive diagnostics:
+  - default counterfactual fast-path accuracy was `0.2531` at short lags
+    and `0.2480` at long lags, while the fused outputs scored `0.9991` and
+    `0.2519`;
+  - the fast auxiliary changed counterfactual long-lag fast-path accuracy
+    from `0.2480` to `0.2587`, a gain of `0.0107`, below the predeclared
+    `0.10` threshold;
+  - default mean slow gate was `0.7670`. Its exact-lag mean fell from
+    `0.8120` at lag 8 to `0.6058` at lag 9;
+  - match abstention set the mean slow gate to exactly zero for every lag
+    greater than eight, as designed, but changed long-lag accuracy by
+    `-0.0022`; and
+  - SSM-only long-lag accuracy exceeded the default by `0.2927`, although its
+    short-lag accuracy was lower by `0.3066`.
+- Decision-rule outcomes:
+  - fast-start preserved short-lag accuracy, with a change of `-0.0004`, but
+    its long-lag change of `+0.0012` was not practically clear;
+  - neither the default nor any intervention met the destructive-fusion
+    rule because counterfactual fast-path accuracy remained below `0.30`;
+  - the auxiliary result did not meet the representation-specialization
+    rule; and
+  - match abstention did not support irrelevant retrieval as the main
+    remaining explanation.
+- Supported conclusion: in this one-seed diagnostic, the default joint model
+  did not preserve the SSM-only model's long-lag behavior. Fast-start
+  initialization, a shared-head fast-path auxiliary loss, and task-specific
+  match abstention did not recover long-lag accuracy under the predeclared
+  thresholds.
+- Alternative explanations: the task permits a high-accuracy bounded
+  shortcut, the shared decoder and both representations may co-adapt, and the
+  optimization horizon may favor the sharp lag-eight solution. This study
+  does not distinguish these possibilities.
+- Decision: stop tuning this synthetic diagnostic. Retain SSM-only as a
+  required ablation and prioritize registered partially observed control
+  tasks, where returns determine whether the joint architecture is useful.
+- Artifact integrity: `checksums.sha256` verifies the five raw JSON files and
+  `analysis_summary.json`. The summary SHA256 is
+  `b044f2caa4fb7eaac04cffa2b8769d67397e20728442ead67b09e36da533dae9`.
 - Evidence restriction: all cells remain diagnostic and cannot enter a paper
   performance table.
 

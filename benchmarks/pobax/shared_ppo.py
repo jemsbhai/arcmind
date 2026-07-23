@@ -45,6 +45,8 @@ class PPOConfig:
     def validate(self) -> None:
         if self.total_steps < self.steps_per_update:
             raise ValueError("total_steps must cover at least one rollout")
+        if self.total_steps % self.steps_per_update != 0:
+            raise ValueError("total_steps must be exactly divisible by num_envs * rollout_steps")
         if self.num_envs % self.num_minibatches != 0:
             raise ValueError("num_envs must be divisible by num_minibatches")
 
@@ -70,12 +72,14 @@ class Rollout(NamedTuple):
     episode_return: Array
     episode_complete: Array
     action_mask: Array | None = None
+    policy_auxiliary: Array | None = None
 
 
 class PPOTrainResult(NamedTuple):
     params: Params
     runner: RunnerState
     recent_episode_returns: tuple[float, ...]
+    history: tuple[dict[str, float], ...]
     final_metrics: dict[str, float]
 
 
@@ -104,9 +108,7 @@ def gaussian_log_probability(
     """Log probability under a diagonal Gaussian policy."""
     standardized = (actions - means) * jnp.exp(-log_standard_deviation)
     per_dimension = (
-        -0.5 * jnp.square(standardized)
-        - log_standard_deviation
-        - 0.5 * jnp.log(2.0 * jnp.pi)
+        -0.5 * jnp.square(standardized) - log_standard_deviation - 0.5 * jnp.log(2.0 * jnp.pi)
     )
     return jnp.sum(per_dimension, axis=-1)
 
@@ -200,6 +202,55 @@ class SharedPPO:
             continuous_action=self.continuous_action,
         )
 
+    def _policy_step(
+        self,
+        params: Params,
+        policy_state: Any,
+        policy_input: Array,
+        reset: Array,
+        auxiliary_key: Array,
+    ) -> tuple[Any, Array, Array, Array | None]:
+        """Run one core step and retain any stochastic trace needed by PPO."""
+        if getattr(self.policy_core, "requires_policy_aux_replay", False):
+            return self.policy_core.step_with_key(
+                params,
+                policy_state,
+                policy_input,
+                reset,
+                auxiliary_key,
+            )
+        new_state, logits, value = self.policy_core.step(
+            params,
+            policy_state,
+            policy_input,
+            reset,
+        )
+        return new_state, logits, value, None
+
+    def _policy_sequence(
+        self,
+        params: Params,
+        initial_policy_state: Any,
+        rollout: Rollout,
+    ) -> tuple[Any, Array, Array]:
+        """Replay a rollout through either a deterministic or stochastic core."""
+        if getattr(self.policy_core, "requires_policy_aux_replay", False):
+            if rollout.policy_auxiliary is None:
+                raise ValueError("stochastic policy rollout is missing its replay trace")
+            return self.policy_core.apply_sequence(
+                params,
+                initial_policy_state,
+                rollout.policy_input,
+                rollout.reset,
+                rollout.policy_auxiliary,
+            )
+        return self.policy_core.apply_sequence(
+            params,
+            initial_policy_state,
+            rollout.policy_input,
+            rollout.reset,
+        )
+
     def _collect(
         self,
         params: Params,
@@ -213,28 +264,28 @@ class SharedPPO:
                 carry.random_key,
                 3,
             )
+            policy_auxiliary_key = jax.random.fold_in(action_key, 1)
             policy_input = self._policy_input(carry)
-            policy_state, logits, value = self.policy_core.step(
+            policy_state, logits, value, policy_auxiliary = self._policy_step(
                 params,
                 carry.policy_state,
                 policy_input,
                 carry.done,
+                policy_auxiliary_key,
             )
             logits = self._mask_logits(carry.observation, logits)
             if self.continuous_action:
                 log_standard_deviation = params["distribution.log_std"]
-                action = logits + jnp.exp(
-                    log_standard_deviation
-                ) * jax.random.normal(action_key, logits.shape)
+                action = logits + jnp.exp(log_standard_deviation) * jax.random.normal(
+                    action_key, logits.shape
+                )
                 log_probability = gaussian_log_probability(
                     logits,
                     log_standard_deviation,
                     action,
                 )
             else:
-                action = jax.random.categorical(action_key, logits).astype(
-                    jnp.int32
-                )
+                action = jax.random.categorical(action_key, logits).astype(jnp.int32)
                 log_probability = categorical_log_probability(logits, action)
             (
                 observation,
@@ -259,11 +310,8 @@ class SharedPPO:
                 done=done,
                 episode_return=info["returned_episode_returns"],
                 episode_complete=info["returned_episode"],
-                action_mask=(
-                    None
-                    if self.continuous_action
-                    else carry.observation.action_mask
-                ),
+                action_mask=(None if self.continuous_action else carry.observation.action_mask),
+                policy_auxiliary=policy_auxiliary,
             )
             new_carry = RunnerState(
                 observation=observation,
@@ -283,11 +331,12 @@ class SharedPPO:
             length=self.config.rollout_steps,
         )
         bootstrap_input = self._policy_input(runner)
-        _, bootstrap_logits, bootstrap_value = self.policy_core.step(
+        _, bootstrap_logits, bootstrap_value, _ = self._policy_step(
             params,
             runner.policy_state,
             bootstrap_input,
             runner.done,
+            jax.random.fold_in(runner.random_key, 2),
         )
         del bootstrap_logits
         return runner, initial_policy_state, rollout, bootstrap_value
@@ -302,11 +351,7 @@ class SharedPPO:
             reward, done, value = transition
             delta = reward + self.config.gamma * next_value * (1.0 - done) - value
             advantage = (
-                delta
-                + self.config.gamma
-                * self.config.gae_lambda
-                * (1.0 - done)
-                * advantage
+                delta + self.config.gamma * self.config.gae_lambda * (1.0 - done) * advantage
             )
             return (advantage, value), advantage
 
@@ -326,11 +371,10 @@ class SharedPPO:
         advantages: Array,
         targets: Array,
     ) -> tuple[Array, tuple[Array, Array, Array, Array]]:
-        _, logits, values = self.policy_core.apply_sequence(
+        _, logits, values = self._policy_sequence(
             params,
             initial_policy_state,
-            rollout.policy_input,
-            rollout.reset,
+            rollout,
         )
         logits = self._mask_rollout_logits(rollout.action_mask, logits)
         if self.continuous_action:
@@ -345,15 +389,16 @@ class SharedPPO:
                 logits,
                 rollout.action,
             )
-        probability_ratio = jnp.exp(
-            new_log_probability - rollout.old_log_probability
-        )
+        probability_ratio = jnp.exp(new_log_probability - rollout.old_log_probability)
         unclipped_actor = probability_ratio * advantages
-        clipped_actor = jnp.clip(
-            probability_ratio,
-            1.0 - self.config.clip_epsilon,
-            1.0 + self.config.clip_epsilon,
-        ) * advantages
+        clipped_actor = (
+            jnp.clip(
+                probability_ratio,
+                1.0 - self.config.clip_epsilon,
+                1.0 + self.config.clip_epsilon,
+            )
+            * advantages
+        )
         actor_loss = -jnp.mean(jnp.minimum(unclipped_actor, clipped_actor))
 
         clipped_value = rollout.old_value + jnp.clip(
@@ -368,14 +413,11 @@ class SharedPPO:
             )
         )
         if self.continuous_action:
-            entropy = jnp.mean(
-                gaussian_entropy(params["distribution.log_std"])
-            )
+            entropy = jnp.mean(gaussian_entropy(params["distribution.log_std"]))
         else:
             entropy = jnp.mean(categorical_entropy(logits))
         approximate_kl = jnp.mean(
-            (probability_ratio - 1.0)
-            - (new_log_probability - rollout.old_log_probability)
+            (probability_ratio - 1.0) - (new_log_probability - rollout.old_log_probability)
         )
         total_loss = (
             actor_loss
@@ -434,6 +476,8 @@ class SharedPPO:
         optimizer_state = self.optimizer.init(params)
         runner = self.initialize_runner(runner_key)
         recent_returns: deque[float] = deque(maxlen=1_000)
+        total_completed_episodes = 0
+        history: list[dict[str, float]] = []
         final_metrics: dict[str, float] = {}
         minibatch_size = self.config.num_envs // self.config.num_minibatches
 
@@ -445,13 +489,12 @@ class SharedPPO:
                 bootstrap_value,
             ) = self._collect_jit(params, runner)
             advantages, targets = self._advantages_jit(rollout, bootstrap_value)
-            advantages = (advantages - jnp.mean(advantages)) / (
-                jnp.std(advantages) + 1e-8
-            )
+            advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
 
             completed = np.asarray(rollout.episode_complete, dtype=bool)
             returns = np.asarray(rollout.episode_return)
             recent_returns.extend(float(value) for value in returns[completed])
+            total_completed_episodes += int(np.sum(completed))
 
             update_metrics = []
             for _ in range(self.config.update_epochs):
@@ -489,9 +532,7 @@ class SharedPPO:
                     )
                     update_metrics.append(metrics)
 
-            stacked_metrics = jnp.stack(
-                [jnp.stack(metrics) for metrics in update_metrics]
-            )
+            stacked_metrics = jnp.stack([jnp.stack(metrics) for metrics in update_metrics])
             means = np.asarray(jnp.mean(stacked_metrics, axis=0))
             final_metrics = {
                 "loss": float(means[0]),
@@ -502,11 +543,11 @@ class SharedPPO:
                 "mean_recent_return": (
                     float(np.mean(recent_returns)) if recent_returns else float("nan")
                 ),
-                "completed_episodes": float(len(recent_returns)),
-                "environment_steps": float(
-                    (update_index + 1) * self.config.steps_per_update
-                ),
+                "completed_episodes": float(total_completed_episodes),
+                "recent_window_episodes": float(len(recent_returns)),
+                "environment_steps": float((update_index + 1) * self.config.steps_per_update),
             }
+            history.append(final_metrics)
             if progress is not None:
                 progress(update_index + 1, final_metrics)
 
@@ -514,6 +555,7 @@ class SharedPPO:
             params=params,
             runner=runner,
             recent_episode_returns=tuple(recent_returns),
+            history=tuple(history),
             final_metrics=final_metrics,
         )
 
@@ -528,25 +570,25 @@ class SharedPPO:
         def evaluation_step(carry: RunnerState, unused):
             del unused
             random_key, environment_key = jax.random.split(carry.random_key)
+            policy_auxiliary_key = jax.random.fold_in(random_key, 3)
             policy_input = self._policy_input(carry)
-            policy_state, logits, _ = self.policy_core.step(
+            policy_state, logits, _, _ = self._policy_step(
                 params,
                 carry.policy_state,
                 policy_input,
                 carry.done,
+                policy_auxiliary_key,
             )
             logits = self._mask_logits(carry.observation, logits)
             if self.continuous_action:
                 action = logits
             else:
                 action = jnp.argmax(logits, axis=-1).astype(jnp.int32)
-            observation, environment_state, reward, done, info = (
-                self.environment.step(
-                    jax.random.split(environment_key, self.config.num_envs),
-                    carry.environment_state,
-                    action,
-                    self.environment_params,
-                )
+            observation, environment_state, reward, done, info = self.environment.step(
+                jax.random.split(environment_key, self.config.num_envs),
+                carry.environment_state,
+                action,
+                self.environment_params,
             )
             reward = jnp.asarray(reward, dtype=jnp.float32)
             new_carry = RunnerState(
@@ -600,9 +642,7 @@ class SharedPPO:
         selected_returns = np.stack(
             [
                 returns_host[
-                    np.flatnonzero(completed_host[:, environment_index])[
-                        :episodes_per_environment
-                    ],
+                    np.flatnonzero(completed_host[:, environment_index])[:episodes_per_environment],
                     environment_index,
                 ]
                 for environment_index in range(self.config.num_envs)

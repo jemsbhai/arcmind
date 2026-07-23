@@ -72,8 +72,7 @@ class IntegerRewardMaskedEnvironment:
         del keys, params
         next_state = state + 1
         action_mask = (
-            jnp.arange(IntegerRewardMaskedEnvironment.action_dim)[None, :]
-            != action[:, None]
+            jnp.arange(IntegerRewardMaskedEnvironment.action_dim)[None, :] != action[:, None]
         )
         observation = DummyObservation(
             obs=next_state[:, None].astype(jnp.float32),
@@ -186,9 +185,7 @@ def test_parameter_matching_is_within_ten_percent() -> None:
     input_dim = 7
     action_dim = 3
     target_core = ArcMindPolicyCore(tiny_arcmind_config())
-    target_count = target_core.count_parameters(
-        target_core.initialize(jax.random.PRNGKey(1))
-    )
+    target_count = target_core.count_parameters(target_core.initialize(jax.random.PRNGKey(1)))
     for model_name, constructor in (
         ("memoryless_mlp", MemorylessMLPPolicyCore),
         ("frame_stack_mlp", FrameStackMLPPolicyCore),
@@ -215,9 +212,7 @@ def test_sequence_parameter_matching_is_within_ten_percent() -> None:
     # The smallest GTrXL width is coarse because hidden size must be divisible
     # by the head count, so exercise the actual pilot-scale matching regime.
     target_core = ArcMindPolicyCore(pilot_arcmind_config())
-    target_count = target_core.count_parameters(
-        target_core.initialize(jax.random.PRNGKey(21))
-    )
+    target_count = target_core.count_parameters(target_core.initialize(jax.random.PRNGKey(21)))
     for model_name in (
         "s4d",
         "ms4",
@@ -471,9 +466,7 @@ def test_structured_core_gradients_are_finite() -> None:
                 inputs,
                 resets,
             )
-            return jnp.mean(jnp.square(logits)) + jnp.mean(
-                jnp.square(values)
-            )
+            return jnp.mean(jnp.square(logits)) + jnp.mean(jnp.square(values))
 
         gradients = jax.grad(loss)(params)
         leaves = jax.tree.leaves(gradients)
@@ -632,10 +625,7 @@ def test_arcmind_effective_parameter_count_tracks_ablations() -> None:
     for ablation_field in ablation_fields:
         ablated_config = replace(base, **{ablation_field: True})
         ablated_core = ArcMindPolicyCore(ablated_config)
-        assert (
-            ablated_core.count_effective_parameters(full_params)
-            < full_count
-        )
+        assert ablated_core.count_effective_parameters(full_params) < full_count
 
 
 def test_categorical_statistics() -> None:
@@ -830,8 +820,22 @@ def test_runner_horizons_cover_every_accepted_environment() -> None:
         "battleship_10": 1_000,
         "HalfCheetah-P-v0": 1_000,
         "HalfCheetah-V-v0": 1_000,
+        "HalfCheetah-F-v0": 1_000,
+        "Walker-V-v0": 1_000,
+        "Walker-F-v0": 1_000,
         "Navix-DMLab-Maze-01-v0": 2_000,
     }
+
+
+def test_ppo_config_rejects_silently_truncated_interaction_budget() -> None:
+    config = PPOConfig(
+        total_steps=9,
+        num_envs=2,
+        rollout_steps=2,
+        num_minibatches=1,
+    )
+    with pytest.raises(ValueError, match="exactly divisible"):
+        config.validate()
 
 
 def test_gaussian_statistics() -> None:

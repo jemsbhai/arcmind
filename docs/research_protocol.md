@@ -86,7 +86,14 @@ The registered low-dimensional task set is:
   nonstationarity;
 - `Walker-V-v0` and `HalfCheetah-V-v0`, which retain only velocity features,
   require history to infer missing position information, and test the moment
-  features category; and
+  features category. At the pinned POBAX commit, Walker-V selects dimensions
+  8 through 16 for a 9-value observation, while Walker-F selects all 17
+  dimensions. Both use a 6-value bounded continuous action and a 1,000-step
+  episode limit. The corresponding upper-reference pairing is Walker-V
+  against Walker-F; HalfCheetah-V is similarly paired with HalfCheetah-F,
+  whose full observation also has 17 values
+  ([environment map](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/__init__.py#L49-L86),
+  [Brax wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/gymnax.py#L242-L273)); and
 - `Navix-DMLab-Maze-01-v0`, which tests spatial uncertainty and episode
   nonstationarity.
 
@@ -118,6 +125,70 @@ Mandatory controls and baselines:
 - a fully observable policy or privileged-state upper reference where the
   environment supplies one.
 
+POBAX does not implement a positional MLP. The
+[`backend="positional"` setting](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/gymnax.py#L242-L273)
+selects the Brax simulation backend and is unrelated to policy position
+features. The registered positional control is a shared-head JAX
+adaptation of the pinned POPGym implementation, not a scalar `t / horizon`
+feature. It adds POPGym's fixed sinusoidal encoding at the first hidden
+representation, uses a learned scalar blend initialized to 0.5, and carries only
+a reset-aware per-environment episode counter
+([MLP definition](https://github.com/proroklab/popgym/blob/410d5aa626dae8024f498354d8781a0d1870c399/popgym/baselines/ray_models/ray_mlp.py#L10-L55),
+[encoding](https://github.com/proroklab/popgym/blob/410d5aa626dae8024f498354d8781a0d1870c399/popgym/baselines/models/embeddings.py#L7-L17),
+[blend and counter](https://github.com/proroklab/popgym/blob/410d5aa626dae8024f498354d8781a0d1870c399/popgym/baselines/ray_models/base_model.py#L240-L317)).
+The common actor, critic, causal policy input, learner, and parameter-matching
+procedure remain unchanged, and the learned blend scalar counts toward the
+parameter total.
+
+Upper references are classified by the information they expose:
+
+| Primary task | Upper invocation | Reference class |
+|---|---|---|
+| `Walker-V-v0` | `Walker-F-v0` | full Markov observation |
+| `HalfCheetah-V-v0` | `HalfCheetah-F-v0` | full Markov observation |
+| `rocksample_11_11` | same identifier with `perfect_memory=True` | full Markov observation, including true rock morality |
+| `Navix-DMLab-Maze-01-v0` | `Navix-DMLab-Maze-F-01-v0` | full Markov map, position, and direction |
+| `tmaze_10` | same identifier with `perfect_memory=True` | persistent-cue upper reference |
+| `battleship_10` | same identifier with `perfect_memory=True` | perfect-recall history |
+| `simple_chain` | same identifier with `perfect_memory=True` | broken upstream reference, excluded |
+
+This taxonomy follows the
+[pinned environment construction](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/__init__.py#L171-L319).
+RockSample exposes position and true rock morality
+([wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/rocksample.py#L93-L125)).
+Navix-F-01 exposes a full position-encoded array of shape `(21, 41, 6)` and
+uses the same 2,000-step maze specification as the partial task
+([representation](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/navix_mazes.py#L295-L355),
+[registrations](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/navix_mazes.py#L413-L464)).
+T-Maze keeps the goal cue visible but does not expose the full latent state
+([source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/tmaze.py#L12-L65)).
+Battleship exposes the complete hit and miss history, not the hidden ship
+board
+([state and wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/battleship.py#L15-L99)).
+The Simple Chain full wrapper refers to nonexistent instance state and is not
+eligible for evaluation
+([source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/simple_chain.py#L77-L89)).
+
+These rows are diagnostic upper references, not like-for-like memory-backbone
+baselines and not guaranteed empirical ceilings. They change the deployed
+policy's information and, under finite optimization, may perform below a
+partial-observation method. Report them separately from the parameter-matched
+main table.
+
+Two adapters require special care. Battleship's public perfect-memory path
+returns a raw `(10, 10)` history array and omits the ordinary action-mask
+dictionary. The shared learner must restore the legal-action mask from
+unvisited cells and use an explicit observation adapter; the unregistered
+state wrapper must not be substituted because its returned axis order
+disagrees with its declared space
+([wrappers](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/battleship.py#L67-L205)).
+Navix expands from a partial `(7, 7, 2)` observation, or 98 flattened values,
+to 5,166 full-observation values. Its adapter must target the parameter budget
+of the primary partial-task ArcMind cell, and all adapter parameters must be
+counted, rather than allowing privileged input width to define a larger budget
+([partial wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/nx.py#L59-L132),
+[full registration](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/navix_mazes.py#L413-L464)).
+
 POBAX is JAX-native. All accuracy comparisons must use one PPO
 implementation, optimizer, rollout collector, and update schedule. The ArcMind
 recurrence therefore requires a JAX benchmark implementation with numerical
@@ -128,21 +199,21 @@ learners would introduce an unacceptable framework confound.
 has an
 [official JAX recurrence at commit
 `b3f94d2a0f35ba05089faf19ab1df846057cf8b6`](https://github.com/proroklab/ffm/tree/b3f94d2a0f35ba05089faf19ab1df846057cf8b6/standalone_jax).
-It accepts recurrent state and episode-done flags, so it can be ported as a
-policy core without changing PPO. The port still requires parameter, reset,
-sequence, and gradient parity tests against the official implementation.
+It accepts recurrent state and episode-done flags. The implemented policy core
+uses that recurrence without changing PPO and has parameter, reset, sequence,
+equation, JIT, and gradient tests.
 
 [Stable Hadamard Memory](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf)
 has [official PyTorch code at release `v1.1`, commit
 `40d73d44936e47a29e2c76a481d93c434b857ea1`](https://github.com/thaihungle/SHM/tree/40d73d44936e47a29e2c76a481d93c434b857ea1).
-Its memory equations can also serve as a policy core without adding an
-auxiliary loss or changing PPO. The repository includes PyTorch benchmark
-adapters with explicit recurrent state, but it does not expose a JAX streaming
-interface. A fair comparison therefore requires a JAX port with explicit
-initial state, asynchronous reset masks, explicit random-address keys, and a
-time-major scan. Test deterministic equations with a fixed address sequence
-against the released PyTorch adapter, and test stochastic addressing
-distributionally, before any benchmark result is eligible for the main table.
+Its memory equations serve as a policy core without adding an auxiliary loss
+or changing PPO. The repository includes PyTorch benchmark adapters with
+explicit recurrent state but no JAX streaming interface. The implemented JAX
+core supplies initial state, asynchronous reset masks, explicit random
+addresses, and a time-major scan. It tests fixed-address equations and address
+sampling, and the shared learner replays collection-time addresses exactly.
+The registered scientific baseline uses `paper_uniform`; the released
+row-zero behavior remains a separately named compatibility check.
 
 POBAX reports recurrent PPO, lambda discrepancy with recurrent PPO, and
 Transformer-XL with PPO. Its repository enables GRU-style gates in the

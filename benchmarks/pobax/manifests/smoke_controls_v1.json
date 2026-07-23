@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "status": "frozen",
+  "evidence_tier": "smoke",
+  "matrix_kind": "primary_comparison",
+  "models": [
+    "memoryless_mlp",
+    "positional_mlp",
+    "ffm",
+    "shm",
+    "gru",
+    "lstm",
+    "s5rl",
+    "transformer_xl",
+    "arcmind_ssm_only",
+    "arcmind"
+  ],
+  "environments": [
+    {
+      "id": "tmaze_10",
+      "total_steps": 8192
+    }
+  ],
+  "seeds": [
+    1103
+  ],
+  "learner": {
+    "num_envs": 32,
+    "rollout_steps": 32,
+    "update_epochs": 2,
+    "learning_rate": 0.00025
+  },
+  "evaluation_episodes_per_env": 1,
+  "require_gpu": true,
+  "quick": true
+}
