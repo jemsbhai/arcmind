@@ -295,6 +295,9 @@ with each actual experiment.
   descriptions for all four discrete aliases and Walker-F passed their
   parameter and task-equivalence checks. The integrated POBAX CPU suite passed
   all 212 tests, and the Windows package suite passed all 118 selected tests.
+  CI for commit `fdaa74f7be5d203f7c302cddaac2719abde8fbc6` passed on
+  Python 3.10, 3.11, and 3.12
+  ([run](https://github.com/jemsbhai/arcmind/actions/runs/30037446425)).
 - Interpretation: equal seed cardinality is not paired evidence. Pairing
   requires a machine-verifiable link between the exact immutable manifests.
 - Evidence restriction: these gates establish artifact validity, not policy
@@ -529,6 +532,15 @@ with each actual experiment.
     and
   - `sha256sum -c` verified the registration, frozen manifest, completion
     index, and all ten cell artifacts before and after resume.
+- Development aggregate: the later fail-closed development aggregator accepted
+  the immutable matrix and produced
+  `benchmark_results/pobax/aggregates/matrix-smoke-controls-v1-de799c3.json`,
+  SHA256
+  `9b7ee143ab7a50ad256f819a597c3252c5eb6859e8f81bcfeb527047560bb8e6`.
+  It validated every top-level parameter match and labeled the result
+  `development_smoke_aggregate_not_for_paper`. Its semantic-freeze flags are
+  false because this historical smoke manifest predates parameter counts and
+  environment source metadata inside the hashed configuration.
 - Runtime notes: optional Warp imports were unavailable, and XLA emitted
   nonfatal autotuning fallback warnings during ArcMind compilation. Every
   selected cell still completed with finite training and evaluation metrics.
@@ -543,10 +555,60 @@ with each actual experiment.
 - Disposition: use the launcher for a predeclared multi-seed T-Maze pilot.
   Create WSL worktrees with WSL Git whenever WSL executes the experiment.
 
+### F-REF-002: POBAX paper and pinned RockSample scripts define different best settings
+
+- Class: `reference verification`
+- Status: completed source audit, not a performance finding
+- Date: 2026-07-23
+- Sources: the primary
+  [POBAX paper](https://rlj.cs.umass.edu/2025/papers/RLJ_RLC_2025_153.pdf)
+  and author repository commit
+  [`a5e1d62d14e4efe783885b9d4f19cffa2a568eec`](https://github.com/taodav/pobax/tree/a5e1d62d14e4efe783885b9d4f19cffa2a568eec).
+- Verified paper contract:
+  - the general PPO defaults are 128 rollout steps, four update epochs, four
+    minibatches, entropy coefficient `0.01`, and linear learning-rate
+    annealing;
+  - T-Maze, RockSample(11,11), Battleship, masked MuJoCo, and Navix-01 use 4,
+    8, 32, 4, and 256 parallel environments, respectively;
+  - RockSample uses entropy coefficient `0.2`, while Battleship uses `0.05`;
+    and
+  - learning rate and GAE lambda are selected separately by algorithm before
+    30-seed final evaluation.
+- Verified RockSample(11,11) discrepancy:
+
+  | Model | Paper learning rate | Paper GAE lambda | Pinned script learning rate | Pinned script GAE lambda | Pinned script environments | Pinned script entropy |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Memoryless | 0.0025 | 0.3 | 0.0025 | 0.7 | 8 | 0.2 |
+  | RNN | 0.00025 | 0.95 | 0.0025 | 0.7 | 8 | 0.2 |
+  | Transformer-XL | 0.00025 | 0.1 | 0.00025 | 0.7 | 16 | 0.1 |
+
+- Script evidence:
+  [RNN](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/scripts/hyperparams/rocksample/best/rocksample_11_11_ppo_best.py),
+  [memoryless](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/scripts/hyperparams/rocksample/best/rocksample_11_11_ppo_memoryless_best.py),
+  and
+  [Transformer-XL](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/scripts/hyperparams/rocksample/best/rocksample_11_11_transformer_best.py).
+  Downloaded file SHA256 values were
+  `64fcd689f580f90043366ce5a6482a0670e885878c84cd9e6c08da2dc2a3c952`,
+  `c23f48783f0e67e398cd7d6039ddbdffb5054e66280c75d3af3fa356edacc658`,
+  and
+  `b84e52222a614b816b5ccfbc1e1966ce1e8db20f5c4508f6de7b3e0608adc8a5`,
+  respectively.
+- Interpretation: there is no single unambiguous source-defined RockSample
+  profile. The paper table and executable author scripts must not be silently
+  combined.
+- Disposition: maintain two named evidence lanes. A pinned author-code
+  reproduction follows and records the executable scripts. The ArcMind shared
+  comparison applies an equal-cardinality tuning grid to every architecture.
+  Neither lane may be described as reproducing the other.
+- Pilot restriction: `F-PILOT-001` uses one shared constant learning rate,
+  GAE lambda `0.95`, entropy coefficient `0.01`, eight environments, and no
+  learning-rate annealing. It is a frozen development viability screen, not a
+  POBAX hyperparameter reproduction.
+
 ### F-PILOT-001: T-Maze multi-seed viability screen
 
-- Class: `development smoke`
-- Status: planned and frozen before outcome inspection
+- Class: `development pilot`
+- Status: execution complete, numerical acceptance gate failed
 - Date planned: 2026-07-23
 - Question: do the ten required low-dimensional controls train stably and
   complete independent evaluation under a shared configuration long enough to
@@ -584,6 +646,62 @@ with each actual experiment.
   - treat all return differences as development evidence that cannot enter a
     paper table, abstract, or conclusion.
 - Compute: local GPU only, expected external cost `$0`.
+- Execution outcome:
+  - all 30 planned cells produced immutable artifacts at exactly 250,000
+    environment transitions and 128 evaluation episodes;
+  - all cells used the local GPU and clean detached commit
+    `4b9887126678c08967f7a92e8a3c77abf65f486c`;
+  - the launcher completed in 5,645.3 wall-clock seconds, while cell artifacts
+    recorded 5,464.3 training seconds in total; and
+  - no subprocess or artifact-writing operation failed.
+- Evaluation returns, in seed order `1103`, `2207`, and `3301`:
+
+  | Model | Seed 1103 | Seed 2207 | Seed 3301 | Across-seed mean | Parameters | ArcMind ratio |
+  |---|---:|---:|---:|---:|---:|---:|
+  | FFM | 4.0000 | 4.0000 | 4.0000 | 4.0000 | 28,577 | 0.9951 |
+  | GRU | 4.0000 | 4.0000 | 4.0000 | 4.0000 | 28,893 | 1.0061 |
+  | LSTM | 4.0000 | 4.0000 | 4.0000 | 4.0000 | 28,840 | 1.0043 |
+  | S5RL | 4.0000 | 4.0000 | 4.0000 | 4.0000 | 28,617 | 0.9965 |
+  | ArcMind SSM only | 4.0000 | 2.2062 | 4.0000 | 3.4021 | 28,717 | 1.0000 |
+  | Transformer-XL | 1.9375 | 4.0000 | 4.0000 | 3.3125 | 28,869 | 1.0053 |
+  | ArcMind | 1.6617 | 4.0000 | 4.0000 | 3.2206 | 28,717 | 1.0000 |
+  | SHM | 0.0000 | 4.0000 | 4.0000 | 2.6667 | 28,727 | 1.0003 |
+  | Memoryless MLP | 1.6617 | 2.2062 | 1.6297 | 1.8326 | 28,663 | 0.9981 |
+  | Positional MLP | 1.5656 | 0.0000 | 2.2062 | 1.2573 | 28,526 | 0.9933 |
+
+- Numerical failure: SHM seed `1103` had finite metrics through update 110,
+  then nonfinite loss, actor loss, value loss, entropy, and approximate KL
+  from environment step 111,000 through the end of training. The immutable
+  JSON represents these values as null. SHM seeds `2207` and `3301` remained
+  finite. Two other early null recent-return values occurred before the first
+  completed training episode and are not numerical failures.
+- Integrity:
+  - matrix-manifest identity:
+    `69a858ad9e97cfba8b68d0c330b0a8234480aa5ffcc1b6a1f4db2f8282e776c4`;
+  - `checksums.sha256` SHA256:
+    `545c3a0c34f38a824e3fb6b61643c30dc449edbd88f1b628d764ae907c4022bb`;
+  - frozen-manifest SHA256:
+    `c10323dcc36d7bc3471cda5a27c7032271df1e55216b6c43e3352f4345eb066c`;
+  - completion-index SHA256:
+    `1738d86512b2a56635912d94fe174a6b38567bb40fb30bc00ca9d2f99f23cbb0`;
+    and
+  - `sha256sum -c` independently passed for every cell artifact, log,
+    registration, manifest, and completion index.
+- Aggregation defect found: the first development aggregator accepted the
+  matrix because it checked evaluation returns but did not reject null
+  optimizer metrics. That aggregate was immediately quarantined as
+  `benchmark_results/pobax/aggregates/tmaze-pilot-v1-4b98871.invalid-pre-finite-gate.json`,
+  SHA256
+  `ea2313b99d4fe27f6d149267df66c934250f95f47e24821ec92246250b4170b2`.
+  It is invalid evidence. A new fail-closed gate must reject every required
+  nonfinite optimizer metric before another aggregate is accepted.
+- Decision-rule outcome: the preregistered finite-metric prediction failed.
+  Diagnose SHM, make any source-faithful repair under a new code commit, and
+  rerun all three SHM seeds under a new frozen manifest. Do not replace only
+  seed `1103`, and do not promote the current rank table to a paper claim.
+- Timing restriction: local CPU validation and source auditing overlapped with
+  parts of the GPU matrix, so recorded training times are engineering
+  diagnostics rather than controlled throughput comparisons.
 
 ### F-REG-000: No registered performance finding exists
 
@@ -678,6 +796,70 @@ with each actual experiment.
   [POPGym source](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/popgym/baselines/ray_models/ray_shm.py#L57-L62),
   and
   [POMDP source](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/pomdp-baselines/torchkit/shm.py#L39-L44)
+
+### F-REF-003: Official SHM sources use different recurrence bounds
+
+- Class: `reference verification` and `diagnostic evidence`
+- Status: diagnosis and source-faithful repair complete, registered rerun
+  pending
+- Date: 2026-07-23
+- Sources: the ICLR 2025
+  [SHM paper](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf)
+  and official source commit
+  [`40d73d44936e47a29e2c76a481d93c434b857ea1`](https://github.com/thaihungle/SHM/tree/40d73d44936e47a29e2c76a481d93c434b857ea1).
+- Source discrepancy:
+  - the official
+    [POMDP cell](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/pomdp-baselines/torchkit/shm.py#L68-L75)
+    clamps the recurrent matrix to `[-100, 100]` after every calibration and
+    write;
+  - the official
+    [POPGym cell](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/popgym/baselines/ray_models/ray_shm.py#L83-L87)
+    and
+    [standalone cell](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/shm.py#L59-L64)
+    do not clamp the recurrence; and
+  - the paper states that cumulative products can occasionally become large
+    enough to overflow and names gradient clipping as a remedy, but its
+    equations do not specify the POMDP cell's forward-state clamp.
+- Downloaded source SHA256 values:
+  - POMDP cell:
+    `7df5a127d286434a52a8294f68b6e86ac297d010c06c6f774d4404b7b617965b`;
+  - POPGym cell:
+    `d45e97cd9fc606372c44c885892614c79d7f422c550277a0b7d0935807f475e4`;
+    and
+  - standalone cell:
+    `7ba92a52e7ec4d75f2b8aab09ea463324b3b550dff597747df1e524aa75c0146`.
+- Failure diagnosis: fixed-seed instrumented replays of the preregistered
+  T-Maze configuration showed healthy uniform addresses. Each 1,000-step
+  collection selected 127 or 128 of the 128 rows. The maximum absolute
+  recurrent states for seeds `1103`, `2207`, and `3301` reached
+  `20,814,988`, `40,824,856`, and `50,378.0742`, respectively. Maximum raw
+  gradient norms reached `269,777,696`, `5.100072337408e12`, and
+  `1,160,457.125`. These observations rule out collapsed addressing and show
+  that the forward recurrence can expand by many orders of magnitude before
+  learner-side gradient clipping is applied.
+- Diagnostic artifact: local file
+  `E:\data\code\claudecode\arcmind\tmp\shm-diagnostic.json`, SHA256
+  `47aad8059e121a73467a2834dae45a9179a0012f987bf50b44fb1685844fc5d7`.
+- Repair: commit
+  [`bd43c6cda88d493df318c3c5ca6bf7e22da60279`](https://github.com/jemsbhai/arcmind/commit/bd43c6cda88d493df318c3c5ca6bf7e22da60279)
+  applies the official POMDP cell's `[-100, 100]` forward-state clamp only in
+  `paper_uniform` mode. The `v1_1_popgym_compat` mode remains unclamped and
+  retains row-zero addressing. The serialized policy-core contract exposes
+  this mode difference.
+- Repair validation: source-equation, mode-serialization, long-sequence,
+  finite-gradient, and unclamped-compatibility tests passed. A direct replay
+  of seed `1103` then completed all 250,000 transitions with finite optimizer
+  metrics and achieved mean return `4.0` over 128 evaluation episodes. The
+  replay artifact is
+  `E:\data\code\claudecode\arcmind\tmp\shm-fix-seed1103.json`, SHA256
+  `43547f8a1771034957d71d3325a447a0fa8d1e887962d7176b25ff28b9089284`.
+- Interpretation: the historical failure is consistent with forward
+  recurrence overflow, not address collapse or optimizer-input corruption.
+  The repair is source-faithful to the official POMDP implementation while
+  preserving an exact POPGym compatibility mode.
+- Evidence restriction: the direct replay is a diagnostic, not registered
+  performance evidence. All three SHM seeds must be rerun under a new frozen
+  manifest before any comparison is aggregated or used in the paper.
 
 ### F-DIAG-005: Predeclared fusion-interference controls
 

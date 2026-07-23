@@ -70,6 +70,15 @@ environment
   embodied-memory stretch test after the low-dimensional policy-backbone claim
   is established. Its [official source is commit
   `4030901cef3b7d4e7f92e62099e8be378303dc0a`](https://github.com/jurgisp/memory-maze/tree/4030901cef3b7d4e7f92e62099e8be378303dc0a).
+- [POPGym Arcade](https://arxiv.org/abs/2503.01450) supplies
+  hardware-accelerated pixel tasks with paired fully and partially observable
+  variants. Its observability-gap and memory-contamination analyses make it a
+  useful later stress suite, but its visual input and counterfactual analysis
+  change the question relative to the primary low-dimensional POBAX
+  comparison. The reproducible package release is pinned by its PyPI
+  attestation to
+  [source commit
+  `462d18a050e4710e45c0bdd07a4e71e981ee5445`](https://github.com/bolt-research/popgym-arcade/tree/462d18a050e4710e45c0bdd07a4e71e981ee5445).
 - The 2026 [memory-rewriting benchmark](https://arxiv.org/abs/2601.15086)
   tests whether a memory can replace stale information rather than merely
   retain it. It is a useful stress test, but remains a preprint and should not
@@ -157,15 +166,25 @@ scan. Fixed-address tests match an independent translation of the released
 equations. Distributional tests cover address sampling, and PPO stores and
 replays each collection-time address during loss recomputation.
 
-The SHM audit found a source-level incompatibility that must remain explicit.
-The paper and the official POMDP implementation sample uniformly from all 128
-address rows, but the standalone and POPGym `v1.1` implementations call
-`uniform_(0, 1).long()`. Values in that interval truncate to zero, so those
-paths always select address row zero. The JAX port therefore has two named
-modes: `paper_uniform`, which follows the paper and POMDP code, and
-`v1_1_popgym_compat`, which reproduces the released POPGym behavior. The main
-shared-learner baseline should use `paper_uniform` and must not be described
-as an exact reproduction of the published POPGym agent.
+The SHM audit found two source-level incompatibilities that must remain
+explicit. First, the paper and the official POMDP implementation sample
+uniformly from all 128 address rows, but the standalone and POPGym `v1.1`
+implementations call `uniform_(0, 1).long()`. Values in that interval truncate
+to zero, so those paths always select address row zero. Second, the
+[POMDP implementation clamps the recurrent matrix to `[-100, 100]` after each
+write](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/pomdp-baselines/torchkit/shm.py#L68-L75),
+while the
+[POPGym path leaves the recurrence unclamped](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/popgym/baselines/ray_models/ray_shm.py#L83-L87).
+The paper notes that cumulative products can occasionally overflow and names
+gradient clipping as a remedy, but its method equations do not specify the
+forward-state clamp.
+
+The JAX port therefore has two named source modes. `paper_uniform` uses the
+paper's uniform addressing and the official POMDP cell's recurrent-state
+clamp. `v1_1_popgym_compat` preserves the released POPGym behavior, including
+row-zero addressing and an unclamped recurrence. The main shared-learner
+baseline should use `paper_uniform`. It is a source-audited scientific
+baseline, not an exact reproduction of the published POPGym agent.
 
 The implemented memory-trace adapter applies the fixed exponential averages to
 the common causal policy input rather than the original paper's
@@ -282,6 +301,11 @@ without changing the experimental question:
 - [RATE](https://openreview.net/forum?id=kByN4v0M3e) evaluates recurrent
   attention in offline RL over stored trajectories, not the shared online PPO
   regime.
+- [When Sensors Fail](https://arxiv.org/abs/2603.04648), accepted at an ICLR
+  2026 workshop, studies persistent sensor dropout rather than POBAX. Its
+  Transformer, GTrXL, GRU, LRU, and LinOSS comparison reinforces the need for
+  exact-attention and stable-recurrence controls, but its published returns are
+  not directly comparable to the primary task suite.
 - Privileged-state critics, expert distillation, and asymmetric methods use
   information unavailable to the deployed policy. They are upper references
   or training-regime comparisons, not pure memory-backbone baselines.
