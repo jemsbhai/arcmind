@@ -233,7 +233,7 @@ def arcmind_config(
         ssm_expand_factor=1,
         num_attn_layers=1,
         num_attn_heads=4,
-        attn_window_size=8,
+        attn_window_size=16,
         num_memory_slots=16,
         memory_compress_ratio=4,
         action_dim=action_dim,

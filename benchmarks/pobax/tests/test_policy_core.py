@@ -22,7 +22,7 @@ from benchmarks.pobax.baseline_cores import (
     match_baseline_width,
 )
 from benchmarks.pobax.policy_core import ArcMindPolicyCore, augment_policy_input
-from benchmarks.pobax.run_pilot import MAX_EPISODE_STEPS
+from benchmarks.pobax.run_pilot import MAX_EPISODE_STEPS, arcmind_config
 from benchmarks.pobax.sequence_cores import (
     DiagonalSSMPolicyCore,
     FullCausalTransformerPolicyCore,
@@ -149,12 +149,21 @@ def pilot_arcmind_config() -> ReferenceConfig:
         ssm_expand_factor=1,
         num_attn_layers=1,
         num_attn_heads=4,
-        attn_window_size=8,
+        attn_window_size=16,
         num_memory_slots=16,
         memory_compress_ratio=4,
         action_dim=3,
         decision_stride=1,
     )
+
+
+def test_tmaze_pilot_attention_window_covers_the_start_cue() -> None:
+    """The strict-prior window must retain time zero at the time-11 junction."""
+    config = arcmind_config(input_dim=10, action_dim=4)
+    required_prior_snapshots = 11
+    assert config.decision_stride == 1
+    assert config.attn_window_size >= required_prior_snapshots
+    assert config.num_memory_slots >= config.attn_window_size
 
 
 def test_augmented_input_zeroes_cross_episode_features() -> None:

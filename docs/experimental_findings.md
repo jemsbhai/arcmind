@@ -834,6 +834,128 @@ with each actual experiment.
   conclusion. The next T-Maze coverage and ablation manifest was frozen before
   this aggregate was inspected.
 
+### F-PILOT-003: T-Maze coverage and ablation pilot exposes seed sensitivity
+
+- Class: `development pilot`
+- Status: execution, aggregation, integrity, and resume validation complete,
+  not for a paper performance claim
+- Date planned and frozen: 2026-07-23
+- Date completed: 2026-07-23
+- Question: do the missing short-window, stable-recurrence, and ArcMind
+  ablation cells execute reproducibly enough to justify full-budget tuning?
+- Prediction stated before execution: every cell will complete with finite
+  optimizer metrics. No directional return or model-ranking prediction was
+  registered.
+- Frozen matrix:
+  - manifest:
+    `benchmarks/pobax/manifests/tmaze_coverage_ablation_v2.json`;
+  - source commit:
+    `3b947d2968d14f313db450a1f9e009123a373a75`;
+  - schema: `2`;
+  - comparison profile: `arcmind_shared_comparison`;
+  - models: four-frame MLP, LRU, S4D, unordered ArcMind, ArcMind without
+    memory, ArcMind without the SSM, ArcMind without the learned gate, and
+    full ArcMind;
+  - seeds: `1103`, `2207`, and `3301`;
+  - learner: eight environments, 125 rollout steps, four update epochs, four
+    minibatches, constant learning rate `0.00025`, GAE lambda `0.95`, and
+    entropy coefficient `0.01`;
+  - budget: exactly 250,000 requested and realized transitions per cell; and
+  - evaluation: 16 episodes per environment, or 128 episodes per seed.
+- Completed results:
+
+  | Model | Seed 1103 | Seed 2207 | Seed 3301 | Strict mean |
+  |---|---:|---:|---:|---:|
+  | Four-frame MLP | 1.8539 | 2.0461 | 1.8539 | 1.9180 |
+  | LRU | 4.0000 | 4.0000 | 4.0000 | 4.0000 |
+  | S4D | 4.0000 | 4.0000 | 0.0000 | 2.6667 |
+  | Unordered ArcMind | 4.0000 | 4.0000 | 4.0000 | 4.0000 |
+  | ArcMind without memory | 1.6617 | 4.0000 | 0.0000 | 1.8872 |
+  | ArcMind without SSM | 0.0000 | 4.0000 | 4.0000 | 2.6667 |
+  | ArcMind without learned gate | 4.0000 | 2.2062 | 2.2703 | 2.8255 |
+  | ArcMind | 4.0000 | 1.8219 | 4.0000 | 3.2740 |
+
+- Numerical outcome: all 24 cells recorded 250 finite PPO updates, completed
+  independent evaluation, and retained every low or null return. The
+  predeclared numerical prediction passed.
+- Interpretation: the three-seed pilot is visibly seed-sensitive. LRU and
+  unordered ArcMind reached `4.0` in all three cells, while S4D, the
+  no-memory ablation, and the no-SSM ablation each included both `0.0` and
+  `4.0` outcomes. This matrix is too small and too short to support a ranking
+  or component-importance claim.
+- Architecture audit triggered by the pilot: `F-DIAG-006` proves that the
+  benchmark-only ArcMind attention window cannot expose the initial T-Maze
+  cue at the junction. The current result therefore cannot test the intended
+  exact-recall mechanism fairly.
+- Integrity:
+  - source manifest SHA256:
+    `fda5837ef8c177e78f73aa439c90e255fdc32ad33dce95fcf9fdaee9e6bb50bb`;
+  - matrix-manifest identity:
+    `c8b8d36405aa8cfd9d6a1ce459ed858e9181cadc1050a679e51441f9519d4c81`;
+  - `checksums.sha256` SHA256:
+    `fcb41616b3ef3925a52f19e4bd77b0b1cac0b95978f8df8ba8f9277ef251e319`;
+  - frozen-manifest SHA256:
+    `81ede090d7f5def0e2d247736f19655e051e5c455697201f38a6ba5018201a9a`;
+  - completion-index SHA256:
+    `365d05a7ed631ffed26336e5d15b8e92b748713682cecd28a0efd00311f84f06`;
+  - registration SHA256:
+    `eeff948367c30fe836b4630e4311a92a2f572322b31d9858232e3f29157e496f`;
+  - independent `sha256sum -c` validation passed before and after the resume
+    check; and
+  - resume completed 24 of 24 cells in 36.6 seconds without retraining or
+    changing any recorded hash.
+- Aggregate: the strict development aggregate is
+  `benchmark_results/pobax/aggregates/tmaze-coverage-ablation-v2-3b947d2.json`,
+  SHA256
+  `b35f5221ac934e0101db43130e2445915393e0c7fd5cca550c67dca161e8e0b0`.
+  Its status is `development_pilot_aggregate_not_for_paper`.
+- Runtime: cell artifacts record 6,450.2 local GPU training seconds in total.
+  This is engineering timing, not controlled throughput evidence.
+- Disposition: preserve the matrix as negative development evidence. Repair
+  the benchmark attention horizon under a new commit and frozen manifest
+  before hyperparameter selection. Do not use this matrix in a paper table,
+  abstract, conclusion, or architecture-ranking statement.
+
+### F-DIAG-006: The pilot attention window excludes the T-Maze start cue
+
+- Class: `configuration diagnosis`
+- Status: verified from pinned source, repair pending
+- Date: 2026-07-23
+- Observation: the benchmark ArcMind configuration uses decision stride one,
+  16 memory slots, and an attention window of eight prior decision snapshots.
+  The package presets use windows of 32 or more and are not affected.
+- Pinned environment contract:
+  - the source factory parses `tmaze_10` as `hallway_length=10`;
+  - the start observation at grid index zero exposes the goal cue;
+  - the junction is grid index `hallway_length + 1`, or 11; and
+  - the policy must therefore retain the start cue through 11 transitions.
+- Causal-memory consequence: ArcMind writes a snapshot after the current
+  decision and reads only strictly prior snapshots. At the junction, memory
+  contains the snapshots from decision times zero through ten. An
+  eight-snapshot window exposes only times three through ten, so the initial
+  cue at time zero is not an attention key or value. A window of at least 11
+  is required for direct exact recall.
+- Verified primary sources:
+  - factory at pinned POBAX commit
+    [`a5e1d62d14e4efe783885b9d4f19cffa2a568eec`](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/__init__.py),
+    downloaded-file SHA256
+    `eae213739f4ad7b7d8e1afd57de4bf334358055fa07ea0ea813080f44a345749`;
+    and
+  - [T-Maze transition and observation source](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/jax/tmaze.py),
+    downloaded-file SHA256
+    `6102e0c974cae6e7827ad03c2e8e066538e4b616ae6d2cffb2356a4bfa80a222`.
+- Supported conclusion: the pilot configuration cannot use its exact-memory
+  path to retrieve the task-defining start cue at the junction. Any successful
+  pilot policy must solve the task through the recurrent path, a bounded
+  shortcut, or their learned interaction.
+- Repair decision: set the benchmark attention window to 16, equal to the
+  existing memory capacity, then rerun a new three-seed ArcMind repair pilot.
+  This changes no package preset, preserves the 28,717-parameter target, and
+  is recorded before inspecting any repair outcome.
+- Evidence restriction: this diagnosis invalidates the pilot as a test of
+  exact recall. It does not invalidate the finite-execution result and does
+  not imply that the repaired model will improve.
+
 ### F-REG-000: No registered performance finding exists
 
 - Class: `registered evidence`
