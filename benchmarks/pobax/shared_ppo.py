@@ -15,6 +15,13 @@ from benchmarks.pobax.policy_core import augment_policy_input
 
 Array = jax.Array
 Params = Mapping[str, Array]
+REQUIRED_OPTIMIZER_METRICS = (
+    "loss",
+    "actor_loss",
+    "value_loss",
+    "entropy",
+    "approximate_kl",
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +40,8 @@ class PPOConfig:
     value_coefficient: float = 0.5
     entropy_coefficient: float = 0.01
     max_gradient_norm: float = 0.5
+    anneal_learning_rate: bool = False
+    step_budget_mode: str = "exact"
 
     @property
     def steps_per_update(self) -> int:
@@ -42,13 +51,127 @@ class PPOConfig:
     def num_updates(self) -> int:
         return self.total_steps // self.steps_per_update
 
+    @property
+    def realized_steps(self) -> int:
+        return self.num_updates * self.steps_per_update
+
     def validate(self) -> None:
+        if (
+            isinstance(self.total_steps, bool)
+            or not isinstance(self.total_steps, int)
+            or self.total_steps <= 0
+        ):
+            raise ValueError("total_steps must be a positive integer")
+        for name in ("num_envs", "rollout_steps", "update_epochs", "num_minibatches"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         if self.total_steps < self.steps_per_update:
             raise ValueError("total_steps must cover at least one rollout")
-        if self.total_steps % self.steps_per_update != 0:
+        if self.step_budget_mode not in {"exact", "floor"}:
+            raise ValueError("step_budget_mode must be 'exact' or 'floor'")
+        if self.step_budget_mode == "exact" and self.total_steps % self.steps_per_update != 0:
             raise ValueError("total_steps must be exactly divisible by num_envs * rollout_steps")
         if self.num_envs % self.num_minibatches != 0:
             raise ValueError("num_envs must be divisible by num_minibatches")
+        if (
+            isinstance(self.learning_rate, bool)
+            or not np.isfinite(self.learning_rate)
+            or self.learning_rate <= 0
+        ):
+            raise ValueError("learning_rate must be positive and finite")
+        if (
+            isinstance(self.gae_lambda, bool)
+            or not np.isfinite(self.gae_lambda)
+            or not 0.0 <= self.gae_lambda <= 1.0
+        ):
+            raise ValueError("gae_lambda must be finite and in [0, 1]")
+        if (
+            isinstance(self.entropy_coefficient, bool)
+            or not np.isfinite(self.entropy_coefficient)
+            or self.entropy_coefficient < 0
+        ):
+            raise ValueError("entropy_coefficient must be non-negative and finite")
+        if not isinstance(self.anneal_learning_rate, bool):
+            raise ValueError("anneal_learning_rate must be a boolean")
+
+
+def pobax_linear_learning_rate(
+    *,
+    learning_rate: float,
+    optimizer_step: Array | int,
+    num_minibatches: int,
+    update_epochs: int,
+    num_updates: int,
+) -> Array:
+    """Return the pinned POBAX linear learning rate for one optimizer step.
+
+    The source implementation holds the learning rate constant within each
+    PPO update. Its update index is the floor of the optimizer step divided by
+    the number of gradient steps in one PPO update. Values at and beyond the
+    planned optimizer boundary are clamped to zero.
+    """
+
+    if learning_rate <= 0 or not np.isfinite(learning_rate):
+        raise ValueError("learning_rate must be positive and finite")
+    for name, value in (
+        ("num_minibatches", num_minibatches),
+        ("update_epochs", update_epochs),
+        ("num_updates", num_updates),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    gradient_steps_per_update = num_minibatches * update_epochs
+    step = jnp.asarray(optimizer_step)
+    update_index = jnp.floor_divide(step, gradient_steps_per_update)
+    bounded_update_index = jnp.clip(update_index, 0, num_updates)
+    return jnp.asarray(learning_rate) * (
+        1.0 - bounded_update_index.astype(jnp.float32) / float(num_updates)
+    )
+
+
+def pobax_linear_schedule(config: PPOConfig) -> Callable[[Array], Array]:
+    """Build the pinned POBAX optimizer schedule for a validated config."""
+
+    config.validate()
+
+    def schedule(optimizer_step: Array) -> Array:
+        return pobax_linear_learning_rate(
+            learning_rate=config.learning_rate,
+            optimizer_step=optimizer_step,
+            num_minibatches=config.num_minibatches,
+            update_epochs=config.update_epochs,
+            num_updates=config.num_updates,
+        )
+
+    return schedule
+
+
+def require_finite_training_metrics(
+    metrics: Mapping[str, float],
+    *,
+    update_index: int,
+    environment_steps: int,
+) -> None:
+    """Fail at the first PPO update with invalid optimizer or return metrics."""
+
+    invalid = [
+        name
+        for name in REQUIRED_OPTIMIZER_METRICS
+        if name not in metrics or not np.isfinite(metrics[name])
+    ]
+    completed_episodes = metrics.get("completed_episodes", 0.0)
+    mean_recent_return = metrics.get("mean_recent_return", float("nan"))
+    if not np.isfinite(completed_episodes) or completed_episodes < 0:
+        invalid.append("completed_episodes")
+    elif completed_episodes > 0 and not np.isfinite(mean_recent_return):
+        invalid.append("mean_recent_return")
+    if invalid:
+        raise FloatingPointError(
+            "non-finite PPO metrics at "
+            f"update={update_index}, environment_steps={environment_steps}: "
+            f"{sorted(invalid)}"
+        )
 
 
 class RunnerState(NamedTuple):
@@ -141,9 +264,13 @@ class SharedPPO:
         self.action_dim = action_dim
         self.continuous_action = continuous_action
         self.config = config
+        learning_rate: float | Callable[[Array], Array]
+        learning_rate = (
+            pobax_linear_schedule(config) if config.anneal_learning_rate else config.learning_rate
+        )
         self.optimizer = optax.chain(
             optax.clip_by_global_norm(config.max_gradient_norm),
-            optax.adam(config.learning_rate, eps=1e-5),
+            optax.adam(learning_rate, eps=1e-5),
         )
         self._collect_jit = jax.jit(self._collect)
         self._advantages_jit = jax.jit(self._advantages)
@@ -547,6 +674,11 @@ class SharedPPO:
                 "recent_window_episodes": float(len(recent_returns)),
                 "environment_steps": float((update_index + 1) * self.config.steps_per_update),
             }
+            require_finite_training_metrics(
+                final_metrics,
+                update_index=update_index + 1,
+                environment_steps=(update_index + 1) * self.config.steps_per_update,
+            )
             history.append(final_metrics)
             if progress is not None:
                 progress(update_index + 1, final_metrics)

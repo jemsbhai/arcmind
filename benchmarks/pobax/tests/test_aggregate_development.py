@@ -44,11 +44,26 @@ PROVENANCE = {
         "devices": [{"platform": "gpu", "device_kind": "Test GPU"}],
     },
 }
+OPTIMIZER_METRICS = {
+    "loss": 0.5,
+    "actor_loss": 0.1,
+    "value_loss": 0.8,
+    "entropy": 0.2,
+    "approximate_kl": 0.01,
+}
 
 
-def _configuration(environment: str, model: str, seed: int, *, tier: str) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
+def _configuration(
+    environment: str,
+    model: str,
+    seed: int,
+    *,
+    tier: str,
+    schema_version: int = 1,
+    comparison_profile: str | None = None,
+) -> dict[str, Any]:
+    configuration = {
+        "schema_version": schema_version,
         "evidence_tier": tier,
         "environment": environment,
         "model": model,
@@ -73,6 +88,24 @@ def _configuration(environment: str, model: str, seed: int, *, tier: str) -> dic
         "navix_commit": PROVENANCE["navix_commit"],
         "runtime_contract": deepcopy(PROVENANCE["runtime_contract"]),
     }
+    if schema_version == 2:
+        configuration["ppo"].update(
+            num_minibatches=1,
+            gae_lambda=0.95,
+            entropy_coefficient=0.01,
+            anneal_learning_rate=True,
+            step_budget_mode=(
+                "floor" if comparison_profile == "pobax_author_semantics" else "exact"
+            ),
+        )
+        requested_steps = ENVIRONMENTS[environment]
+        realized_steps = requested_steps // 4 * 4
+        configuration.update(
+            comparison_profile=comparison_profile,
+            requested_environment_steps=requested_steps,
+            realized_environment_steps=realized_steps,
+        )
+    return configuration
 
 
 def _evaluation(value: float) -> dict[str, Any]:
@@ -96,12 +129,14 @@ def _write_matrix(
     models: list[str] | None = None,
     environments: dict[str, int] | None = None,
     seeds: list[int] | None = None,
+    schema_version: int = 1,
+    comparison_profile: str | None = None,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], Path]]:
     selected_models = models or MODELS
     selected_environments = environments or ENVIRONMENTS
     selected_seeds = seeds or SEEDS
     registration = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "status": "frozen",
         "evidence_tier": tier,
         "matrix_kind": "primary_comparison",
@@ -121,6 +156,14 @@ def _write_matrix(
         "require_gpu": True,
         "quick": False,
     }
+    if schema_version == 2:
+        registration["comparison_profile"] = comparison_profile
+        registration["learner"].update(
+            num_minibatches=1,
+            gae_lambda=0.95,
+            entropy_coefficient=0.01,
+            anneal_learning_rate=True,
+        )
     atomic_write_json(root / "registration.json", registration)
     cells = []
     paths: dict[tuple[str, str, int], Path] = {}
@@ -128,7 +171,14 @@ def _write_matrix(
         for model in selected_models:
             for seed in selected_seeds:
                 identity = (environment, model, seed)
-                configuration = _configuration(environment, model, seed, tier=tier)
+                configuration = _configuration(
+                    environment,
+                    model,
+                    seed,
+                    tier=tier,
+                    schema_version=schema_version,
+                    comparison_profile=comparison_profile,
+                )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 relative = f"cells/{environment}-{model}-{seed}.json"
                 cells.append(
@@ -145,7 +195,7 @@ def _write_matrix(
                 )
                 paths[identity] = root / relative
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "status": "frozen",
         "matrix_kind": "primary_comparison",
         "models": selected_models,
@@ -158,11 +208,18 @@ def _write_matrix(
     atomic_write_json(root / "frozen_manifest.json", manifest)
     for identity, path in paths.items():
         environment, model, seed = identity
-        configuration = _configuration(environment, model, seed, tier=tier)
+        configuration = _configuration(
+            environment,
+            model,
+            seed,
+            tier=tier,
+            schema_version=schema_version,
+            comparison_profile=comparison_profile,
+        )
         configuration_sha256 = canonical_json_sha256(configuration)
         value = float(seed + (10 if model == "arcmind" else 0))
         artifact = {
-            "schema_version": 4,
+            "schema_version": 5 if schema_version == 2 else 4,
             "status": f"development_{tier}_not_for_paper",
             "matrix_manifest_sha256": manifest["manifest_sha256"],
             "cell_id": registered_cell_id(environment, model, seed, configuration_sha256),
@@ -185,17 +242,26 @@ def _write_matrix(
             "actual_evaluation_steps_per_environment": 10,
             "actual_evaluation_transitions": 20,
             "evaluation": _evaluation(value),
+            "training": {**OPTIMIZER_METRICS, "mean_recent_return": value},
             "training_history": [
                 {
+                    **OPTIMIZER_METRICS,
                     "environment_steps": selected_environments[environment] / 2,
                     "mean_recent_return": None,
                 },
                 {
+                    **OPTIMIZER_METRICS,
                     "environment_steps": float(selected_environments[environment]),
                     "mean_recent_return": value,
                 },
             ],
         }
+        if schema_version == 2:
+            artifact.update(
+                comparison_profile=comparison_profile,
+                requested_environment_steps=selected_environments[environment],
+                realized_environment_steps=selected_environments[environment] // 4 * 4,
+            )
         atomic_write_json(path, artifact)
     return manifest, paths
 
@@ -487,6 +553,31 @@ def test_parameter_matching_and_environment_semantics_fail_closed(tmp_path: Path
             build_development_aggregate(root)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["training_history"][0].update(loss=None),
+            r"training_history\[0\]\.loss must be a finite number",
+        ),
+        (
+            lambda value: value["training"].update(approximate_kl=None),
+            r"training\.approximate_kl must be a finite number",
+        ),
+    ],
+)
+def test_nonfinite_optimizer_metrics_fail_closed(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    _, paths = _write_matrix(tmp_path)
+    _rewrite(paths[("short", "gru", 7)], mutation)
+
+    with pytest.raises(DevelopmentAggregationError, match=message):
+        build_development_aggregate(tmp_path)
+
+
 def test_optional_completion_and_checksum_indexes_are_validated(tmp_path: Path) -> None:
     manifest, paths = _write_matrix(tmp_path)
     _write_integrity_indexes(tmp_path, manifest, paths)
@@ -502,3 +593,26 @@ def test_optional_completion_and_checksum_indexes_are_validated(tmp_path: Path) 
     artifact_path.write_bytes(artifact_path.read_bytes() + b" ")
     with pytest.raises(DevelopmentAggregationError, match="artifact_sha256"):
         build_development_aggregate(tmp_path)
+
+
+def test_schema_v2_development_matrix_validates_explicit_step_accounting(
+    tmp_path: Path,
+) -> None:
+    matrix_root = tmp_path / "matrix-v2"
+    _write_matrix(
+        matrix_root,
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+
+    result = build_development_aggregate(matrix_root)
+
+    assert result["status"] == "development_pilot_aggregate_not_for_paper"
+
+    artifact = next((matrix_root / "cells").glob("*.json"))
+    _rewrite(
+        artifact,
+        lambda value: value.update(realized_environment_steps=4),
+    )
+    with pytest.raises(DevelopmentAggregationError, match="step accounting"):
+        build_development_aggregate(matrix_root)

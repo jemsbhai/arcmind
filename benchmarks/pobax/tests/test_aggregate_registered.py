@@ -65,12 +65,26 @@ EVALUATION_EPISODES = {
     "Walker-F-v0": 2,
 }
 EVALUATION_HORIZON = 1_000
+OPTIMIZER_METRICS = {
+    "loss": 0.5,
+    "actor_loss": 0.1,
+    "value_loss": 0.8,
+    "entropy": 0.2,
+    "approximate_kl": 0.01,
+}
 
 
-def _configuration(environment: str, model: str, seed: int) -> dict[str, Any]:
+def _configuration(
+    environment: str,
+    model: str,
+    seed: int,
+    *,
+    schema_version: int = 1,
+    comparison_profile: str | None = None,
+) -> dict[str, Any]:
     total_steps = TRAIN_STEPS[environment]
-    return {
-        "schema_version": 1,
+    configuration = {
+        "schema_version": schema_version,
         "evidence_tier": "registered_final",
         "environment": environment,
         "model": model,
@@ -89,6 +103,26 @@ def _configuration(environment: str, model: str, seed: int) -> dict[str, Any]:
         "navix_commit": PROVENANCE["navix_commit"],
         "runtime_contract": deepcopy(PROVENANCE["runtime_contract"]),
     }
+    if schema_version == 2:
+        configuration["ppo"].update(
+            rollout_steps=2,
+            update_epochs=1,
+            num_minibatches=1,
+            learning_rate=0.001,
+            gae_lambda=0.95,
+            entropy_coefficient=0.01,
+            anneal_learning_rate=True,
+            step_budget_mode=(
+                "floor" if comparison_profile == "pobax_author_semantics" else "exact"
+            ),
+        )
+        realized_steps = total_steps // 4 * 4
+        configuration.update(
+            comparison_profile=comparison_profile,
+            requested_environment_steps=total_steps,
+            realized_environment_steps=realized_steps,
+        )
+    return configuration
 
 
 def _evaluation(value: float, *, episodes_per_environment: int = 2) -> dict[str, Any]:
@@ -118,6 +152,8 @@ def _write_matrix(
     environments: list[str] | None = None,
     seeds: list[int] | None = None,
     matrix_kind: str = "primary_comparison",
+    schema_version: int = 1,
+    comparison_profile: str | None = None,
 ) -> tuple[Path, dict[str, Any], dict[tuple[str, str, int], Path]]:
     selected_models = models or MODELS
     selected_environments = environments or ENVIRONMENTS
@@ -127,7 +163,13 @@ def _write_matrix(
     for environment in selected_environments:
         for model in selected_models:
             for seed in selected_seeds:
-                configuration = _configuration(environment, model, seed)
+                configuration = _configuration(
+                    environment,
+                    model,
+                    seed,
+                    schema_version=schema_version,
+                    comparison_profile=comparison_profile,
+                )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 identity = (environment, model, seed)
                 relative = f"cells/{environment}-{model}-{seed}.json"
@@ -148,7 +190,7 @@ def _write_matrix(
                 )
                 paths[identity] = tmp_path / relative
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "status": "frozen",
         "matrix_kind": matrix_kind,
         "models": selected_models,
@@ -174,13 +216,22 @@ def _write_matrix(
     }
     for identity, path in paths.items():
         environment, model, seed = identity
-        configuration = _configuration(environment, model, seed)
-        total_steps = configuration["ppo"]["total_steps"]
+        configuration = _configuration(
+            environment,
+            model,
+            seed,
+            schema_version=schema_version,
+            comparison_profile=comparison_profile,
+        )
+        total_steps = configuration.get(
+            "realized_environment_steps",
+            configuration["ppo"]["total_steps"],
+        )
         evaluation_episodes = configuration["evaluation_episodes_per_environment"]
         evaluation_steps = evaluation_episodes * configuration["evaluation_max_episode_steps"]
         value = values.get(identity, float(seed))
         artifact = {
-            "schema_version": 4,
+            "schema_version": 5 if schema_version == 2 else 4,
             "status": "registered_final_complete",
             "matrix_manifest_sha256": manifest_sha256,
             "cell_id": registered_cell_id(
@@ -211,14 +262,26 @@ def _write_matrix(
                 value,
                 episodes_per_environment=evaluation_episodes,
             ),
+            "training": {**OPTIMIZER_METRICS, "mean_recent_return": value},
             "training_history": [
                 {
+                    **OPTIMIZER_METRICS,
                     "environment_steps": float(total_steps // 2),
                     "mean_recent_return": value - 1.0,
                 },
-                {"environment_steps": float(total_steps), "mean_recent_return": value},
+                {
+                    **OPTIMIZER_METRICS,
+                    "environment_steps": float(total_steps),
+                    "mean_recent_return": value,
+                },
             ],
         }
+        if schema_version == 2:
+            artifact.update(
+                comparison_profile=comparison_profile,
+                requested_environment_steps=configuration["requested_environment_steps"],
+                realized_environment_steps=configuration["realized_environment_steps"],
+            )
         atomic_write_json(path, artifact)
     return manifest_path, manifest, paths
 
@@ -262,6 +325,28 @@ def test_complete_matrix_aggregates_raw_seeds_pairs_curves_and_canonical_json(
     assert result["statistical_unit"] == "seed"
     assert output.read_bytes().endswith(b"\n")
     assert json.loads(output.read_text(encoding="utf-8")) == result
+
+
+def test_schema_v2_registered_matrix_validates_explicit_step_accounting(
+    tmp_path: Path,
+) -> None:
+    manifest_path, _, paths = _write_matrix(
+        tmp_path,
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+
+    result = build_registered_aggregate(manifest_path)
+
+    assert result["status"] == "registered_matrix_aggregate"
+
+    artifact_path = paths[("tmaze_10", "arcmind", SEEDS[0])]
+    _rewrite_json(
+        artifact_path,
+        lambda value: value.update(realized_environment_steps=4),
+    )
+    with pytest.raises(RegisteredAggregationError, match="step accounting"):
+        build_registered_aggregate(manifest_path)
 
     arcmind = next(
         group
@@ -364,6 +449,53 @@ def test_primary_matrix_rejects_upper_reference_aliases(
     )
 
     with pytest.raises(RegisteredAggregationError, match="upper-reference aliases"):
+        build_registered_aggregate(manifest_path)
+
+
+def test_schema_v2_frozen_configuration_requires_every_learner_field() -> None:
+    configuration = _configuration(
+        "tmaze_10",
+        "arcmind",
+        SEEDS[0],
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+    del configuration["ppo"]["gae_lambda"]
+
+    with pytest.raises(
+        RegisteredAggregationError,
+        match="missing registered learner fields",
+    ):
+        _validate_frozen_configuration(
+            configuration,
+            identity=("tmaze_10", "arcmind", SEEDS[0]),
+            provenance=PROVENANCE,
+            field="configuration",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["training_history"][0].update(value_loss=None),
+            r"training_history\[0\]\.value_loss must be a finite number",
+        ),
+        (
+            lambda value: value["training"].update(entropy=None),
+            r"training\.entropy must be a finite number",
+        ),
+    ],
+)
+def test_nonfinite_optimizer_metrics_fail_closed(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    manifest_path, _, paths = _write_matrix(tmp_path)
+    _rewrite_json(paths[("tmaze_10", "arcmind", SEEDS[0])], mutation)
+
+    with pytest.raises(RegisteredAggregationError, match=message):
         build_registered_aggregate(manifest_path)
 
 

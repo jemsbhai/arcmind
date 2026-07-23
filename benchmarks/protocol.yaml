@@ -1,4 +1,4 @@
-protocol_version: 5
+protocol_version: 6
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -120,12 +120,45 @@ stages:
     target_final_seed_count: 30
     minimum_seed_count_for_preliminary_tables: 10
     policy_selection: final_policy_after_fixed_interaction_budget
+    registration_schema: 2
+    comparison_profiles:
+      pobax_author_semantics:
+        purpose: mirror_pinned_author_ppo_settings_and_step_semantics_in_shared_runner
+        exact_author_code_reproduction: false
+        interaction_budget_rule: floor_to_complete_vector_rollouts
+        learning_rate_schedule: >-
+          lr * (1 - floor(opt_step / (num_minibatches * update_epochs)) /
+          num_updates)
+      arcmind_shared_comparison:
+        purpose: compare_all_policy_cores_under_one_shared_ppo_contract
+        interaction_budget_rule: require_exact_vector_rollout_divisibility
+    required_learner_fields:
+      - num_envs
+      - rollout_steps
+      - update_epochs
+      - num_minibatches
+      - learning_rate
+      - gae_lambda
+      - entropy_coefficient
+      - anneal_learning_rate
     development_tuning_seeds: [1103, 2207, 3301]
     registered_tuning_seed_rule: match_published_task_count
     artifact_requirements:
       aggregate_output_location: outside_immutable_raw_matrix
       freeze_environment_source_and_reference: true
       freeze_parameter_counts_and_ratio: true
+      record_requested_environment_steps: true
+      record_realized_environment_steps: true
+      finite_optimizer_metrics:
+        required:
+          - loss
+          - actor_loss
+          - value_loss
+          - entropy
+          - approximate_kl
+        validate_every_update: true
+        validate_final_training_metrics: true
+        fail_training_before_evaluation: true
       parameter_ratio_bounds: [0.9, 1.1]
       upper_reference_link:
         required: true

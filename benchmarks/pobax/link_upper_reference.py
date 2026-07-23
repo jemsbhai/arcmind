@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -22,6 +21,12 @@ from benchmarks.pobax.registered_artifacts import (
     canonical_json_sha256,
     registered_cell_id,
     sha256_file,
+)
+from benchmarks.pobax.registration_protocol import (
+    normalize_learner,
+    realized_environment_steps,
+    registration_fields,
+    validate_comparison_profile,
 )
 from benchmarks.pobax.upper_reference_registry import UPPER_TO_PRIMARY_ENVIRONMENT
 
@@ -42,19 +47,6 @@ REGISTERED_TRAIN_STEPS = {
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CHECKSUM_LINE_PATTERN = re.compile(r"([0-9a-f]{64})  (.+)")
-_REGISTRATION_KEYS = {
-    "schema_version",
-    "status",
-    "evidence_tier",
-    "matrix_kind",
-    "models",
-    "environments",
-    "seeds",
-    "learner",
-    "evaluation_episodes_per_env",
-    "require_gpu",
-    "quick",
-}
 _MANIFEST_KEYS = {
     "schema_version",
     "status",
@@ -178,9 +170,18 @@ def _safe_relative_path(root: Path, value: Any, *, field: str) -> tuple[str, Pat
 def _validate_registration(root: Path) -> tuple[dict[str, Any], str]:
     path = root / "registration.json"
     raw = _mapping(_load_json(path, field="registration"), field="registration")
-    _exact_keys(raw, _REGISTRATION_KEYS, field="registration")
-    if raw["schema_version"] != 1 or raw["status"] != "frozen":
-        raise UpperReferenceLinkError("registration must be frozen schema version 1")
+    schema_version = raw.get("schema_version")
+    try:
+        expected_fields = registration_fields(schema_version)
+    except ValueError as error:
+        raise UpperReferenceLinkError(str(error)) from error
+    _exact_keys(raw, expected_fields, field="registration")
+    if raw["status"] != "frozen":
+        raise UpperReferenceLinkError("registration must be frozen")
+    try:
+        comparison_profile = validate_comparison_profile(raw)
+    except ValueError as error:
+        raise UpperReferenceLinkError(str(error)) from error
     tier = raw["evidence_tier"]
     if tier not in {"smoke", "pilot", "registered_final"}:
         raise UpperReferenceLinkError(f"registration has unsupported evidence tier: {tier!r}")
@@ -239,26 +240,20 @@ def _validate_registration(root: Path) -> tuple[dict[str, Any], str]:
         raise UpperReferenceLinkError("registration.seeds must be unique non-negative integers")
     if tier == "registered_final" and len(seeds) != 30:
         raise UpperReferenceLinkError("registered_final requires exactly 30 paired seeds")
-    learner = _mapping(raw["learner"], field="registration.learner")
-    _exact_keys(
-        learner,
-        {"num_envs", "rollout_steps", "update_epochs", "learning_rate"},
-        field="registration.learner",
-    )
-    for key in ("num_envs", "rollout_steps", "update_epochs"):
-        value = learner[key]
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise UpperReferenceLinkError(f"registration.learner.{key} must be a positive integer")
-    learning_rate = learner["learning_rate"]
-    if (
-        isinstance(learning_rate, bool)
-        or not isinstance(learning_rate, (int, float))
-        or not math.isfinite(float(learning_rate))
-        or learning_rate <= 0
-    ):
-        raise UpperReferenceLinkError(
-            "registration.learner.learning_rate must be positive and finite"
+    try:
+        learner = normalize_learner(
+            raw["learner"],
+            schema_version=schema_version,
         )
+        for environment in environments:
+            realized_environment_steps(
+                environment["total_steps"],
+                num_envs=int(learner["num_envs"]),
+                rollout_steps=int(learner["rollout_steps"]),
+                comparison_profile=comparison_profile,
+            )
+    except ValueError as error:
+        raise UpperReferenceLinkError(str(error)) from error
     evaluation_episodes = raw["evaluation_episodes_per_env"]
     if (
         isinstance(evaluation_episodes, bool)
@@ -293,8 +288,8 @@ def _validate_manifest(
         field="frozen_manifest",
     )
     _exact_keys(raw, _MANIFEST_KEYS, field="frozen_manifest")
-    if raw["schema_version"] != 1 or raw["status"] != "frozen":
-        raise UpperReferenceLinkError("frozen_manifest must be frozen schema version 1")
+    if raw["schema_version"] != registration["schema_version"] or raw["status"] != "frozen":
+        raise UpperReferenceLinkError("frozen_manifest schema must match its frozen registration")
     manifest_sha256 = _sha256(
         raw["manifest_sha256"],
         field="frozen_manifest.manifest_sha256",
@@ -609,6 +604,14 @@ def build_upper_reference_link(
     tier = primary_registration["evidence_tier"]
     if upper_registration["evidence_tier"] != tier:
         raise UpperReferenceLinkError("paired matrices have different evidence tiers")
+    if primary_registration["schema_version"] != upper_registration[
+        "schema_version"
+    ] or primary_registration.get("comparison_profile") != upper_registration.get(
+        "comparison_profile"
+    ):
+        raise UpperReferenceLinkError(
+            "paired matrices have different registration schemas or comparison profiles"
+        )
     if primary_registration["seeds"] != upper_registration["seeds"]:
         raise UpperReferenceLinkError("paired matrices must use the same ordered seed list")
     if primary_registration["learner"] != upper_registration["learner"]:

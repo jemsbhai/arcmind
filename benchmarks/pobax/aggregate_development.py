@@ -24,6 +24,13 @@ from benchmarks.pobax.registered_artifacts import (
     registered_cell_id,
     sha256_file,
 )
+from benchmarks.pobax.registration_protocol import (
+    normalize_learner,
+    realized_environment_steps,
+    registration_fields,
+    step_budget_mode,
+    validate_comparison_profile,
+)
 from benchmarks.pobax.upper_reference_registry import (
     UPPER_REFERENCE_ENVIRONMENTS,
     expected_environment_reference,
@@ -36,19 +43,6 @@ CONFIDENCE_LEVEL = 0.95
 _TIERS = {
     "smoke": "development_smoke_not_for_paper",
     "pilot": "development_pilot_not_for_paper",
-}
-_REGISTRATION_KEYS = {
-    "schema_version",
-    "status",
-    "evidence_tier",
-    "matrix_kind",
-    "models",
-    "environments",
-    "seeds",
-    "learner",
-    "evaluation_episodes_per_env",
-    "require_gpu",
-    "quick",
 }
 _MANIFEST_KEYS = {
     "schema_version",
@@ -85,6 +79,13 @@ _PARAMETER_MATCH_KEYS = {
     "arcmind_target_parameter_count",
     "parameter_ratio",
 }
+_OPTIMIZER_METRICS = (
+    "loss",
+    "actor_loss",
+    "value_loss",
+    "entropy",
+    "approximate_kl",
+)
 
 
 class DevelopmentAggregationError(ValueError):
@@ -298,9 +299,18 @@ def _validate_provenance(value: Any, *, field: str) -> dict[str, Any]:
 
 def _validate_registration(value: Any) -> dict[str, Any]:
     registration = _mapping(value, field="registration")
-    _exact_keys(registration, _REGISTRATION_KEYS, field="registration")
-    if registration["schema_version"] != 1 or registration["status"] != "frozen":
-        raise DevelopmentAggregationError("registration must be frozen schema version 1")
+    schema_version = registration.get("schema_version")
+    try:
+        expected_fields = registration_fields(schema_version)
+    except ValueError as error:
+        raise DevelopmentAggregationError(str(error)) from error
+    _exact_keys(registration, expected_fields, field="registration")
+    if registration["status"] != "frozen":
+        raise DevelopmentAggregationError("registration must be frozen")
+    try:
+        comparison_profile = validate_comparison_profile(registration)
+    except ValueError as error:
+        raise DevelopmentAggregationError(str(error)) from error
     tier = _string(registration["evidence_tier"], field="registration.evidence_tier")
     if tier not in _TIERS:
         raise DevelopmentAggregationError("registration.evidence_tier must be 'smoke' or 'pilot'")
@@ -347,20 +357,20 @@ def _validate_registration(value: Any) -> dict[str, Any]:
             "primary_comparison registration contains upper-reference aliases: "
             f"{sorted(selected_upper_references)}"
         )
-    learner = _mapping(registration["learner"], field="registration.learner")
-    _exact_keys(
-        learner,
-        {"num_envs", "rollout_steps", "update_epochs", "learning_rate"},
-        field="registration.learner",
-    )
-    normalized_learner = {
-        name: _integer(learner[name], field=f"registration.learner.{name}", positive=True)
-        for name in ("num_envs", "rollout_steps", "update_epochs")
-    }
-    learning_rate = _number(learner["learning_rate"], field="registration.learner.learning_rate")
-    if learning_rate <= 0:
-        raise DevelopmentAggregationError("registration.learner.learning_rate must be positive")
-    normalized_learner["learning_rate"] = learning_rate
+    try:
+        normalized_learner = normalize_learner(
+            registration["learner"],
+            schema_version=schema_version,
+        )
+        for environment in environments:
+            realized_environment_steps(
+                environment["total_steps"],
+                num_envs=int(normalized_learner["num_envs"]),
+                rollout_steps=int(normalized_learner["rollout_steps"]),
+                comparison_profile=comparison_profile,
+            )
+    except ValueError as error:
+        raise DevelopmentAggregationError(str(error)) from error
     evaluation_episodes = _integer(
         registration["evaluation_episodes_per_env"],
         field="registration.evaluation_episodes_per_env",
@@ -385,6 +395,8 @@ def _validate_registration(value: Any) -> dict[str, Any]:
                     f"quick registration learner.{name} must equal {expected}"
                 )
     return {
+        "schema_version": schema_version,
+        "comparison_profile": comparison_profile,
         "tier": tier,
         "matrix_kind": matrix_kind,
         "models": models,
@@ -419,8 +431,13 @@ def _validate_manifest(
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], dict[str, Any]]]:
     manifest = _mapping(value, field="manifest")
     _exact_keys(manifest, _MANIFEST_KEYS, field="manifest")
-    if manifest["schema_version"] != 1 or manifest["status"] != "frozen":
-        raise DevelopmentAggregationError("manifest must be frozen schema version 1")
+    if (
+        manifest["schema_version"] != registration["schema_version"]
+        or manifest["status"] != "frozen"
+    ):
+        raise DevelopmentAggregationError(
+            "manifest schema version must match its frozen registration"
+        )
     manifest_sha256 = _sha256(manifest["manifest_sha256"], field="manifest.manifest_sha256")
     hash_input = dict(manifest)
     del hash_input["manifest_sha256"]
@@ -517,8 +534,20 @@ def _validate_configuration(
     missing = sorted(required - set(configuration))
     if missing:
         raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
-    if configuration["schema_version"] != 1:
-        raise DevelopmentAggregationError(f"{field}.schema_version must equal 1")
+    if configuration["schema_version"] != registration["schema_version"]:
+        raise DevelopmentAggregationError(f"{field}.schema_version must match the registration")
+    if registration["schema_version"] == 2:
+        for name in (
+            "comparison_profile",
+            "requested_environment_steps",
+            "realized_environment_steps",
+        ):
+            if name not in configuration:
+                raise DevelopmentAggregationError(f"{field} is missing {name}")
+        if configuration["comparison_profile"] != registration["comparison_profile"]:
+            raise DevelopmentAggregationError(
+                f"{field}.comparison_profile drifts from registration"
+            )
     if configuration["evidence_tier"] != registration["tier"]:
         raise DevelopmentAggregationError(f"{field}.evidence_tier drifts from registration")
     configured_identity = (
@@ -562,19 +591,57 @@ def _validate_configuration(
     total_steps = _integer(ppo.get("total_steps"), field=f"{field}.ppo.total_steps", positive=True)
     if total_steps != registration["budgets"][identity[0]]:
         raise DevelopmentAggregationError(f"{field}.ppo.total_steps drifts from registration")
-    for configured_name, registered_name in {
-        "num_envs": "num_envs",
-        "rollout_steps": "rollout_steps",
-        "update_epochs": "update_epochs",
-        "learning_rate": "learning_rate",
-    }.items():
+    learner_fields = (
+        "num_envs",
+        "rollout_steps",
+        "update_epochs",
+        "learning_rate",
+    )
+    if registration["schema_version"] == 2:
+        learner_fields += (
+            "num_minibatches",
+            "gae_lambda",
+            "entropy_coefficient",
+            "anneal_learning_rate",
+        )
+    for configured_name in learner_fields:
         if configured_name not in ppo:
             raise DevelopmentAggregationError(f"{field}.ppo is missing {configured_name}")
-        configured = _number(ppo[configured_name], field=f"{field}.ppo.{configured_name}")
-        expected = registration["learner"][registered_name]
+        configured = ppo[configured_name]
+        expected = registration["learner"][configured_name]
         if configured != expected:
             raise DevelopmentAggregationError(
                 f"{field}.ppo.{configured_name} drifts from registration"
+            )
+    try:
+        expected_realized_steps = realized_environment_steps(
+            total_steps,
+            num_envs=int(registration["learner"]["num_envs"]),
+            rollout_steps=int(registration["learner"]["rollout_steps"]),
+            comparison_profile=registration["comparison_profile"],
+        )
+    except ValueError as error:  # pragma: no cover - registration validates first
+        raise DevelopmentAggregationError(str(error)) from error
+    if registration["schema_version"] == 2 and ppo.get("step_budget_mode") != step_budget_mode(
+        registration["comparison_profile"]
+    ):
+        raise DevelopmentAggregationError(
+            f"{field}.ppo.step_budget_mode drifts from comparison_profile"
+        )
+    if registration["schema_version"] == 2:
+        requested_steps = _integer(
+            configuration["requested_environment_steps"],
+            field=f"{field}.requested_environment_steps",
+            positive=True,
+        )
+        realized_steps = _integer(
+            configuration["realized_environment_steps"],
+            field=f"{field}.realized_environment_steps",
+            positive=True,
+        )
+        if requested_steps != total_steps or realized_steps != expected_realized_steps:
+            raise DevelopmentAggregationError(
+                f"{field} requested and realized step counts are inconsistent"
             )
     evaluation_episodes = _integer(
         configuration["evaluation_episodes_per_environment"],
@@ -613,7 +680,7 @@ def _validate_configuration(
         raise DevelopmentAggregationError(f"{field} provenance drifts from manifest")
     return (
         configuration,
-        total_steps,
+        expected_realized_steps,
         evaluation_episodes,
         evaluation_horizon,
         {
@@ -745,6 +812,13 @@ def _validate_history(
             raise DevelopmentAggregationError(
                 f"{point_field} must contain environment_steps and mean_recent_return"
             )
+        missing_optimizer_metrics = sorted(set(_OPTIMIZER_METRICS) - set(point))
+        if missing_optimizer_metrics:
+            raise DevelopmentAggregationError(
+                f"{point_field} is missing optimizer metrics: {missing_optimizer_metrics}"
+            )
+        for metric in _OPTIMIZER_METRICS:
+            _number(point[metric], field=f"{point_field}.{metric}")
         step = _number(point["environment_steps"], field=f"{point_field}.environment_steps")
         if not step.is_integer() or step <= 0:
             raise DevelopmentAggregationError(
@@ -769,6 +843,17 @@ def _validate_history(
             f"{field}.training_history final step does not match frozen total_steps"
         )
     return tuple(steps)
+
+
+def _validate_final_training_metrics(artifact: Mapping[str, Any], *, field: str) -> None:
+    training = _mapping(artifact.get("training"), field=f"{field}.training")
+    missing = sorted(set(_OPTIMIZER_METRICS) - set(training))
+    if missing:
+        raise DevelopmentAggregationError(
+            f"{field}.training is missing optimizer metrics: {missing}"
+        )
+    for metric in _OPTIMIZER_METRICS:
+        _number(training[metric], field=f"{field}.training.{metric}")
 
 
 def _validate_artifact(
@@ -804,13 +889,17 @@ def _validate_artifact(
         "actual_evaluation_steps_per_environment",
         "actual_evaluation_transitions",
         "evaluation",
+        "training",
         "training_history",
     }
     missing = sorted(required - set(artifact))
     if missing:
         raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
-    if artifact["schema_version"] != 4:
-        raise DevelopmentAggregationError(f"{field}.schema_version must equal current schema 4")
+    expected_artifact_schema = 5 if registration["schema_version"] == 2 else 4
+    if artifact["schema_version"] != expected_artifact_schema:
+        raise DevelopmentAggregationError(
+            f"{field}.schema_version must equal current schema {expected_artifact_schema}"
+        )
     if artifact["status"] != _TIERS[registration["tier"]]:
         raise DevelopmentAggregationError(
             f"{field}.status does not match development tier {registration['tier']!r}"
@@ -899,6 +988,33 @@ def _validate_artifact(
         raise DevelopmentAggregationError(
             f"{field}.actual_environment_steps does not match frozen total_steps"
         )
+    if registration["schema_version"] == 2:
+        for name in (
+            "comparison_profile",
+            "requested_environment_steps",
+            "realized_environment_steps",
+        ):
+            if name not in artifact:
+                raise DevelopmentAggregationError(f"{field} is missing {name}")
+        requested_steps = _integer(
+            artifact["requested_environment_steps"],
+            field=f"{field}.requested_environment_steps",
+            positive=True,
+        )
+        realized_steps = _integer(
+            artifact["realized_environment_steps"],
+            field=f"{field}.realized_environment_steps",
+            positive=True,
+        )
+        if (
+            artifact["comparison_profile"] != registration["comparison_profile"]
+            or requested_steps != registration["budgets"][environment]
+            or realized_steps != total_steps
+            or actual_steps != realized_steps
+        ):
+            raise DevelopmentAggregationError(
+                f"{field} comparison profile or step accounting is inconsistent"
+            )
     if _mapping(artifact["ppo"], field=f"{field}.ppo") != configuration["ppo"]:
         raise DevelopmentAggregationError(f"{field}.ppo drifts from frozen configuration")
     artifact_evaluation_episodes = _integer(
@@ -948,6 +1064,7 @@ def _validate_artifact(
     ):
         raise DevelopmentAggregationError(f"{field}.actual_evaluation_transitions is inconsistent")
     steps = _validate_history(artifact, field=field, expected_final_steps=total_steps)
+    _validate_final_training_metrics(artifact, field=field)
     return {
         "evaluation": evaluation,
         "steps": steps,

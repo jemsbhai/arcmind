@@ -171,6 +171,40 @@ The first predeclared multi-seed pilot uses
 250,000 exact environment transitions on the three development seeds. Its
 pilot status remains ineligible for paper performance claims.
 
+Registration schema v1 remains readable for existing development matrices.
+New experiment registrations use schema v2 and must name one of two comparison
+profiles:
+
+- `pobax_author_semantics` follows the pinned author's optimizer, update, and
+  step-budget semantics inside ArcMind's shared runner. If the requested
+  interaction budget is not divisible by one vector rollout, the number of
+  PPO updates is floored, as in the author code. This profile does not execute
+  the author's learner and must not be labeled an author-code reproduction.
+- `arcmind_shared_comparison` requires exact divisibility and gives every
+  policy core the same realized interaction count.
+
+Both profiles explicitly register `num_envs`, `rollout_steps`,
+`update_epochs`, `num_minibatches`, `learning_rate`, `gae_lambda`,
+`entropy_coefficient`, and `anneal_learning_rate`. The launcher rejects
+missing or additional learner fields. Schema v2 configurations and result
+artifacts store the requested and realized environment step counts separately.
+The source learning rate schedule is constant within a PPO update. For
+optimizer step `s`, it is
+`lr * (1 - floor(s / (num_minibatches * update_epochs)) / num_updates)`.
+The schedule reaches zero at the optimizer boundary and is clamped to zero
+after that boundary.
+
+An exact author-code reproduction requires a separate pinned author-code
+runner and separately labeled artifacts. Results from that lane cannot be
+silently combined with either shared-runner profile.
+
+Every PPO update must report finite loss, actor loss, value loss, entropy, and
+approximate KL metrics. Training stops immediately on the first invalid value
+and reports the update index and realized environment-step count. A recent
+return may be unavailable only until the first episode completes. Both
+development and registered aggregators enforce the same rule on every history
+point and on the final training metrics, including legacy v1 artifacts.
+
 The launcher first describes every cell, hashes the expanded manifest, and
 then starts each model in a fresh process. It requires clean Git provenance,
 skips only identity-, configuration-, and provenance-compatible completed

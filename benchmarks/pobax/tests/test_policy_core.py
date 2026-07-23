@@ -39,6 +39,8 @@ from benchmarks.pobax.shared_ppo import (
     categorical_log_probability,
     gaussian_entropy,
     gaussian_log_probability,
+    pobax_linear_learning_rate,
+    require_finite_training_metrics,
 )
 
 
@@ -840,6 +842,111 @@ def test_ppo_config_rejects_silently_truncated_interaction_budget() -> None:
     )
     with pytest.raises(ValueError, match="exactly divisible"):
         config.validate()
+
+
+def test_source_reproduction_can_record_a_floored_interaction_budget() -> None:
+    config = PPOConfig(
+        total_steps=9,
+        num_envs=2,
+        rollout_steps=2,
+        num_minibatches=1,
+        step_budget_mode="floor",
+    )
+
+    config.validate()
+
+    assert config.num_updates == 2
+    assert config.realized_steps == 8
+
+
+def test_pobax_linear_learning_rate_is_constant_within_each_ppo_update() -> None:
+    values = np.asarray(
+        [
+            pobax_linear_learning_rate(
+                learning_rate=0.01,
+                optimizer_step=step,
+                num_minibatches=2,
+                update_epochs=2,
+                num_updates=4,
+            )
+            for step in range(17)
+        ]
+    )
+
+    np.testing.assert_allclose(
+        values,
+        [
+            *([0.01] * 4),
+            *([0.0075] * 4),
+            *([0.005] * 4),
+            *([0.0025] * 4),
+            0.0,
+        ],
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
+def test_pobax_linear_learning_rate_clamps_out_of_range_optimizer_steps() -> None:
+    values = [
+        pobax_linear_learning_rate(
+            learning_rate=0.01,
+            optimizer_step=step,
+            num_minibatches=2,
+            update_epochs=2,
+            num_updates=4,
+        )
+        for step in (-1, 16, 100)
+    ]
+
+    np.testing.assert_allclose(values, [0.01, 0.0, 0.0], atol=1e-8)
+
+
+def test_nonfinite_training_metrics_fail_with_update_and_step_identity() -> None:
+    metrics = {
+        "loss": 1.0,
+        "actor_loss": float("nan"),
+        "value_loss": 0.5,
+        "entropy": 0.2,
+        "approximate_kl": 0.01,
+        "completed_episodes": 3.0,
+        "mean_recent_return": 1.0,
+    }
+
+    with pytest.raises(
+        FloatingPointError,
+        match=r"update=7, environment_steps=7000.*actor_loss",
+    ):
+        require_finite_training_metrics(
+            metrics,
+            update_index=7,
+            environment_steps=7_000,
+        )
+
+
+def test_recent_return_nan_is_allowed_only_before_an_episode_completes() -> None:
+    metrics = {
+        "loss": 1.0,
+        "actor_loss": 0.1,
+        "value_loss": 0.5,
+        "entropy": 0.2,
+        "approximate_kl": 0.01,
+        "completed_episodes": 0.0,
+        "mean_recent_return": float("nan"),
+    }
+    require_finite_training_metrics(
+        metrics,
+        update_index=1,
+        environment_steps=1_000,
+    )
+
+    metrics["completed_episodes"] = 1.0
+    with pytest.raises(FloatingPointError, match="mean_recent_return"):
+        require_finite_training_metrics(
+            metrics,
+            update_index=2,
+            environment_steps=2_000,
+        )
 
 
 def test_gaussian_statistics() -> None:

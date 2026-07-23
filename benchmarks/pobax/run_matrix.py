@@ -22,25 +22,18 @@ from benchmarks.pobax.registered_artifacts import (
     validate_unique_cell_ids,
     write_checksum_manifest,
 )
+from benchmarks.pobax.registration_protocol import (
+    normalize_learner,
+    realized_environment_steps,
+    registration_fields,
+    validate_comparison_profile,
+)
 from benchmarks.pobax.run_pilot import (
     EVIDENCE_STATUS,
     UPPER_REFERENCE_TARGETS,
     run,
 )
 
-_REGISTRATION_FIELDS = {
-    "schema_version",
-    "status",
-    "evidence_tier",
-    "matrix_kind",
-    "models",
-    "environments",
-    "seeds",
-    "learner",
-    "evaluation_episodes_per_env",
-    "require_gpu",
-    "quick",
-}
 _ENVIRONMENT_FIELDS = {"id", "total_steps"}
 _QUICK_LEARNER_VALUES = {
     "num_envs": 32,
@@ -52,14 +45,15 @@ _MATRIX_KINDS = {"primary_comparison", "upper_reference"}
 
 def _load_registration(path: Path) -> dict[str, Any]:
     registration = json.loads(path.read_text(encoding="utf-8"))
-    if set(registration) != _REGISTRATION_FIELDS:
-        missing = sorted(_REGISTRATION_FIELDS - set(registration))
-        extra = sorted(set(registration) - _REGISTRATION_FIELDS)
+    schema_version = registration.get("schema_version")
+    expected_fields = registration_fields(schema_version)
+    if set(registration) != expected_fields:
+        missing = sorted(expected_fields - set(registration))
+        extra = sorted(set(registration) - expected_fields)
         raise ValueError(f"registration has wrong fields: missing={missing}, extra={extra}")
-    if registration.get("schema_version") != 1:
-        raise ValueError("registration schema_version must be 1")
     if registration.get("status") != "frozen":
         raise ValueError("registration status must be 'frozen'")
+    comparison_profile = validate_comparison_profile(registration)
     tier = registration.get("evidence_tier")
     if tier not in EVIDENCE_STATUS:
         raise ValueError(f"unsupported evidence_tier: {tier!r}")
@@ -110,27 +104,17 @@ def _load_registration(path: Path) -> dict[str, Any]:
                 f"registered adapters: {unsupported}"
             )
 
-    learner = registration.get("learner")
-    required_learner_fields = {
-        "num_envs",
-        "rollout_steps",
-        "update_epochs",
-        "learning_rate",
-    }
-    if not isinstance(learner, dict) or set(learner) != required_learner_fields:
-        raise ValueError(
-            "learner must contain exactly num_envs, rollout_steps, update_epochs, and learning_rate"
+    learner = normalize_learner(
+        registration.get("learner"),
+        schema_version=schema_version,
+    )
+    for environment in environments:
+        realized_environment_steps(
+            environment["total_steps"],
+            num_envs=int(learner["num_envs"]),
+            rollout_steps=int(learner["rollout_steps"]),
+            comparison_profile=comparison_profile,
         )
-    for field in ("num_envs", "rollout_steps", "update_epochs"):
-        value = learner[field]
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"learner.{field} must be a positive integer")
-    if (
-        isinstance(learner["learning_rate"], bool)
-        or not isinstance(learner["learning_rate"], (int, float))
-        or learner["learning_rate"] <= 0
-    ):
-        raise ValueError("learner.learning_rate must be positive")
 
     evaluation_episodes = registration.get("evaluation_episodes_per_env")
     if (
@@ -176,7 +160,13 @@ def _cell_namespace(
         num_envs=learner["num_envs"],
         rollout_steps=learner["rollout_steps"],
         update_epochs=learner["update_epochs"],
+        num_minibatches=learner.get("num_minibatches", 4),
         learning_rate=learner["learning_rate"],
+        gae_lambda=learner.get("gae_lambda", 0.95),
+        entropy_coefficient=learner.get("entropy_coefficient", 0.01),
+        anneal_learning_rate=learner.get("anneal_learning_rate", False),
+        registration_schema_version=registration["schema_version"],
+        comparison_profile=registration.get("comparison_profile"),
         evaluation_episodes_per_env=registration["evaluation_episodes_per_env"],
         output=output,
         quick=registration["quick"],
@@ -208,8 +198,16 @@ def _command_for_cell(args: Namespace) -> list[str]:
         str(args.rollout_steps),
         "--update-epochs",
         str(args.update_epochs),
+        "--num-minibatches",
+        str(args.num_minibatches),
         "--learning-rate",
         str(args.learning_rate),
+        "--gae-lambda",
+        str(args.gae_lambda),
+        "--entropy-coefficient",
+        str(args.entropy_coefficient),
+        "--registration-schema-version",
+        str(args.registration_schema_version),
         "--evaluation-episodes-per-env",
         str(args.evaluation_episodes_per_env),
         "--evidence-tier",
@@ -222,6 +220,10 @@ def _command_for_cell(args: Namespace) -> list[str]:
         str(args.output),
         "--require-clean-git",
     ]
+    if args.anneal_learning_rate:
+        command.append("--anneal-learning-rate")
+    if args.comparison_profile is not None:
+        command.extend(["--comparison-profile", args.comparison_profile])
     if args.require_gpu:
         command.append("--require-gpu")
     if args.quick:
@@ -244,7 +246,7 @@ def _load_matching_artifact(
     if not path.exists():
         return None
     artifact = json.loads(path.read_text(encoding="utf-8"))
-    if artifact.get("schema_version") != 4:
+    if artifact.get("schema_version") not in {4, 5}:
         raise ExistingArtifactMismatchError(f"existing cell has the wrong schema: {path}")
     expected = {
         "status": expected_status,
@@ -344,7 +346,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
     if provenance is None:
         raise AssertionError("matrix description produced no provenance")
     manifest_without_hash = {
-        "schema_version": 1,
+        "schema_version": registration["schema_version"],
         "status": "frozen",
         "matrix_kind": registration["matrix_kind"],
         "models": registration["models"],

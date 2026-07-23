@@ -47,6 +47,10 @@ from benchmarks.pobax.registered_artifacts import (
     dependency_lock_sha256,
     gather_git_provenance,
 )
+from benchmarks.pobax.registration_protocol import (
+    COMPARISON_PROFILES,
+    step_budget_mode,
+)
 from benchmarks.pobax.sequence_cores import (
     DiagonalSSMPolicyCore,
     FullCausalTransformerPolicyCore,
@@ -526,6 +530,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     num_envs = 32 if args.quick else args.num_envs
     rollout_steps = 32 if args.quick else args.rollout_steps
     update_epochs = 2 if args.quick else args.update_epochs
+    if args.registration_schema_version not in {1, 2}:
+        raise ValueError("registration_schema_version must be 1 or 2")
+    if args.registration_schema_version == 1:
+        if args.comparison_profile is not None:
+            raise ValueError("schema v1 does not accept a comparison_profile")
+    elif args.comparison_profile not in COMPARISON_PROFILES:
+        raise ValueError("schema v2 requires a supported comparison_profile")
     if args.quick and args.evidence_tier != "smoke":
         raise ValueError("--quick requires --evidence-tier smoke")
     if args.evidence_tier == "registered_final":
@@ -556,15 +567,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         environment_params,
         args.environment,
     )
-    num_minibatches = 4
     ppo_config = PPOConfig(
         total_steps=total_steps,
         num_envs=num_envs,
         rollout_steps=rollout_steps,
         update_epochs=update_epochs,
-        num_minibatches=num_minibatches,
+        num_minibatches=args.num_minibatches,
         learning_rate=args.learning_rate,
         gamma=environment_gamma,
+        gae_lambda=args.gae_lambda,
+        entropy_coefficient=args.entropy_coefficient,
+        anneal_learning_rate=args.anneal_learning_rate,
+        step_budget_mode=step_budget_mode(args.comparison_profile),
     )
     ppo_config.validate()
 
@@ -635,7 +649,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("evaluation_episodes_per_env must be positive")
     evaluation_steps = args.evaluation_episodes_per_env * maximum_episode_steps
     frozen_configuration = {
-        "schema_version": 1,
+        "schema_version": args.registration_schema_version,
         "evidence_tier": args.evidence_tier,
         "environment": args.environment,
         "environment_source": ENVIRONMENT_SOURCES.get(
@@ -668,6 +682,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "dependency_lock_sha256": lock_sha256,
         "runtime_contract": installed_runtime,
     }
+    if args.registration_schema_version == 2:
+        frozen_configuration.update(
+            {
+                "comparison_profile": args.comparison_profile,
+                "requested_environment_steps": total_steps,
+                "realized_environment_steps": ppo_config.realized_steps,
+            }
+        )
     configuration_sha256 = canonical_json_sha256(frozen_configuration)
     if args.describe_only:
         return {
@@ -719,7 +741,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         evaluation_steps=evaluation_steps,
     )
     record: dict[str, object] = {
-        "schema_version": 4,
+        "schema_version": 5 if args.registration_schema_version == 2 else 4,
         "status": EVIDENCE_STATUS[args.evidence_tier],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "configuration_sha256": configuration_sha256,
@@ -781,6 +803,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "contract": installed_runtime,
         },
     }
+    if args.registration_schema_version == 2:
+        record.update(
+            {
+                "comparison_profile": args.comparison_profile,
+                "requested_environment_steps": total_steps,
+                "realized_environment_steps": ppo_config.realized_steps,
+            }
+        )
     if args.output is not None:
         atomic_write_json(args.output, record)
     return record
@@ -829,7 +859,21 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--rollout-steps", type=int, default=64)
     parser.add_argument("--update-epochs", type=int, default=4)
+    parser.add_argument("--num-minibatches", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--entropy-coefficient", type=float, default=0.01)
+    parser.add_argument("--anneal-learning-rate", action="store_true")
+    parser.add_argument(
+        "--registration-schema-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+    )
+    parser.add_argument(
+        "--comparison-profile",
+        choices=tuple(COMPARISON_PROFILES),
+    )
     parser.add_argument(
         "--evaluation-episodes-per-env",
         type=int,

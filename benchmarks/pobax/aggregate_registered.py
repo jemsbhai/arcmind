@@ -53,6 +53,12 @@ from benchmarks.pobax.registered_artifacts import (
     canonical_json_sha256,
     registered_cell_id,
 )
+from benchmarks.pobax.registration_protocol import (
+    LEARNER_FIELDS_V2,
+    normalize_learner,
+    realized_environment_steps,
+    step_budget_mode,
+)
 from benchmarks.pobax.upper_reference_registry import (
     UPPER_REFERENCE_ENVIRONMENTS,
     expected_environment_reference,
@@ -114,6 +120,13 @@ _RUNTIME_PACKAGE_KEYS = {
 }
 _MATRIX_KINDS = {"primary_comparison", "upper_reference"}
 _REGISTERED_FINAL_SEED_COUNT = 30
+_OPTIMIZER_METRICS = (
+    "loss",
+    "actor_loss",
+    "value_loss",
+    "entropy",
+    "approximate_kl",
+)
 _REGISTERED_TRAIN_STEPS = {
     "tmaze_10": 1_000_000,
     "tmaze_10-perfect-memory": 1_000_000,
@@ -344,8 +357,9 @@ def _validate_frozen_configuration(
     missing = sorted(required - set(configuration))
     if missing:
         raise RegisteredAggregationError(f"{field} is missing required fields: {missing}")
-    if configuration["schema_version"] != 1:
-        raise RegisteredAggregationError(f"{field}.schema_version must equal 1")
+    configuration_schema = configuration["schema_version"]
+    if configuration_schema not in {1, 2}:
+        raise RegisteredAggregationError(f"{field}.schema_version must equal 1 or 2")
     if configuration["evidence_tier"] != "registered_final":
         raise RegisteredAggregationError(f"{field}.evidence_tier must equal 'registered_final'")
 
@@ -422,6 +436,66 @@ def _validate_frozen_configuration(
             f"{field}.ppo.total_steps does not match the registered budget: "
             f"expected={expected_budget}, found={total_steps}"
         )
+    realized_steps = total_steps
+    if configuration_schema == 2:
+        for name in (
+            "comparison_profile",
+            "requested_environment_steps",
+            "realized_environment_steps",
+        ):
+            if name not in configuration:
+                raise RegisteredAggregationError(f"{field} is missing {name}")
+        profile = configuration["comparison_profile"]
+        missing_learner_fields = sorted(LEARNER_FIELDS_V2 - set(ppo))
+        if missing_learner_fields:
+            raise RegisteredAggregationError(
+                f"{field}.ppo is missing registered learner fields: {missing_learner_fields}"
+            )
+        try:
+            normalize_learner(
+                {name: ppo[name] for name in LEARNER_FIELDS_V2},
+                schema_version=2,
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+        ppo_num_envs = _integer(
+            ppo.get("num_envs"),
+            field=f"{field}.ppo.num_envs",
+            positive=True,
+        )
+        ppo_rollout_steps = _integer(
+            ppo.get("rollout_steps"),
+            field=f"{field}.ppo.rollout_steps",
+            positive=True,
+        )
+        try:
+            expected_realized_steps = realized_environment_steps(
+                total_steps,
+                num_envs=ppo_num_envs,
+                rollout_steps=ppo_rollout_steps,
+                comparison_profile=profile,
+            )
+            expected_step_mode = step_budget_mode(profile)
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+        requested_steps = _integer(
+            configuration["requested_environment_steps"],
+            field=f"{field}.requested_environment_steps",
+            positive=True,
+        )
+        realized_steps = _integer(
+            configuration["realized_environment_steps"],
+            field=f"{field}.realized_environment_steps",
+            positive=True,
+        )
+        if (
+            requested_steps != total_steps
+            or realized_steps != expected_realized_steps
+            or ppo.get("step_budget_mode") != expected_step_mode
+        ):
+            raise RegisteredAggregationError(
+                f"{field} requested and realized step accounting is inconsistent"
+            )
 
     evaluation_episodes = _integer(
         configuration["evaluation_episodes_per_environment"],
@@ -462,7 +536,7 @@ def _validate_frozen_configuration(
     }
     if configured_sources != expected_sources:
         raise RegisteredAggregationError(f"{field} source provenance does not match the manifest")
-    return total_steps, evaluation_episodes, evaluation_horizon
+    return realized_steps, evaluation_episodes, evaluation_horizon
 
 
 def _artifact_path(manifest_path: Path, value: Any, *, field: str) -> Path:
@@ -660,6 +734,17 @@ def _validate_training_history(
             raise RegisteredAggregationError(
                 f"{field}.training_history[{index}] is missing required fields: {missing}"
             )
+        missing_optimizer_metrics = sorted(set(_OPTIMIZER_METRICS) - set(point))
+        if missing_optimizer_metrics:
+            raise RegisteredAggregationError(
+                f"{field}.training_history[{index}] is missing optimizer metrics: "
+                f"{missing_optimizer_metrics}"
+            )
+        for metric in _OPTIMIZER_METRICS:
+            _finite_number(
+                point[metric],
+                field=f"{field}.training_history[{index}].{metric}",
+            )
         step_value = _finite_number(
             point["environment_steps"],
             field=f"{field}.training_history[{index}].environment_steps",
@@ -698,6 +783,17 @@ def _validate_training_history(
     return tuple(steps), tuple(returns)
 
 
+def _validate_final_training_metrics(artifact: Mapping[str, Any], *, field: str) -> None:
+    training = _mapping(artifact.get("training"), field=f"{field}.training")
+    missing = sorted(set(_OPTIMIZER_METRICS) - set(training))
+    if missing:
+        raise RegisteredAggregationError(
+            f"{field}.training is missing optimizer metrics: {missing}"
+        )
+    for metric in _OPTIMIZER_METRICS:
+        _finite_number(training[metric], field=f"{field}.training.{metric}")
+
+
 def _trapezoid_by_step(values: Sequence[float], steps: Sequence[int]) -> float:
     if len(values) == 1:
         return 0.0
@@ -711,8 +807,8 @@ def _validate_manifest(
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], Any]]:
     manifest = _mapping(_load_json(manifest_path, kind="matrix manifest"), field="manifest")
     _exact_keys(manifest, _MANIFEST_KEYS, field="manifest")
-    if manifest["schema_version"] != 1:
-        raise RegisteredAggregationError("manifest.schema_version must equal 1")
+    if manifest["schema_version"] not in {1, 2}:
+        raise RegisteredAggregationError("manifest.schema_version must equal 1 or 2")
     if manifest["status"] != "frozen":
         raise RegisteredAggregationError("manifest.status must equal 'frozen'")
     manifest_sha256 = _sha256(manifest["manifest_sha256"], field="manifest.manifest_sha256")
@@ -819,6 +915,7 @@ def _validate_manifest(
         raise RegisteredAggregationError("manifest cell count does not match Cartesian matrix")
 
     normalized = {
+        "schema_version": manifest["schema_version"],
         "manifest_sha256": manifest_sha256,
         "matrix_kind": matrix_kind,
         "models": models,
@@ -835,6 +932,7 @@ def _validate_artifact(
     identity: tuple[str, str, int],
     expected: Mapping[str, Any],
     manifest_sha256: str,
+    manifest_schema_version: int,
     provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     environment, model, seed = identity
@@ -864,13 +962,17 @@ def _validate_artifact(
         "actual_evaluation_steps_per_environment",
         "actual_evaluation_transitions",
         "evaluation",
+        "training",
         "training_history",
     }
     missing = sorted(required - set(artifact))
     if missing:
         raise RegisteredAggregationError(f"{field} is missing required fields: {missing}")
-    if artifact["schema_version"] != 4:
-        raise RegisteredAggregationError(f"{field}.schema_version must equal current schema 4")
+    expected_artifact_schema = 5 if manifest_schema_version == 2 else 4
+    if artifact["schema_version"] != expected_artifact_schema:
+        raise RegisteredAggregationError(
+            f"{field}.schema_version must equal current schema {expected_artifact_schema}"
+        )
     if artifact["status"] != "registered_final_complete":
         raise RegisteredAggregationError(f"{field}.status must equal 'registered_final_complete'")
     if (
@@ -890,6 +992,10 @@ def _validate_artifact(
     if artifact_configuration_sha256 != expected["configuration_sha256"]:
         raise RegisteredAggregationError(f"{field}.configuration_sha256 drifted from the manifest")
     configuration = _mapping(artifact["configuration"], field=f"{field}.configuration")
+    if configuration.get("schema_version") != manifest_schema_version:
+        raise RegisteredAggregationError(
+            f"{field}.configuration schema does not match the manifest"
+        )
     if canonical_json_sha256(configuration) != artifact_configuration_sha256:
         raise RegisteredAggregationError(
             f"{field}.configuration_sha256 does not match configuration"
@@ -935,6 +1041,24 @@ def _validate_artifact(
         raise RegisteredAggregationError(
             f"{field}.actual_environment_steps does not match the registered budget"
         )
+    if manifest_schema_version == 2:
+        for name in (
+            "comparison_profile",
+            "requested_environment_steps",
+            "realized_environment_steps",
+        ):
+            if name not in artifact:
+                raise RegisteredAggregationError(f"{field} is missing {name}")
+        if (
+            artifact["comparison_profile"] != configuration["comparison_profile"]
+            or artifact["requested_environment_steps"]
+            != configuration["requested_environment_steps"]
+            or artifact["realized_environment_steps"] != configuration["realized_environment_steps"]
+            or artifact["realized_environment_steps"] != actual_environment_steps
+        ):
+            raise RegisteredAggregationError(
+                f"{field} comparison profile or step accounting is inconsistent"
+            )
     artifact_ppo = _mapping(artifact["ppo"], field=f"{field}.ppo")
     if artifact_ppo != configuration["ppo"]:
         raise RegisteredAggregationError(f"{field}.ppo does not match the frozen configuration")
@@ -992,6 +1116,7 @@ def _validate_artifact(
         field=field,
         expected_final_steps=total_steps,
     )
+    _validate_final_training_metrics(artifact, field=field)
     return {
         "seed": seed,
         "evaluation": evaluation,
@@ -1111,6 +1236,7 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
                     identity=identity,
                     expected=cell_index[identity],
                     manifest_sha256=manifest["manifest_sha256"],
+                    manifest_schema_version=manifest["schema_version"],
                     provenance=manifest["provenance"],
                 )
                 if environment not in evaluation_counts_by_environment:

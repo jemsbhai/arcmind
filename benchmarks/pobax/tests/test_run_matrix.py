@@ -46,6 +46,28 @@ def _registration() -> dict[str, object]:
     }
 
 
+def _registration_v2(
+    *,
+    comparison_profile: str = "arcmind_shared_comparison",
+) -> dict[str, object]:
+    registration = _registration()
+    registration.update(
+        schema_version=2,
+        comparison_profile=comparison_profile,
+        learner={
+            "num_envs": 64,
+            "rollout_steps": 64,
+            "update_epochs": 4,
+            "num_minibatches": 4,
+            "learning_rate": 0.00025,
+            "gae_lambda": 0.95,
+            "entropy_coefficient": 0.01,
+            "anneal_learning_rate": True,
+        },
+    )
+    return registration
+
+
 @pytest.mark.parametrize(
     "filename",
     ["smoke_controls_v1.json", "tmaze_pilot_v1.json"],
@@ -61,6 +83,62 @@ def test_registration_accepts_a_complete_paired_matrix(tmp_path):
     path.write_text(json.dumps(_registration()), encoding="utf-8")
 
     assert _load_registration(path) == _registration()
+
+
+@pytest.mark.parametrize(
+    "comparison_profile",
+    ["pobax_author_semantics", "arcmind_shared_comparison"],
+)
+def test_registration_v2_requires_a_complete_explicit_learner(
+    tmp_path,
+    comparison_profile,
+):
+    registration = _registration_v2(comparison_profile=comparison_profile)
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    assert _load_registration(path) == registration
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value.pop("comparison_profile"), "wrong fields"),
+        (
+            lambda value: value.update(comparison_profile="unspecified"),
+            "comparison_profile",
+        ),
+        (
+            lambda value: value["learner"].pop("gae_lambda"),
+            "learner has wrong fields",
+        ),
+        (
+            lambda value: value["learner"].update(anneal_learning_rate=1),
+            "anneal_learning_rate",
+        ),
+    ],
+)
+def test_registration_v2_fails_closed(tmp_path, mutation, message):
+    registration = _registration_v2()
+    mutation(registration)
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _load_registration(path)
+
+
+def test_shared_profile_requires_exact_steps_but_source_profile_floors(tmp_path):
+    registration = _registration_v2()
+    registration["environments"][0]["total_steps"] = 131_073
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly divisible"):
+        _load_registration(path)
+
+    registration["comparison_profile"] = "pobax_author_semantics"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+    assert _load_registration(path) == registration
 
 
 @pytest.mark.parametrize(
@@ -262,7 +340,13 @@ def test_cell_command_carries_frozen_identity_and_safety_flags(tmp_path):
         num_envs=8,
         rollout_steps=125,
         update_epochs=4,
+        num_minibatches=4,
         learning_rate=0.00025,
+        gae_lambda=0.95,
+        entropy_coefficient=0.01,
+        anneal_learning_rate=True,
+        registration_schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
         evaluation_episodes_per_env=4,
         evidence_tier="registered_final",
         matrix_manifest_sha256="a" * 64,
@@ -279,6 +363,10 @@ def test_cell_command_carries_frozen_identity_and_safety_flags(tmp_path):
     assert "--quick" not in command
     assert command[command.index("--matrix-manifest-sha256") + 1] == "a" * 64
     assert command[command.index("--cell-id") + 1] == "b" * 64
+    assert command[command.index("--num-minibatches") + 1] == "4"
+    assert command[command.index("--gae-lambda") + 1] == "0.95"
+    assert "--anneal-learning-rate" in command
+    assert command[command.index("--comparison-profile") + 1] == "arcmind_shared_comparison"
 
 
 def test_environment_horizon_and_gamma_uses_source_contract():

@@ -58,6 +58,13 @@ BASE_PROVENANCE = {
         "devices": [{"platform": "gpu", "device_kind": "Test GPU"}],
     },
 }
+OPTIMIZER_METRICS = {
+    "loss": 0.5,
+    "actor_loss": 0.1,
+    "value_loss": 0.8,
+    "entropy": 0.2,
+    "approximate_kl": 0.01,
+}
 
 
 def _configuration(
@@ -69,9 +76,11 @@ def _configuration(
     learner: dict[str, Any],
     evaluation_episodes: int,
     provenance: dict[str, Any],
+    schema_version: int = 1,
+    comparison_profile: str | None = None,
 ) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
+    configuration = {
+        "schema_version": schema_version,
         "evidence_tier": tier,
         "environment": environment,
         "environment_source": expected_environment_source(environment),
@@ -100,6 +109,21 @@ def _configuration(
         "navix_commit": provenance["navix_commit"],
         "runtime_contract": deepcopy(provenance["runtime_contract"]),
     }
+    if schema_version == 2:
+        requested_steps = PILOT_BUDGETS[environment]
+        realized_steps = requested_steps // 4 * 4
+        configuration["ppo"].update(
+            anneal_learning_rate=learner["anneal_learning_rate"],
+            step_budget_mode=(
+                "floor" if comparison_profile == "pobax_author_semantics" else "exact"
+            ),
+        )
+        configuration.update(
+            comparison_profile=comparison_profile,
+            requested_environment_steps=requested_steps,
+            realized_environment_steps=realized_steps,
+        )
+    return configuration
 
 
 def _write_matrix(
@@ -112,6 +136,8 @@ def _write_matrix(
     learning_rate: float = 0.001,
     evaluation_episodes: int = 2,
     provenance: dict[str, Any] | None = None,
+    schema_version: int = 1,
+    comparison_profile: str | None = None,
 ) -> None:
     selected_seeds = seeds or SEEDS
     selected_environments = environments or (
@@ -125,8 +151,15 @@ def _write_matrix(
         "update_epochs": 1,
         "learning_rate": learning_rate,
     }
+    if schema_version == 2:
+        learner.update(
+            num_minibatches=1,
+            gae_lambda=0.95,
+            entropy_coefficient=0.01,
+            anneal_learning_rate=True,
+        )
     registration = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "status": "frozen",
         "evidence_tier": tier,
         "matrix_kind": matrix_kind,
@@ -141,6 +174,8 @@ def _write_matrix(
         "require_gpu": selected_provenance["runtime_contract"]["jax_backend"] == "gpu",
         "quick": False,
     }
+    if schema_version == 2:
+        registration["comparison_profile"] = comparison_profile
     atomic_write_json(root / "registration.json", registration)
 
     manifest_cells: list[dict[str, Any]] = []
@@ -156,6 +191,8 @@ def _write_matrix(
                     learner=learner,
                     evaluation_episodes=evaluation_episodes,
                     provenance=selected_provenance,
+                    schema_version=schema_version,
+                    comparison_profile=comparison_profile,
                 )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 identity = (environment, model, seed)
@@ -177,7 +214,7 @@ def _write_matrix(
                 )
                 artifacts[identity] = (root / relative_path, configuration)
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "status": "frozen",
         "matrix_kind": matrix_kind,
         "models": models,
@@ -196,7 +233,7 @@ def _write_matrix(
         value = float(seed % 100)
         rows = [[value] * evaluation_episodes for _ in range(2)]
         artifact = {
-            "schema_version": 4,
+            "schema_version": 5 if schema_version == 2 else 4,
             "status": f"development_{tier}_not_for_paper",
             "matrix_manifest_sha256": manifest["manifest_sha256"],
             "cell_id": registered_cell_id(
@@ -232,13 +269,21 @@ def _write_matrix(
                 "scan_steps_per_environment": evaluation_episodes * horizon,
                 "returns_by_environment": rows,
             },
+            "training": {**OPTIMIZER_METRICS, "mean_recent_return": value},
             "training_history": [
                 {
+                    **OPTIMIZER_METRICS,
                     "environment_steps": float(PILOT_BUDGETS[environment]),
                     "mean_recent_return": value,
                 }
             ],
         }
+        if schema_version == 2:
+            artifact.update(
+                comparison_profile=comparison_profile,
+                requested_environment_steps=configuration["requested_environment_steps"],
+                realized_environment_steps=configuration["realized_environment_steps"],
+            )
         atomic_write_json(path, artifact)
 
     completed_cells = []
@@ -275,7 +320,14 @@ def _paired_roots(
 ) -> tuple[Path, Path]:
     primary = tmp_path / "primary"
     upper = tmp_path / "upper"
-    _write_matrix(primary, matrix_kind="primary_comparison")
+    schema_version = upper_options.get("schema_version", 1)
+    comparison_profile = upper_options.get("comparison_profile")
+    _write_matrix(
+        primary,
+        matrix_kind="primary_comparison",
+        schema_version=schema_version,
+        comparison_profile=comparison_profile,
+    )
     upper_provenance = deepcopy(BASE_PROVENANCE)
     upper_provenance["runtime_contract"]["jax_backend"] = "cpu"
     upper_provenance["runtime_contract"]["devices"] = [
@@ -319,6 +371,37 @@ def test_all_six_registered_aliases_link_deterministically(tmp_path: Path) -> No
     assert first["primary"]["provenance"]["runtime_contract"]["jax_backend"] == "gpu"
     assert first["upper_reference"]["provenance"]["runtime_contract"]["jax_backend"] == "cpu"
     assert json.loads(output.read_text(encoding="utf-8")) == first
+
+
+def test_schema_v2_matrices_link_only_with_the_same_comparison_profile(
+    tmp_path: Path,
+) -> None:
+    primary, upper = _paired_roots(
+        tmp_path,
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+
+    result = build_upper_reference_link(primary, upper)
+
+    assert result["status"] == ("development_pilot_primary_upper_reference_link_not_for_paper")
+
+    mismatched_primary = tmp_path / "mismatched-primary"
+    mismatched_upper = tmp_path / "mismatched-upper"
+    _write_matrix(
+        mismatched_primary,
+        matrix_kind="primary_comparison",
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+    _write_matrix(
+        mismatched_upper,
+        matrix_kind="upper_reference",
+        schema_version=2,
+        comparison_profile="pobax_author_semantics",
+    )
+    with pytest.raises(UpperReferenceLinkError, match="comparison profiles"):
+        build_upper_reference_link(mismatched_primary, mismatched_upper)
 
 
 @pytest.mark.parametrize("raw_root_name", ["primary", "upper"])
