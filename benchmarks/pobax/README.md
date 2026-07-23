@@ -186,8 +186,8 @@ It is development evidence and remains ineligible for paper performance
 claims.
 
 Registration schema v1 remains readable for existing development matrices.
-New experiment registrations use schema v2 and must name one of two comparison
-profiles:
+New pilot and registered-final experiment registrations use schema v2 and
+must name one of two comparison profiles:
 
 - `pobax_author_semantics` follows the pinned author's optimizer, update, and
   step-budget semantics inside ArcMind's shared runner. If the requested
@@ -207,6 +207,16 @@ optimizer step `s`, it is
 `lr * (1 - floor(s / (num_minibatches * update_epochs)) / num_updates)`.
 The schedule reaches zero at the optimizer boundary and is clamped to zero
 after that boundary.
+
+Development tuning uses schema v3 and `matrix_kind:
+hyperparameter_selection`. Its `candidate_families` list groups immutable
+candidate IDs under one implementation model per family. Every candidate
+records a complete learner configuration. Candidate IDs are used in frozen
+configurations, cell IDs, artifact paths, manifests, completion indexes, and
+aggregate rows, while `model_family` and `implementation_model` remain
+explicit. Family IDs, implementation models, and candidate IDs are unique.
+Every family has the same number of candidates, with no duplicate normalized
+learner configuration inside a family.
 
 An exact author-code reproduction requires a separate pinned author-code
 runner and separately labeled artifacts. Results from that lane cannot be
@@ -228,6 +238,8 @@ then writes a stable completion index plus checksum manifest.
 Every registration declares `matrix_kind`. A `primary_comparison` matrix must
 include ArcMind. An `upper_reference` matrix contains only the memoryless
 policy on its separately labeled privileged or full-observation task. A
+`hyperparameter_selection` matrix contains schema-v3 candidate families and
+cannot be aggregated by the registered-final path. A
 registered-final matrix is accepted only with exactly 30 paired seeds.
 Each child process writes an immutable per-cell log beside its JSON artifact.
 The completion index records both hashes, and the directory checksum covers
@@ -251,7 +263,8 @@ Derived aggregates live outside the immutable raw-matrix directory so its
 checksum manifest continues to cover every file it was created to protect.
 The write commands reject any output path inside that directory.
 
-Smoke and pilot matrices use the separately labeled development aggregator:
+Smoke, pilot, and tuning matrices use the separately labeled development
+aggregator:
 
 ```bash
 python -m benchmarks.pobax.aggregate_development \
@@ -264,6 +277,34 @@ parameter match and environment semantics, and stamps the result as not for
 paper. Legacy primary pilots whose older frozen configuration omitted those
 fields are accepted only when the completed artifact itself passes the same
 checks, and the aggregate records that limitation explicitly.
+
+The `development_tuning` tier is selection evidence only. It requires schema
+v3, `arcmind_shared_comparison`, exactly one published primary task at its full
+interaction budget, at least two candidates per model family, equal candidate
+cardinality across families, and the published task-specific tuning-seed
+count. Every candidate uses the same seed set, budget, evaluation contract,
+and training-step grid. The structural learner fields `num_envs`,
+`rollout_steps`, `update_epochs`, and `num_minibatches` are identical across
+the entire matrix. Candidates may vary only `learning_rate`, `gae_lambda`,
+`entropy_coefficient`, and `anneal_learning_rate`. Completion and checksum
+indexes, frozen environment semantics, and parameter-match contracts are
+mandatory. Every schema-v3 completion row must carry the immutable cell log
+path and hash, and the checksum inventory must cover every log.
+
+For tuning only, the aggregator removes the leading prefix through the latest
+first finite `mean_recent_return` across all candidate and seed cells, then
+requires at least two shared finite curve points. It integrates each seed
+curve by the trapezoidal rule without extrapolation and divides by the common
+integration width.
+Candidates are ranked separately within each model family by mean seed
+`auc_mean_return`; an exact score tie is resolved by ascending candidate ID.
+No result ranks one architecture against another. This rule selects a
+candidate configuration, never a checkpoint. Final evaluation return is
+preserved for audit but cannot affect selection. The aggregate status is
+`development_tuning_selection_aggregate_not_for_paper`, and its eligibility
+block explicitly prohibits registered-final evidence and paper performance
+claims. A selected configuration must be frozen in a new registered-final
+manifest and rerun on the disjoint final seed manifest.
 
 Primary and upper-reference matrices are paired only through a validated link:
 
@@ -307,8 +348,12 @@ requested count or the cell fails.
 A smoke run checks imports, shapes, reset behavior, JIT, gradients, and
 artifacts. Quick or 131,072-step runs are smoke evidence only. A pilot run may
 use shortened budgets and three to five seeds to check learnability and freeze
-choices. It is development evidence only. A registered final run uses a frozen
-configuration, paired seed manifest, and the full task budget below.
+choices. It is development evidence only. A development tuning run uses the
+full task budget and published tuning-seed count to choose among a frozen,
+equal-cardinality candidate matrix by learning-curve AUC. It remains
+ineligible for paper performance claims. A registered final run uses the
+selected frozen configuration, a disjoint paired seed manifest, and the full
+task budget below.
 
 | Environment identifier | Published steps | Tuning seeds | Final seeds |
 |---|---:|---:|---:|

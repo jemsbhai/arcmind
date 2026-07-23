@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -20,6 +21,7 @@ REGISTRATION_FIELDS_V1 = {
     "quick",
 }
 REGISTRATION_FIELDS_V2 = REGISTRATION_FIELDS_V1 | {"comparison_profile"}
+REGISTRATION_FIELDS_V3 = (REGISTRATION_FIELDS_V2 - {"models", "learner"}) | {"candidate_families"}
 LEARNER_FIELDS_V1 = {
     "num_envs",
     "rollout_steps",
@@ -36,18 +38,37 @@ COMPARISON_PROFILES = {
     "arcmind_shared_comparison": "exact",
     "pobax_author_semantics": "floor",
 }
+_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+PUBLISHED_PRIMARY_TRAIN_STEPS = {
+    "tmaze_10": 1_000_000,
+    "rocksample_11_11": 5_000_000,
+    "battleship_10": 10_000_000,
+    "Walker-V-v0": 50_000_000,
+    "HalfCheetah-V-v0": 50_000_000,
+    "Navix-DMLab-Maze-01-v0": 10_000_000,
+}
+PUBLISHED_TUNING_SEED_COUNTS = {
+    "tmaze_10": 5,
+    "rocksample_11_11": 5,
+    "battleship_10": 10,
+    "Walker-V-v0": 5,
+    "HalfCheetah-V-v0": 5,
+    "Navix-DMLab-Maze-01-v0": 5,
+}
 
 
 def registration_fields(schema_version: object) -> set[str]:
     """Return the exact top-level field set for a supported registration."""
 
     if isinstance(schema_version, bool):
-        raise ValueError("registration schema_version must be 1 or 2")
+        raise ValueError("registration schema_version must be 1, 2, or 3")
     if schema_version == 1:
         return REGISTRATION_FIELDS_V1
     if schema_version == 2:
         return REGISTRATION_FIELDS_V2
-    raise ValueError("registration schema_version must be 1 or 2")
+    if schema_version == 3:
+        return REGISTRATION_FIELDS_V3
+    raise ValueError("registration schema_version must be 1, 2, or 3")
 
 
 def learner_fields(schema_version: int) -> set[str]:
@@ -55,9 +76,9 @@ def learner_fields(schema_version: int) -> set[str]:
 
     if schema_version == 1:
         return LEARNER_FIELDS_V1
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         return LEARNER_FIELDS_V2
-    raise ValueError("registration schema_version must be 1 or 2")
+    raise ValueError("registration schema_version must be 1, 2, or 3")
 
 
 def validate_comparison_profile(registration: Mapping[str, Any]) -> str | None:
@@ -91,14 +112,14 @@ def normalize_learner(
         )
     normalized: dict[str, int | float | bool] = {}
     integer_fields = ["num_envs", "rollout_steps", "update_epochs"]
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         integer_fields.append("num_minibatches")
     for field in integer_fields:
         value = learner[field]
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"learner.{field} must be a positive integer")
         normalized[field] = value
-    if schema_version == 2 and normalized["num_envs"] % normalized["num_minibatches"] != 0:
+    if schema_version in {2, 3} and normalized["num_envs"] % normalized["num_minibatches"] != 0:
         raise ValueError("learner.num_envs must be divisible by learner.num_minibatches")
 
     learning_rate = learner["learning_rate"]
@@ -111,7 +132,7 @@ def normalize_learner(
         raise ValueError("learner.learning_rate must be positive and finite")
     normalized["learning_rate"] = float(learning_rate)
 
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         gae_lambda = learner["gae_lambda"]
         if (
             isinstance(gae_lambda, bool)
@@ -171,3 +192,150 @@ def step_budget_mode(comparison_profile: str | None) -> str:
         return COMPARISON_PROFILES[comparison_profile]
     except KeyError as error:
         raise ValueError(f"unsupported comparison_profile: {comparison_profile!r}") from error
+
+
+def normalize_candidate_families(value: object) -> tuple[dict[str, Any], ...]:
+    """Validate schema-v3 tuning candidates and preserve declared order."""
+
+    if not isinstance(value, list) or not value:
+        raise ValueError("candidate_families must be a non-empty list")
+    families: list[dict[str, Any]] = []
+    family_ids: set[str] = set()
+    implementation_models: set[str] = set()
+    candidate_ids: set[str] = set()
+    cardinalities: set[int] = set()
+    structural_learner_signatures: set[tuple[int, int, int, int]] = set()
+    for family_index, raw_family in enumerate(value):
+        field = f"candidate_families[{family_index}]"
+        if not isinstance(raw_family, Mapping) or set(raw_family) != {
+            "family_id",
+            "implementation_model",
+            "candidates",
+        }:
+            raise ValueError(
+                f"{field} must contain exactly family_id, implementation_model, and candidates"
+            )
+        family_id = raw_family["family_id"]
+        if (
+            not isinstance(family_id, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(family_id)
+            or family_id in family_ids
+        ):
+            raise ValueError(f"{field}.family_id must be a unique portable identifier")
+        implementation_model = raw_family["implementation_model"]
+        if (
+            not isinstance(implementation_model, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(implementation_model)
+            or implementation_model in implementation_models
+        ):
+            raise ValueError(
+                f"{field}.implementation_model must be a unique portable model identifier"
+            )
+        raw_candidates = raw_family["candidates"]
+        if not isinstance(raw_candidates, list) or len(raw_candidates) < 2:
+            raise ValueError(f"{field}.candidates must contain at least two candidates")
+        candidates: list[dict[str, Any]] = []
+        learner_signatures: set[tuple[tuple[str, int | float | bool], ...]] = set()
+        for candidate_index, raw_candidate in enumerate(raw_candidates):
+            candidate_field = f"{field}.candidates[{candidate_index}]"
+            if not isinstance(raw_candidate, Mapping) or set(raw_candidate) != {
+                "candidate_id",
+                "learner",
+            }:
+                raise ValueError(f"{candidate_field} must contain exactly candidate_id and learner")
+            candidate_id = raw_candidate["candidate_id"]
+            if (
+                not isinstance(candidate_id, str)
+                or not _IDENTIFIER_PATTERN.fullmatch(candidate_id)
+                or candidate_id in candidate_ids
+                or not candidate_id.startswith(f"{family_id}.")
+            ):
+                raise ValueError(
+                    f"{candidate_field}.candidate_id must be globally unique and "
+                    f"start with {family_id!r} followed by a dot"
+                )
+            learner = normalize_learner(raw_candidate["learner"], schema_version=3)
+            learner_signature = tuple(sorted(learner.items()))
+            if learner_signature in learner_signatures:
+                raise ValueError(f"{field} contains duplicate normalized learner configurations")
+            learner_signatures.add(learner_signature)
+            structural_learner_signatures.add(
+                (
+                    int(learner["num_envs"]),
+                    int(learner["rollout_steps"]),
+                    int(learner["update_epochs"]),
+                    int(learner["num_minibatches"]),
+                )
+            )
+            candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "implementation_model": implementation_model,
+                    "learner": learner,
+                }
+            )
+            candidate_ids.add(candidate_id)
+        family_ids.add(family_id)
+        implementation_models.add(implementation_model)
+        cardinalities.add(len(candidates))
+        families.append(
+            {
+                "family_id": family_id,
+                "implementation_model": implementation_model,
+                "candidates": tuple(candidates),
+            }
+        )
+    if len(cardinalities) != 1:
+        raise ValueError(
+            "development_tuning requires equal candidate cardinality across model families"
+        )
+    if len(structural_learner_signatures) != 1:
+        raise ValueError(
+            "development_tuning requires identical num_envs, rollout_steps, "
+            "update_epochs, and num_minibatches across every candidate"
+        )
+    return tuple(families)
+
+
+def validate_development_tuning_contract(
+    *,
+    schema_version: int,
+    comparison_profile: str | None,
+    matrix_kind: str,
+    candidate_families: tuple[dict[str, Any], ...],
+    environments: Mapping[str, int],
+    seeds: tuple[int, ...] | list[int],
+    quick: bool,
+) -> None:
+    """Fail closed on the matrix contract used for hyperparameter selection."""
+
+    if schema_version != 3:
+        raise ValueError("development_tuning requires registration schema version 3")
+    if comparison_profile != "arcmind_shared_comparison":
+        raise ValueError(
+            "development_tuning requires comparison_profile 'arcmind_shared_comparison'"
+        )
+    if matrix_kind != "hyperparameter_selection":
+        raise ValueError("development_tuning requires matrix_kind 'hyperparameter_selection'")
+    if quick:
+        raise ValueError("development_tuning cannot use quick execution")
+    if not candidate_families:
+        raise ValueError("development_tuning requires explicit candidate families")
+    if len(environments) != 1:
+        raise ValueError("development_tuning requires exactly one primary environment")
+    environment, total_steps = next(iter(environments.items()))
+    expected_steps = PUBLISHED_PRIMARY_TRAIN_STEPS.get(environment)
+    if expected_steps is None:
+        raise ValueError("development_tuning requires one published POBAX primary environment")
+    if total_steps != expected_steps:
+        raise ValueError(
+            "development_tuning requires the published task budget: "
+            f"environment={environment!r}, expected={expected_steps}, found={total_steps}"
+        )
+    expected_seed_count = PUBLISHED_TUNING_SEED_COUNTS[environment]
+    if len(seeds) != expected_seed_count:
+        raise ValueError(
+            "development_tuning requires the published tuning-seed count: "
+            f"environment={environment!r}, expected={expected_seed_count}, "
+            f"found={len(seeds)}"
+        )

@@ -268,6 +268,11 @@ Classify every run before execution:
 - A pilot run checks learnability and freezes architecture and tuning choices.
   It may use shortened budgets and three to five development seeds, but it is
   not paper evidence.
+- A development tuning run selects separately within each architecture from a
+  frozen, equal-cardinality candidate matrix. It uses one task at its full
+  published budget, the published task-specific tuning-seed count, and mean
+  seed learning-curve AUC on the shared complete-case suffix. It cannot rank
+  architectures, select a checkpoint, or serve as paper performance evidence.
 - A registered final run uses frozen choices, paired seed manifests, and the
   published interaction budget for every method in a task cell.
 
@@ -292,6 +297,23 @@ differs. The reporting procedure follows the uncertainty-aware recommendations
 in
 [Deep Reinforcement Learning at the Edge of the Statistical
 Precipice](https://proceedings.neurips.cc/paper/2021/hash/f514cec81cb148559cf475e7426eed5e-Abstract.html).
+
+The tuning aggregate is mechanically separated from registered-final
+aggregation. It requires schema v3, explicit immutable candidate IDs grouped
+by implementation model, the shared exact-step comparison profile, one
+complete Cartesian candidate matrix, checksum and completion indexes, frozen
+environment semantics, and frozen parameter matching. Every model family has
+the same candidate count. All candidates share `num_envs`, `rollout_steps`,
+`update_epochs`, and `num_minibatches`; only learning rate, GAE lambda,
+entropy coefficient, and learning-rate annealing may vary. The common curve
+starts at the latest first finite return across all candidate and seed cells
+and must retain at least two observations. Per-seed AUC uses trapezoidal
+integration over environment steps with no extrapolation. Dividing by the
+common interval width yields `auc_mean_return`, and candidates are ranked by
+its seed mean only within their model family. The selected configurations must
+be frozen in a new manifest and rerun on disjoint registered-final seeds.
+Every tuning completion row must identify its immutable cell log and SHA256,
+and the matrix checksum inventory must cover all of those logs.
 
 ### Track B: state-based robot imitation (primary application)
 

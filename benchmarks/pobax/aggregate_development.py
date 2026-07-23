@@ -1,8 +1,9 @@
-"""Strict aggregation for smoke and pilot POBAX matrices.
+"""Strict aggregation for smoke, pilot, and tuning POBAX matrices.
 
 This module is intentionally separate from the registered-final aggregator.
 It accepts only development evidence, preserves raw evaluation returns, and
-labels every output as unsuitable for paper claims.
+labels every output as unsuitable for paper claims. Tuning outputs rank a
+complete Cartesian candidate matrix by a predeclared learning-curve metric.
 """
 
 from __future__ import annotations
@@ -25,11 +26,13 @@ from benchmarks.pobax.registered_artifacts import (
     sha256_file,
 )
 from benchmarks.pobax.registration_protocol import (
+    normalize_candidate_families,
     normalize_learner,
     realized_environment_steps,
     registration_fields,
     step_budget_mode,
     validate_comparison_profile,
+    validate_development_tuning_contract,
 )
 from benchmarks.pobax.upper_reference_registry import (
     UPPER_REFERENCE_ENVIRONMENTS,
@@ -43,6 +46,12 @@ CONFIDENCE_LEVEL = 0.95
 _TIERS = {
     "smoke": "development_smoke_not_for_paper",
     "pilot": "development_pilot_not_for_paper",
+    "development_tuning": "development_tuning_not_for_paper",
+}
+_AGGREGATE_STATUS = {
+    "smoke": "development_smoke_aggregate_not_for_paper",
+    "pilot": "development_pilot_aggregate_not_for_paper",
+    "development_tuning": "development_tuning_selection_aggregate_not_for_paper",
 }
 _MANIFEST_KEYS = {
     "schema_version",
@@ -55,6 +64,7 @@ _MANIFEST_KEYS = {
     "provenance",
     "cells",
 }
+_MANIFEST_KEYS_V3 = _MANIFEST_KEYS | {"candidate_families"}
 _CELL_KEYS = {
     "cell_id",
     "environment",
@@ -63,6 +73,7 @@ _CELL_KEYS = {
     "configuration_sha256",
     "artifact_path",
 }
+_CELL_KEYS_V3 = _CELL_KEYS | {"model_family", "implementation_model"}
 _PROVENANCE_KEYS = {
     "git",
     "dependency_lock_sha256",
@@ -313,16 +324,51 @@ def _validate_registration(value: Any) -> dict[str, Any]:
         raise DevelopmentAggregationError(str(error)) from error
     tier = _string(registration["evidence_tier"], field="registration.evidence_tier")
     if tier not in _TIERS:
-        raise DevelopmentAggregationError("registration.evidence_tier must be 'smoke' or 'pilot'")
+        raise DevelopmentAggregationError(
+            "registration.evidence_tier must be 'smoke', 'pilot', or 'development_tuning'"
+        )
     matrix_kind = _string(registration["matrix_kind"], field="registration.matrix_kind")
-    if matrix_kind not in {"primary_comparison", "upper_reference"}:
+    if matrix_kind not in {
+        "primary_comparison",
+        "upper_reference",
+        "hyperparameter_selection",
+    }:
         raise DevelopmentAggregationError("registration.matrix_kind is unsupported")
-    models = _unique_strings(registration["models"], field="registration.models")
+    candidate_families: tuple[dict[str, Any], ...] = ()
+    candidate_specs: dict[str, dict[str, Any]] = {}
+    if schema_version == 3:
+        try:
+            candidate_families = normalize_candidate_families(registration["candidate_families"])
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
+        models = tuple(
+            candidate["candidate_id"]
+            for family in candidate_families
+            for candidate in family["candidates"]
+        )
+        candidate_specs = {
+            candidate["candidate_id"]: {
+                **candidate,
+                "model_family": family["family_id"],
+            }
+            for family in candidate_families
+            for candidate in family["candidates"]
+        }
+        if tier != "development_tuning":
+            raise DevelopmentAggregationError(
+                "registration schema version 3 is reserved for development_tuning"
+            )
+    else:
+        models = _unique_strings(registration["models"], field="registration.models")
     if matrix_kind == "primary_comparison" and "arcmind" not in models:
         raise DevelopmentAggregationError("primary_comparison registration must contain arcmind")
     if matrix_kind == "upper_reference" and models != ("memoryless_mlp",):
         raise DevelopmentAggregationError(
             "upper_reference registration must contain only memoryless_mlp"
+        )
+    if matrix_kind == "hyperparameter_selection" and schema_version != 3:
+        raise DevelopmentAggregationError(
+            "hyperparameter_selection requires registration schema version 3"
         )
     seeds = _unique_seeds(registration["seeds"], field="registration.seeds")
     raw_environments = registration["environments"]
@@ -358,17 +404,27 @@ def _validate_registration(value: Any) -> dict[str, Any]:
             f"{sorted(selected_upper_references)}"
         )
     try:
-        normalized_learner = normalize_learner(
-            registration["learner"],
-            schema_version=schema_version,
-        )
-        for environment in environments:
-            realized_environment_steps(
-                environment["total_steps"],
-                num_envs=int(normalized_learner["num_envs"]),
-                rollout_steps=int(normalized_learner["rollout_steps"]),
-                comparison_profile=comparison_profile,
+        normalized_learner = (
+            None
+            if schema_version == 3
+            else normalize_learner(
+                registration["learner"],
+                schema_version=schema_version,
             )
+        )
+        learners = (
+            [candidate["learner"] for candidate in candidate_specs.values()]
+            if schema_version == 3
+            else [normalized_learner]
+        )
+        for learner in learners:
+            for environment in environments:
+                realized_environment_steps(
+                    environment["total_steps"],
+                    num_envs=int(learner["num_envs"]),
+                    rollout_steps=int(learner["rollout_steps"]),
+                    comparison_profile=comparison_profile,
+                )
     except ValueError as error:
         raise DevelopmentAggregationError(str(error)) from error
     evaluation_episodes = _integer(
@@ -394,12 +450,29 @@ def _validate_registration(value: Any) -> dict[str, Any]:
                 raise DevelopmentAggregationError(
                     f"quick registration learner.{name} must equal {expected}"
                 )
+    if tier == "development_tuning":
+        try:
+            validate_development_tuning_contract(
+                schema_version=schema_version,
+                comparison_profile=comparison_profile,
+                matrix_kind=matrix_kind,
+                candidate_families=candidate_families,
+                environments={
+                    environment["id"]: environment["total_steps"] for environment in environments
+                },
+                seeds=list(seeds),
+                quick=registration["quick"],
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
     return {
         "schema_version": schema_version,
         "comparison_profile": comparison_profile,
         "tier": tier,
         "matrix_kind": matrix_kind,
         "models": models,
+        "candidate_families": candidate_families,
+        "candidate_specs": candidate_specs,
         "environments": tuple(environment_ids),
         "budgets": {environment["id"]: environment["total_steps"] for environment in environments},
         "seeds": seeds,
@@ -430,7 +503,11 @@ def _validate_manifest(
     registration: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], dict[str, Any]]]:
     manifest = _mapping(value, field="manifest")
-    _exact_keys(manifest, _MANIFEST_KEYS, field="manifest")
+    _exact_keys(
+        manifest,
+        _MANIFEST_KEYS_V3 if registration["schema_version"] == 3 else _MANIFEST_KEYS,
+        field="manifest",
+    )
     if (
         manifest["schema_version"] != registration["schema_version"]
         or manifest["status"] != "frozen"
@@ -456,6 +533,13 @@ def _validate_manifest(
         or matrix_kind != registration["matrix_kind"]
     ):
         raise DevelopmentAggregationError("manifest identity drifts from registration")
+    if registration["schema_version"] == 3:
+        try:
+            manifest_families = normalize_candidate_families(manifest["candidate_families"])
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
+        if manifest_families != registration["candidate_families"]:
+            raise DevelopmentAggregationError("manifest candidate families drift from registration")
     provenance = _validate_provenance(manifest["provenance"], field="manifest.provenance")
     raw_cells = manifest["cells"]
     if not isinstance(raw_cells, list) or not raw_cells:
@@ -472,7 +556,11 @@ def _validate_manifest(
     for index, raw_cell in enumerate(raw_cells):
         field = f"manifest.cells[{index}]"
         cell = _mapping(raw_cell, field=field)
-        _exact_keys(cell, _CELL_KEYS, field=field)
+        _exact_keys(
+            cell,
+            _CELL_KEYS_V3 if registration["schema_version"] == 3 else _CELL_KEYS,
+            field=field,
+        )
         identity = (
             _string(cell["environment"], field=f"{field}.environment"),
             _string(cell["model"], field=f"{field}.model"),
@@ -493,16 +581,40 @@ def _validate_manifest(
             raise DevelopmentAggregationError("manifest cell IDs and paths must be unique")
         seen_ids.add(cell_id)
         seen_paths.add(path)
+        candidate_metadata: dict[str, str] = {}
+        if registration["schema_version"] == 3:
+            expected_candidate = registration["candidate_specs"][identity[1]]
+            model_family = _string(
+                cell["model_family"],
+                field=f"{field}.model_family",
+            )
+            implementation_model = _string(
+                cell["implementation_model"],
+                field=f"{field}.implementation_model",
+            )
+            if (
+                model_family != expected_candidate["model_family"]
+                or implementation_model != expected_candidate["implementation_model"]
+            ):
+                raise DevelopmentAggregationError(
+                    f"{field} candidate identity drifts from registration"
+                )
+            candidate_metadata = {
+                "model_family": model_family,
+                "implementation_model": implementation_model,
+            }
         cells[identity] = {
             "cell_id": cell_id,
             "configuration_sha256": configuration_sha256,
             "artifact_path": path,
             "artifact_relative_path": PurePosixPath(cell["artifact_path"]).as_posix(),
+            **candidate_metadata,
         }
     missing = sorted(expected_identities - set(cells))
     if missing or len(cells) != len(expected_identities):
         raise DevelopmentAggregationError(f"manifest is missing Cartesian cells: {missing}")
     return {
+        "schema_version": manifest["schema_version"],
         "manifest_sha256": manifest_sha256,
         "provenance": provenance,
     }, cells
@@ -536,7 +648,12 @@ def _validate_configuration(
         raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
     if configuration["schema_version"] != registration["schema_version"]:
         raise DevelopmentAggregationError(f"{field}.schema_version must match the registration")
-    if registration["schema_version"] == 2:
+    if registration["schema_version"] == 3:
+        required.update({"candidate_id", "model_family", "implementation_model"})
+        missing = sorted(required - set(configuration))
+        if missing:
+            raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
+    if registration["schema_version"] in {2, 3}:
         for name in (
             "comparison_profile",
             "requested_environment_steps",
@@ -557,6 +674,16 @@ def _validate_configuration(
     )
     if configured_identity != identity:
         raise DevelopmentAggregationError(f"{field} identity does not match its artifact")
+    if registration["schema_version"] == 3:
+        candidate = registration["candidate_specs"][identity[1]]
+        if (
+            configuration["candidate_id"] != identity[1]
+            or configuration["model_family"] != candidate["model_family"]
+            or configuration["implementation_model"] != candidate["implementation_model"]
+        ):
+            raise DevelopmentAggregationError(
+                f"{field} candidate identity drifts from registration"
+            )
     environment = identity[0]
     expected_source = expected_environment_source(environment)
     source_frozen = "environment_source" in configuration
@@ -597,7 +724,7 @@ def _validate_configuration(
         "update_epochs",
         "learning_rate",
     )
-    if registration["schema_version"] == 2:
+    if registration["schema_version"] in {2, 3}:
         learner_fields += (
             "num_minibatches",
             "gae_lambda",
@@ -608,7 +735,12 @@ def _validate_configuration(
         if configured_name not in ppo:
             raise DevelopmentAggregationError(f"{field}.ppo is missing {configured_name}")
         configured = ppo[configured_name]
-        expected = registration["learner"][configured_name]
+        expected_learner = (
+            registration["candidate_specs"][identity[1]]["learner"]
+            if registration["schema_version"] == 3
+            else registration["learner"]
+        )
+        expected = expected_learner[configured_name]
         if configured != expected:
             raise DevelopmentAggregationError(
                 f"{field}.ppo.{configured_name} drifts from registration"
@@ -616,19 +748,20 @@ def _validate_configuration(
     try:
         expected_realized_steps = realized_environment_steps(
             total_steps,
-            num_envs=int(registration["learner"]["num_envs"]),
-            rollout_steps=int(registration["learner"]["rollout_steps"]),
+            num_envs=int(expected_learner["num_envs"]),
+            rollout_steps=int(expected_learner["rollout_steps"]),
             comparison_profile=registration["comparison_profile"],
         )
     except ValueError as error:  # pragma: no cover - registration validates first
         raise DevelopmentAggregationError(str(error)) from error
-    if registration["schema_version"] == 2 and ppo.get("step_budget_mode") != step_budget_mode(
-        registration["comparison_profile"]
-    ):
+    if registration["schema_version"] in {
+        2,
+        3,
+    } and ppo.get("step_budget_mode") != step_budget_mode(registration["comparison_profile"]):
         raise DevelopmentAggregationError(
             f"{field}.ppo.step_budget_mode drifts from comparison_profile"
         )
-    if registration["schema_version"] == 2:
+    if registration["schema_version"] in {2, 3}:
         requested_steps = _integer(
             configuration["requested_environment_steps"],
             field=f"{field}.requested_environment_steps",
@@ -799,11 +932,12 @@ def _validate_evaluation(
 
 def _validate_history(
     artifact: Mapping[str, Any], *, field: str, expected_final_steps: int
-) -> tuple[int, ...]:
+) -> tuple[tuple[int, ...], tuple[float | None, ...]]:
     history = artifact.get("training_history")
     if not isinstance(history, list) or not history:
         raise DevelopmentAggregationError(f"{field}.training_history must not be empty")
     steps: list[int] = []
+    returns: list[float | None] = []
     return_available = False
     for index, raw_point in enumerate(history):
         point_field = f"{field}.training_history[{index}]"
@@ -831,8 +965,9 @@ def _validate_history(
                 raise DevelopmentAggregationError(
                     f"{point_field}.mean_recent_return disappeared after becoming available"
                 )
+            returns.append(None)
         else:
-            _number(recent_return, field=f"{point_field}.mean_recent_return")
+            returns.append(_number(recent_return, field=f"{point_field}.mean_recent_return"))
             return_available = True
     if any(right <= left for left, right in zip(steps, steps[1:])):
         raise DevelopmentAggregationError(
@@ -842,7 +977,7 @@ def _validate_history(
         raise DevelopmentAggregationError(
             f"{field}.training_history final step does not match frozen total_steps"
         )
-    return tuple(steps)
+    return tuple(steps), tuple(returns)
 
 
 def _validate_final_training_metrics(artifact: Mapping[str, Any], *, field: str) -> None:
@@ -895,7 +1030,18 @@ def _validate_artifact(
     missing = sorted(required - set(artifact))
     if missing:
         raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
-    expected_artifact_schema = 5 if registration["schema_version"] == 2 else 4
+    if registration["schema_version"] == 3:
+        required.update({"candidate_id", "model_family", "implementation_model"})
+        missing = sorted(required - set(artifact))
+        if missing:
+            raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
+    expected_artifact_schema = (
+        6
+        if registration["schema_version"] == 3
+        else 5
+        if registration["schema_version"] == 2
+        else 4
+    )
     if artifact["schema_version"] != expected_artifact_schema:
         raise DevelopmentAggregationError(
             f"{field}.schema_version must equal current schema {expected_artifact_schema}"
@@ -931,6 +1077,19 @@ def _validate_artifact(
     )
     if artifact_identity != identity:
         raise DevelopmentAggregationError(f"{field} identity drifted from manifest")
+    if registration["schema_version"] == 3:
+        candidate = registration["candidate_specs"][model]
+        if (
+            artifact["candidate_id"] != model
+            or artifact["model_family"] != candidate["model_family"]
+            or artifact["implementation_model"] != candidate["implementation_model"]
+            or artifact["candidate_id"] != configuration["candidate_id"]
+            or artifact["model_family"] != configuration["model_family"]
+            or artifact["implementation_model"] != configuration["implementation_model"]
+        ):
+            raise DevelopmentAggregationError(
+                f"{field} candidate identity drifts from frozen configuration"
+            )
     artifact_provenance = _validate_provenance(artifact["provenance"], field=f"{field}.provenance")
     if artifact_provenance != manifest["provenance"]:
         raise DevelopmentAggregationError(f"{field}.provenance drifted from manifest")
@@ -988,7 +1147,7 @@ def _validate_artifact(
         raise DevelopmentAggregationError(
             f"{field}.actual_environment_steps does not match frozen total_steps"
         )
-    if registration["schema_version"] == 2:
+    if registration["schema_version"] in {2, 3}:
         for name in (
             "comparison_profile",
             "requested_environment_steps",
@@ -1063,16 +1222,31 @@ def _validate_artifact(
         != expected_transitions
     ):
         raise DevelopmentAggregationError(f"{field}.actual_evaluation_transitions is inconsistent")
-    steps = _validate_history(artifact, field=field, expected_final_steps=total_steps)
+    steps, curve_returns = _validate_history(
+        artifact,
+        field=field,
+        expected_final_steps=total_steps,
+    )
     _validate_final_training_metrics(artifact, field=field)
     return {
         "evaluation": evaluation,
         "steps": steps,
+        "curve_returns": curve_returns,
         "parameter_match": parameter_match,
         "environment_source_frozen": (
             frozen_contract["environment_source_frozen"] and artifact_source_frozen
         ),
         "parameter_match_frozen": frozen_contract["parameter_match_frozen"],
+        "model_family": (
+            registration["candidate_specs"][model]["model_family"]
+            if registration["schema_version"] == 3
+            else None
+        ),
+        "implementation_model": (
+            registration["candidate_specs"][model]["implementation_model"]
+            if registration["schema_version"] == 3
+            else model
+        ),
     }
 
 
@@ -1137,15 +1311,32 @@ def _summary(values: Sequence[float], *, stream: str) -> dict[str, Any]:
     }
 
 
+def _trapezoid_by_step(values: Sequence[float], steps: Sequence[int]) -> float:
+    if len(values) != len(steps) or len(values) < 2:
+        raise DevelopmentAggregationError(
+            "learning-curve AUC requires at least two aligned observations"
+        )
+    y = np.asarray(values, dtype=np.float64)
+    x = np.asarray(steps, dtype=np.float64)
+    if not np.all(np.isfinite(y)) or not np.all(np.isfinite(x)):
+        raise DevelopmentAggregationError("learning-curve AUC requires finite observations")
+    if np.any(x[1:] <= x[:-1]):
+        raise DevelopmentAggregationError(
+            "learning-curve AUC requires strictly increasing environment steps"
+        )
+    return float(np.sum((x[1:] - x[:-1]) * (y[1:] + y[:-1]) * 0.5))
+
+
 def _validate_completion_index(
     root: Path,
     *,
     manifest_sha256: str,
+    manifest_schema_version: int,
     cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
-) -> bool:
+) -> tuple[bool, tuple[Path, ...]]:
     path = root / "completion_index.json"
     if not path.exists():
-        return False
+        return False, ()
     index = _mapping(_load_json(path, field="completion index"), field="completion_index")
     _exact_keys(
         index,
@@ -1172,17 +1363,23 @@ def _validate_completion_index(
     ):
         raise DevelopmentAggregationError("completion_index has an incomplete cell set")
     indexed: set[tuple[str, str, int]] = set()
+    tuning_log_paths: set[Path] = set()
     for item_index, raw_item in enumerate(index["cells"]):
         field = f"completion_index.cells[{item_index}]"
         item = _mapping(raw_item, field=field)
-        artifact_only_fields = _CELL_KEYS | {"artifact_sha256"}
+        cell_keys = _CELL_KEYS_V3 if manifest_schema_version == 3 else _CELL_KEYS
+        artifact_only_fields = cell_keys | {"artifact_sha256"}
         artifact_and_log_fields = artifact_only_fields | {"log_path", "log_sha256"}
-        if frozenset(item) not in {
+        supported_fields = {
             frozenset(artifact_only_fields),
             frozenset(artifact_and_log_fields),
-        }:
+        }
+        if manifest_schema_version == 3:
+            supported_fields = {frozenset(artifact_and_log_fields)}
+        if frozenset(item) not in supported_fields:
             raise DevelopmentAggregationError(
-                f"{field} has wrong fields for a supported completion-index schema"
+                f"{field} has wrong fields for a supported completion-index "
+                "schema; schema v3 requires log_path and log_sha256"
             )
         identity = (
             _string(item["environment"], field=f"{field}.environment"),
@@ -1199,17 +1396,31 @@ def _validate_completion_index(
             or item["artifact_path"] != expected["artifact_relative_path"]
         ):
             raise DevelopmentAggregationError(f"{field} drifts from frozen manifest")
+        if manifest_schema_version == 3 and (
+            item["model_family"] != expected["model_family"]
+            or item["implementation_model"] != expected["implementation_model"]
+        ):
+            raise DevelopmentAggregationError(
+                f"{field} candidate identity drifts from frozen manifest"
+            )
         artifact_hash = _sha256(item["artifact_sha256"], field=f"{field}.artifact_sha256")
         if sha256_file(expected["artifact_path"]) != artifact_hash:
             raise DevelopmentAggregationError(f"{field}.artifact_sha256 is incorrect")
         if "log_path" in item:
             log_path = _artifact_path(root, item["log_path"], field=f"{field}.log_path")
+            if manifest_schema_version == 3:
+                expected_log_path = expected["artifact_path"].with_suffix(".log")
+                if log_path != expected_log_path or log_path in tuning_log_paths:
+                    raise DevelopmentAggregationError(
+                        f"{field}.log_path does not match its immutable cell log identity"
+                    )
+                tuning_log_paths.add(log_path)
             log_hash = _sha256(item["log_sha256"], field=f"{field}.log_sha256")
             if sha256_file(log_path) != log_hash:
                 raise DevelopmentAggregationError(f"{field}.log_sha256 is incorrect")
     if len(indexed) != expected_count:
         raise DevelopmentAggregationError("completion_index is missing cells")
-    return True
+    return True, tuple(sorted(tuning_log_paths, key=lambda item: item.as_posix().encode("utf-8")))
 
 
 def _validate_checksums(
@@ -1244,7 +1455,7 @@ def _validate_checksums(
 
 
 def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
-    """Validate and aggregate one complete frozen smoke or pilot matrix."""
+    """Validate and aggregate one complete frozen development matrix."""
 
     root = Path(output_root).resolve()
     if not root.is_dir():
@@ -1277,8 +1488,11 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                     )
                 records[identity] = record
 
-    completion_validated = _validate_completion_index(
-        root, manifest_sha256=manifest["manifest_sha256"], cells=cells
+    completion_validated, tuning_log_paths = _validate_completion_index(
+        root,
+        manifest_sha256=manifest["manifest_sha256"],
+        manifest_schema_version=manifest["schema_version"],
+        cells=cells,
     )
     required_checksum_paths = [
         registration_path.resolve(),
@@ -1287,7 +1501,77 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
     ]
     if completion_validated:
         required_checksum_paths.append((root / "completion_index.json").resolve())
+        required_checksum_paths.extend(tuning_log_paths)
     checksums_validated = _validate_checksums(root, required_paths=required_checksum_paths)
+    if registration["tier"] == "development_tuning":
+        if not completion_validated or not checksums_validated:
+            raise DevelopmentAggregationError(
+                "development_tuning requires validated completion and checksum indexes"
+            )
+        if not all(
+            record["environment_source_frozen"] and record["parameter_match_frozen"]
+            for record in records.values()
+        ):
+            raise DevelopmentAggregationError(
+                "development_tuning requires frozen environment source and "
+                "parameter-match contracts in every cell"
+            )
+
+    curve_start_by_environment: dict[str, int] = {}
+    environment_contracts: list[dict[str, Any]] = []
+    if registration["tier"] == "development_tuning":
+        for environment in registration["environments"]:
+            first_finite_indices: list[int] = []
+            for model in registration["models"]:
+                for seed in registration["seeds"]:
+                    identity = (environment, model, seed)
+                    first_finite = next(
+                        (
+                            index
+                            for index, value in enumerate(records[identity]["curve_returns"])
+                            if value is not None
+                        ),
+                        None,
+                    )
+                    if first_finite is None:
+                        raise DevelopmentAggregationError(
+                            "development_tuning has no shared finite learning-curve "
+                            f"suffix for environment {environment!r}: "
+                            f"cell {identity!r} has no finite return"
+                        )
+                    first_finite_indices.append(first_finite)
+            curve_start_index = max(first_finite_indices)
+            full_grid = step_grids[environment]
+            retained_grid = full_grid[curve_start_index:]
+            if len(retained_grid) < 2:
+                raise DevelopmentAggregationError(
+                    "development_tuning requires at least two shared finite "
+                    f"learning-curve points for environment {environment!r}"
+                )
+            curve_start_by_environment[environment] = curve_start_index
+            environment_contracts.append(
+                {
+                    "environment": environment,
+                    "model_family_count": len(registration["candidate_families"]),
+                    "candidate_count_per_family": len(
+                        registration["candidate_families"][0]["candidates"]
+                    ),
+                    "total_candidate_count": len(registration["models"]),
+                    "seed_count_per_candidate": len(registration["seeds"]),
+                    "candidate_seed_cardinality_equal": True,
+                    "candidate_cardinality_equal_across_families": True,
+                    "training_curve": {
+                        "full_environment_step_grid": list(full_grid),
+                        "curve_start_step": retained_grid[0],
+                        "curve_end_step": retained_grid[-1],
+                        "excluded_prefix_length": curve_start_index,
+                        "retained_environment_step_grid": list(retained_grid),
+                        "integration_width_environment_steps": (
+                            retained_grid[-1] - retained_grid[0]
+                        ),
+                    },
+                }
+            )
 
     groups: list[dict[str, Any]] = []
     for environment in registration["environments"]:
@@ -1307,17 +1591,115 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                         "parameter_match": record["parameter_match"],
                     }
                 )
-            groups.append(
-                {
-                    "environment": environment,
-                    "model": model,
-                    "seeds": list(registration["seeds"]),
-                    "raw_seed_values": raw_seed_values,
-                    "final_seed_mean_return": _summary(
-                        seed_means, stream=f"development:{environment}:{model}"
+            group = {
+                "environment": environment,
+                "model": model,
+                "seeds": list(registration["seeds"]),
+                "raw_seed_values": raw_seed_values,
+                "final_seed_mean_return": _summary(
+                    seed_means, stream=f"development:{environment}:{model}"
+                ),
+            }
+            if registration["tier"] == "development_tuning":
+                candidate = registration["candidate_specs"][model]
+                group.update(
+                    {
+                        "candidate_id": model,
+                        "model_family": candidate["model_family"],
+                        "implementation_model": candidate["implementation_model"],
+                        "learner": candidate["learner"],
+                    }
+                )
+                curve_start_index = curve_start_by_environment[environment]
+                retained_steps = step_grids[environment][curve_start_index:]
+                width = retained_steps[-1] - retained_steps[0]
+                curve_rows = [
+                    records[(environment, model, seed)]["curve_returns"][curve_start_index:]
+                    for seed in registration["seeds"]
+                ]
+                curve_matrix = np.asarray(curve_rows, dtype=np.float64)
+                auc_values = [_trapezoid_by_step(row, retained_steps) for row in curve_matrix]
+                mean_return_values = [value / width for value in auc_values]
+                group["training_curve"] = {
+                    "environment_steps": list(retained_steps),
+                    "raw_seed_returns": [
+                        {
+                            "seed": seed,
+                            "mean_recent_return": [float(value) for value in row],
+                            "auc_return_step": auc,
+                            "auc_mean_return": auc_mean_return,
+                        }
+                        for seed, row, auc, auc_mean_return in zip(
+                            registration["seeds"],
+                            curve_matrix,
+                            auc_values,
+                            mean_return_values,
+                        )
+                    ],
+                    "mean_return_by_step": [
+                        float(value) for value in np.mean(curve_matrix, axis=0)
+                    ],
+                    "median_return_by_step": [
+                        float(value) for value in np.median(curve_matrix, axis=0)
+                    ],
+                    "iqm_return_by_step": [
+                        interquartile_mean(curve_matrix[:, index])
+                        for index in range(curve_matrix.shape[1])
+                    ],
+                    "auc_return_step": _summary(
+                        auc_values,
+                        stream=f"development-tuning-auc:{environment}:{model}",
+                    ),
+                    "auc_mean_return": _summary(
+                        mean_return_values,
+                        stream=f"development-tuning-auc-mean:{environment}:{model}",
                     ),
                 }
-            )
+            groups.append(group)
+
+    candidate_selection: list[dict[str, Any]] = []
+    if registration["tier"] == "development_tuning":
+        for environment in registration["environments"]:
+            for family in registration["candidate_families"]:
+                family_candidate_ids = {
+                    candidate["candidate_id"] for candidate in family["candidates"]
+                }
+                candidates = []
+                for group in groups:
+                    if (
+                        group["environment"] != environment
+                        or group["candidate_id"] not in family_candidate_ids
+                    ):
+                        continue
+                    score = group["training_curve"]["auc_mean_return"]["mean"]["estimate"]
+                    candidates.append(
+                        {
+                            "candidate_id": group["candidate_id"],
+                            "selection_score": score,
+                        }
+                    )
+                ranked = sorted(
+                    candidates,
+                    key=lambda candidate: (
+                        -candidate["selection_score"],
+                        candidate["candidate_id"],
+                    ),
+                )
+                candidate_selection.append(
+                    {
+                        "environment": environment,
+                        "model_family": family["family_id"],
+                        "implementation_model": family["implementation_model"],
+                        "metric": "mean_seed_auc_mean_return",
+                        "direction": "higher_is_better",
+                        "tie_breaker": "ascending_candidate_id",
+                        "winner_candidate_id": ranked[0]["candidate_id"],
+                        "ranking": [
+                            {"rank": rank, **candidate}
+                            for rank, candidate in enumerate(ranked, start=1)
+                        ],
+                    }
+                )
 
     paired: list[dict[str, Any]] = []
     if "arcmind" in registration["models"]:
@@ -1356,9 +1738,9 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                     }
                 )
 
-    return {
+    result = {
         "schema_version": 1,
-        "status": f"development_{registration['tier']}_aggregate_not_for_paper",
+        "status": _AGGREGATE_STATUS[registration["tier"]],
         "evidence_tier": registration["tier"],
         "registration_sha256": registration_sha256,
         "matrix_manifest_sha256": manifest["manifest_sha256"],
@@ -1396,6 +1778,37 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
         "groups": groups,
         "paired_differences_against_arcmind": paired,
     }
+    if registration["tier"] == "development_tuning":
+        result.update(
+            {
+                "candidate_families": [
+                    {
+                        "family_id": family["family_id"],
+                        "implementation_model": family["implementation_model"],
+                        "candidate_ids": [
+                            candidate["candidate_id"] for candidate in family["candidates"]
+                        ],
+                    }
+                    for family in registration["candidate_families"]
+                ],
+                "selection_eligibility": {
+                    "eligible_for_hyperparameter_selection": True,
+                    "eligible_for_architecture_selection": False,
+                    "eligible_for_checkpoint_selection": False,
+                    "eligible_for_registered_final_evidence": False,
+                    "eligible_for_paper_performance_claims": False,
+                    "selection_scope": "candidate_within_model_family_and_environment",
+                    "selection_metric": "mean_seed_auc_mean_return",
+                },
+                "curve_integration": (
+                    "Trapezoidal mean recent return by environment step over the "
+                    "shared complete-case suffix, with no extrapolation."
+                ),
+                "environment_contracts": environment_contracts,
+                "candidate_selection": candidate_selection,
+            }
+        )
+    return result
 
 
 def aggregate_development(output_root: str | Path, output_path: str | Path) -> dict[str, Any]:

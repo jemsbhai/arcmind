@@ -14,6 +14,7 @@ from benchmarks.pobax.registered_artifacts import (
     canonical_json_sha256,
 )
 from benchmarks.pobax.run_matrix import (
+    _cell_namespace,
     _command_for_cell,
     _load_matching_artifact,
     _load_registration,
@@ -64,6 +65,42 @@ def _registration_v2(
             "entropy_coefficient": 0.01,
             "anneal_learning_rate": True,
         },
+    )
+    return registration
+
+
+def _registration_v3() -> dict[str, object]:
+    registration = _registration_v2()
+    learner = registration.pop("learner")
+    registration.pop("models")
+    registration.update(
+        schema_version=3,
+        evidence_tier="development_tuning",
+        matrix_kind="hyperparameter_selection",
+        seeds=[1103, 2207, 3301, 4409, 5519],
+        environments=[{"id": "tmaze_10", "total_steps": 1_000_000}],
+        candidate_families=[
+            {
+                "family_id": family,
+                "implementation_model": implementation_model,
+                "candidates": [
+                    {
+                        "candidate_id": f"{family}.lr_{label}",
+                        "learner": {
+                            **learner,
+                            "num_envs": 8,
+                            "rollout_steps": 125,
+                            "learning_rate": learning_rate,
+                        },
+                    }
+                    for label, learning_rate in (("low", 0.00025), ("high", 0.001))
+                ],
+            }
+            for family, implementation_model in (
+                ("ordered_memory", "arcmind"),
+                ("recurrent", "gru"),
+            )
+        ],
     )
     return registration
 
@@ -313,6 +350,119 @@ def test_registered_final_requires_full_seed_cardinality(tmp_path):
         _load_registration(path)
 
 
+def test_development_tuning_registration_requires_published_selection_contract(
+    tmp_path,
+):
+    registration = _registration_v3()
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    assert _load_registration(path) == registration
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value.update(comparison_profile="pobax_author_semantics"),
+            "arcmind_shared_comparison",
+        ),
+        (
+            lambda value: value.update(seeds=[1103, 2207, 3301]),
+            "published tuning-seed count",
+        ),
+        (
+            lambda value: value["environments"][0].update(total_steps=250_000),
+            "published task budget",
+        ),
+        (
+            lambda value: value["candidate_families"][0].update(
+                candidates=value["candidate_families"][0]["candidates"][:1]
+            ),
+            "at least two candidates",
+        ),
+    ],
+)
+def test_development_tuning_registration_fails_closed(
+    tmp_path,
+    mutation,
+    message,
+):
+    registration = _registration_v3()
+    mutation(registration)
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _load_registration(path)
+
+
+def _duplicate_candidate_learner(registration):
+    candidates = registration["candidate_families"][0]["candidates"]
+    candidates[1]["learner"] = dict(candidates[0]["learner"])
+
+
+def _unequal_candidate_cardinality(registration):
+    family = registration["candidate_families"][0]
+    candidate = dict(family["candidates"][0])
+    candidate["candidate_id"] = f"{family['family_id']}.lr_extra"
+    candidate["learner"] = {
+        **candidate["learner"],
+        "learning_rate": 0.002,
+    }
+    family["candidates"].append(candidate)
+
+
+def _drift_structural_learner(registration):
+    learner = registration["candidate_families"][1]["candidates"][1]["learner"]
+    learner.update(num_envs=4, rollout_steps=250)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["candidate_families"][1].update(family_id="ordered_memory"),
+            "unique portable identifier",
+        ),
+        (
+            lambda value: value["candidate_families"][0]["candidates"][1].update(
+                candidate_id="ordered_memory.lr_low"
+            ),
+            "globally unique",
+        ),
+        (
+            lambda value: value["candidate_families"][1].update(implementation_model="arcmind"),
+            "unique portable model identifier",
+        ),
+        (
+            _duplicate_candidate_learner,
+            "duplicate normalized learner",
+        ),
+        (
+            _unequal_candidate_cardinality,
+            "equal candidate cardinality",
+        ),
+        (
+            _drift_structural_learner,
+            "identical num_envs",
+        ),
+    ],
+)
+def test_development_tuning_candidate_families_fail_closed(
+    tmp_path,
+    mutation,
+    message,
+):
+    registration = _registration_v3()
+    mutation(registration)
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _load_registration(path)
+
+
 def test_upper_reference_registration_has_an_explicit_role(tmp_path):
     registration = _registration()
     registration.update(
@@ -403,6 +553,71 @@ def test_existing_artifact_must_match_identity_and_provenance(tmp_path):
         )
 
 
+def test_existing_tuning_artifact_must_match_candidate_identity(tmp_path):
+    path = tmp_path / "cell.json"
+    provenance = {
+        "git": {"commit": "a" * 40, "dirty": False, "diff_sha256": None},
+        "dependency_lock_sha256": "b" * 64,
+        "pobax_commit": "c" * 40,
+        "navix_commit": "d" * 40,
+        "runtime_contract": {
+            "python": {"implementation": "CPython", "version": "3.12.3"},
+            "packages": {"jax": "0.6.2", "jaxlib": "0.6.2"},
+            "jax_backend": "gpu",
+            "jax_enable_x64": False,
+            "devices": [{"platform": "gpu", "device_kind": "Test GPU"}],
+        },
+    }
+    configuration = {
+        "environment": "tmaze_10",
+        "model": "ordered_memory.lr_low",
+        "candidate_id": "ordered_memory.lr_low",
+        "model_family": "ordered_memory",
+        "implementation_model": "arcmind",
+        "seed": 1103,
+    }
+    configuration_sha256 = canonical_json_sha256(configuration)
+    artifact = {
+        "schema_version": 6,
+        "status": "development_tuning_not_for_paper",
+        "environment": "tmaze_10",
+        "model": "ordered_memory.lr_low",
+        "candidate_id": "ordered_memory.lr_low",
+        "model_family": "ordered_memory",
+        "implementation_model": "arcmind",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "configuration": configuration,
+        "matrix_manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+    }
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    arguments = {
+        "expected_status": "development_tuning_not_for_paper",
+        "environment": "tmaze_10",
+        "model": "ordered_memory.lr_low",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+    }
+
+    assert _load_matching_artifact(path, **arguments) == artifact
+
+    artifact["schema_version"] = 5
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="tuning cell.*wrong schema"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["schema_version"] = 6
+    artifact["model_family"] = "recurrent"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="candidate identity"):
+        _load_matching_artifact(path, **arguments)
+
+
 def test_cell_command_carries_frozen_identity_and_safety_flags(tmp_path):
     args = Namespace(
         environment="tmaze_10",
@@ -439,6 +654,61 @@ def test_cell_command_carries_frozen_identity_and_safety_flags(tmp_path):
     assert command[command.index("--gae-lambda") + 1] == "0.95"
     assert "--anneal-learning-rate" in command
     assert command[command.index("--comparison-profile") + 1] == "arcmind_shared_comparison"
+
+
+def test_tuning_cell_command_carries_family_and_candidate_identity(tmp_path):
+    args = Namespace(
+        environment="tmaze_10",
+        model="arcmind",
+        candidate_id="ordered_memory.lr_low",
+        model_family="ordered_memory",
+        seed=1103,
+        total_steps=1_000_000,
+        num_envs=8,
+        rollout_steps=125,
+        update_epochs=4,
+        num_minibatches=4,
+        learning_rate=0.00025,
+        gae_lambda=0.95,
+        entropy_coefficient=0.01,
+        anneal_learning_rate=False,
+        registration_schema_version=3,
+        comparison_profile="arcmind_shared_comparison",
+        evaluation_episodes_per_env=4,
+        evidence_tier="development_tuning",
+        matrix_manifest_sha256="a" * 64,
+        cell_id="b" * 64,
+        output=tmp_path / "cell.json",
+        require_gpu=True,
+        quick=False,
+    )
+
+    command = _command_for_cell(args)
+
+    assert command[command.index("--model") + 1] == "arcmind"
+    assert command[command.index("--candidate-id") + 1] == "ordered_memory.lr_low"
+    assert command[command.index("--model-family") + 1] == "ordered_memory"
+    assert command[command.index("--registration-schema-version") + 1] == "3"
+
+
+def test_tuning_cell_namespace_separates_family_candidate_and_implementation():
+    registration = _registration_v3()
+
+    args = _cell_namespace(
+        registration,
+        environment=registration["environments"][0],
+        model="ordered_memory.lr_high",
+        seed=1103,
+        output=None,
+        manifest_sha256=None,
+        cell_id=None,
+        describe_only=True,
+    )
+
+    assert args.model == "arcmind"
+    assert args.model_family == "ordered_memory"
+    assert args.candidate_id == "ordered_memory.lr_high"
+    assert args.learning_rate == 0.001
 
 
 def test_environment_horizon_and_gamma_uses_source_contract():

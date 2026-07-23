@@ -59,9 +59,20 @@ def _configuration(
     seed: int,
     *,
     tier: str,
+    total_steps: int | None = None,
     schema_version: int = 1,
     comparison_profile: str | None = None,
+    learner: dict[str, Any] | None = None,
+    model_family: str | None = None,
+    implementation_model: str | None = None,
 ) -> dict[str, Any]:
+    budget = ENVIRONMENTS[environment] if total_steps is None else total_steps
+    selected_learner = learner or {
+        "num_envs": 2,
+        "rollout_steps": 2,
+        "update_epochs": 1,
+        "learning_rate": 0.001,
+    }
     configuration = {
         "schema_version": schema_version,
         "evidence_tier": tier,
@@ -75,11 +86,8 @@ def _configuration(
         "arcmind_target_parameter_count": 1_000,
         "parameter_ratio": 1.0,
         "ppo": {
-            "total_steps": ENVIRONMENTS[environment],
-            "num_envs": 2,
-            "rollout_steps": 2,
-            "update_epochs": 1,
-            "learning_rate": 0.001,
+            "total_steps": budget,
+            **selected_learner,
         },
         "evaluation_episodes_per_environment": 2,
         "evaluation_max_episode_steps": 5,
@@ -88,22 +96,27 @@ def _configuration(
         "navix_commit": PROVENANCE["navix_commit"],
         "runtime_contract": deepcopy(PROVENANCE["runtime_contract"]),
     }
-    if schema_version == 2:
-        configuration["ppo"].update(
-            num_minibatches=1,
-            gae_lambda=0.95,
-            entropy_coefficient=0.01,
-            anneal_learning_rate=True,
-            step_budget_mode=(
-                "floor" if comparison_profile == "pobax_author_semantics" else "exact"
-            ),
+    if schema_version in {2, 3}:
+        configuration["ppo"]["step_budget_mode"] = (
+            "floor" if comparison_profile == "pobax_author_semantics" else "exact"
         )
-        requested_steps = ENVIRONMENTS[environment]
-        realized_steps = requested_steps // 4 * 4
+        requested_steps = budget
+        realized_steps = (
+            requested_steps
+            // (int(selected_learner["num_envs"]) * int(selected_learner["rollout_steps"]))
+            * int(selected_learner["num_envs"])
+            * int(selected_learner["rollout_steps"])
+        )
         configuration.update(
             comparison_profile=comparison_profile,
             requested_environment_steps=requested_steps,
             realized_environment_steps=realized_steps,
+        )
+    if schema_version == 3:
+        configuration.update(
+            candidate_id=model,
+            model_family=model_family,
+            implementation_model=implementation_model,
         )
     return configuration
 
@@ -131,31 +144,44 @@ def _write_matrix(
     seeds: list[int] | None = None,
     schema_version: int = 1,
     comparison_profile: str | None = None,
+    candidate_families: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], Path]]:
-    selected_models = models or MODELS
+    candidate_index = {
+        candidate["candidate_id"]: {
+            **candidate,
+            "model_family": family["family_id"],
+            "implementation_model": family["implementation_model"],
+        }
+        for family in (candidate_families or [])
+        for candidate in family["candidates"]
+    }
+    selected_models = list(candidate_index) if schema_version == 3 else models or MODELS
     selected_environments = environments or ENVIRONMENTS
     selected_seeds = seeds or SEEDS
     registration = {
         "schema_version": schema_version,
         "status": "frozen",
         "evidence_tier": tier,
-        "matrix_kind": "primary_comparison",
-        "models": selected_models,
+        "matrix_kind": (
+            "hyperparameter_selection" if schema_version == 3 else "primary_comparison"
+        ),
         "environments": [
             {"id": environment, "total_steps": budget}
             for environment, budget in selected_environments.items()
         ],
         "seeds": selected_seeds,
-        "learner": {
-            "num_envs": 2,
-            "rollout_steps": 2,
-            "update_epochs": 1,
-            "learning_rate": 0.001,
-        },
         "evaluation_episodes_per_env": 2,
         "require_gpu": True,
         "quick": False,
     }
+    if schema_version in {1, 2}:
+        registration["models"] = selected_models
+        registration["learner"] = {
+            "num_envs": 2,
+            "rollout_steps": 2,
+            "update_epochs": 1,
+            "learning_rate": 0.001,
+        }
     if schema_version == 2:
         registration["comparison_profile"] = comparison_profile
         registration["learner"].update(
@@ -164,6 +190,9 @@ def _write_matrix(
             entropy_coefficient=0.01,
             anneal_learning_rate=True,
         )
+    if schema_version == 3:
+        registration["comparison_profile"] = comparison_profile
+        registration["candidate_families"] = candidate_families
     atomic_write_json(root / "registration.json", registration)
     cells = []
     paths: dict[tuple[str, str, int], Path] = {}
@@ -176,34 +205,54 @@ def _write_matrix(
                     model,
                     seed,
                     tier=tier,
+                    total_steps=selected_environments[environment],
                     schema_version=schema_version,
                     comparison_profile=comparison_profile,
+                    learner=(
+                        candidate_index[model]["learner"]
+                        if schema_version == 3
+                        else registration["learner"]
+                    ),
+                    model_family=(
+                        candidate_index[model]["model_family"] if schema_version == 3 else None
+                    ),
+                    implementation_model=(
+                        candidate_index[model]["implementation_model"]
+                        if schema_version == 3
+                        else None
+                    ),
                 )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 relative = f"cells/{environment}-{model}-{seed}.json"
-                cells.append(
-                    {
-                        "cell_id": registered_cell_id(
-                            environment, model, seed, configuration_sha256
-                        ),
-                        "environment": environment,
-                        "model": model,
-                        "seed": seed,
-                        "configuration_sha256": configuration_sha256,
-                        "artifact_path": relative,
-                    }
-                )
+                cell = {
+                    "cell_id": registered_cell_id(environment, model, seed, configuration_sha256),
+                    "environment": environment,
+                    "model": model,
+                    "seed": seed,
+                    "configuration_sha256": configuration_sha256,
+                    "artifact_path": relative,
+                }
+                if schema_version == 3:
+                    cell.update(
+                        model_family=candidate_index[model]["model_family"],
+                        implementation_model=candidate_index[model]["implementation_model"],
+                    )
+                cells.append(cell)
                 paths[identity] = root / relative
     manifest: dict[str, Any] = {
         "schema_version": schema_version,
         "status": "frozen",
-        "matrix_kind": "primary_comparison",
+        "matrix_kind": (
+            "hyperparameter_selection" if schema_version == 3 else "primary_comparison"
+        ),
         "models": selected_models,
         "environments": list(selected_environments),
         "seeds": selected_seeds,
         "provenance": deepcopy(PROVENANCE),
         "cells": cells,
     }
+    if schema_version == 3:
+        manifest["candidate_families"] = candidate_families
     manifest["manifest_sha256"] = canonical_json_sha256(manifest)
     atomic_write_json(root / "frozen_manifest.json", manifest)
     for identity, path in paths.items():
@@ -213,14 +262,38 @@ def _write_matrix(
             model,
             seed,
             tier=tier,
+            total_steps=selected_environments[environment],
             schema_version=schema_version,
             comparison_profile=comparison_profile,
+            learner=(
+                candidate_index[model]["learner"]
+                if schema_version == 3
+                else registration["learner"]
+            ),
+            model_family=(candidate_index[model]["model_family"] if schema_version == 3 else None),
+            implementation_model=(
+                candidate_index[model]["implementation_model"] if schema_version == 3 else None
+            ),
         )
         configuration_sha256 = canonical_json_sha256(configuration)
-        value = float(seed + (10 if model == "arcmind" else 0))
+        value = float(
+            seed
+            + (
+                candidate_index[model]["learner"]["learning_rate"] * 100_000
+                + (100 if candidate_index[model]["implementation_model"] == "gru" else 0)
+                if schema_version == 3
+                else 10
+                if model == "arcmind"
+                else 0
+            )
+        )
         artifact = {
-            "schema_version": 5 if schema_version == 2 else 4,
-            "status": f"development_{tier}_not_for_paper",
+            "schema_version": 6 if schema_version == 3 else 5 if schema_version == 2 else 4,
+            "status": (
+                "development_tuning_not_for_paper"
+                if tier == "development_tuning"
+                else f"development_{tier}_not_for_paper"
+            ),
             "matrix_manifest_sha256": manifest["manifest_sha256"],
             "cell_id": registered_cell_id(environment, model, seed, configuration_sha256),
             "configuration_sha256": configuration_sha256,
@@ -256,11 +329,17 @@ def _write_matrix(
                 },
             ],
         }
-        if schema_version == 2:
+        if schema_version == 3:
+            artifact.update(
+                candidate_id=model,
+                model_family=candidate_index[model]["model_family"],
+                implementation_model=candidate_index[model]["implementation_model"],
+            )
+        if schema_version in {2, 3}:
             artifact.update(
                 comparison_profile=comparison_profile,
                 requested_environment_steps=selected_environments[environment],
-                realized_environment_steps=selected_environments[environment] // 4 * 4,
+                realized_environment_steps=configuration["realized_environment_steps"],
             )
         atomic_write_json(path, artifact)
     return manifest, paths
@@ -305,6 +384,76 @@ def _write_integrity_indexes(
     write_checksum_manifest(root)
 
 
+def _write_tuning_matrix(
+    root: Path,
+) -> tuple[dict[str, Any], dict[tuple[str, str, int], Path]]:
+    base_learner = {
+        "num_envs": 2,
+        "rollout_steps": 2,
+        "update_epochs": 1,
+        "num_minibatches": 1,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": True,
+    }
+    candidate_families = [
+        {
+            "family_id": family,
+            "implementation_model": implementation_model,
+            "candidates": [
+                {
+                    "candidate_id": f"{family}.lr_{label}",
+                    "learner": {
+                        **base_learner,
+                        "learning_rate": learning_rate,
+                    },
+                }
+                for label, learning_rate in (("low", 0.001), ("high", 0.002))
+            ],
+        }
+        for family, implementation_model in (
+            ("ordered_memory", "arcmind"),
+            ("recurrent", "gru"),
+        )
+    ]
+    manifest, paths = _write_matrix(
+        root,
+        tier="development_tuning",
+        environments={"tmaze_10": 1_000_000},
+        seeds=[7, 19, 23, 31, 43],
+        schema_version=3,
+        comparison_profile="arcmind_shared_comparison",
+        candidate_families=candidate_families,
+    )
+    for path in paths.values():
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        final_return = artifact["evaluation"]["mean_return"]
+        _rewrite(
+            path,
+            lambda value, final_return=final_return: value.update(
+                training_history=[
+                    {
+                        **OPTIMIZER_METRICS,
+                        "environment_steps": 250_000.0,
+                        "mean_recent_return": None,
+                    },
+                    {
+                        **OPTIMIZER_METRICS,
+                        "environment_steps": 500_000.0,
+                        "mean_recent_return": final_return - 2.0,
+                    },
+                    {
+                        **OPTIMIZER_METRICS,
+                        "environment_steps": 1_000_000.0,
+                        "mean_recent_return": final_return,
+                    },
+                ]
+            ),
+        )
+    _write_integrity_indexes(root, manifest, paths)
+    return manifest, paths
+
+
 def test_complete_matrix_is_deterministic_and_explicitly_not_for_paper(
     tmp_path: Path,
 ) -> None:
@@ -329,6 +478,9 @@ def test_complete_matrix_is_deterministic_and_explicitly_not_for_paper(
     }
     assert len(first["groups"]) == 4
     assert len(first["paired_differences_against_arcmind"]) == 2
+    assert "selection_eligibility" not in first
+    assert "environment_contracts" not in first
+    assert "candidate_selection" not in first
     group = next(
         item
         for item in first["groups"]
@@ -595,6 +747,42 @@ def test_optional_completion_and_checksum_indexes_are_validated(tmp_path: Path) 
         build_development_aggregate(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("schema_version", "comparison_profile"),
+    [(1, None), (2, "arcmind_shared_comparison")],
+)
+def test_legacy_completion_indexes_accept_artifact_only_rows(
+    tmp_path: Path,
+    schema_version: int,
+    comparison_profile: str | None,
+) -> None:
+    manifest, paths = _write_matrix(
+        tmp_path,
+        schema_version=schema_version,
+        comparison_profile=comparison_profile,
+    )
+    _write_integrity_indexes(tmp_path, manifest, paths)
+    completion_path = tmp_path / "completion_index.json"
+
+    def remove_log_identity(value: dict[str, Any]) -> None:
+        for cell in value["cells"]:
+            cell.pop("log_path")
+            cell.pop("log_sha256")
+
+    _rewrite(completion_path, remove_log_identity)
+    for log_path in (tmp_path / "cells").glob("*.log"):
+        log_path.unlink()
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    result = build_development_aggregate(tmp_path)
+
+    assert result["integrity_indexes"] == {
+        "completion_index_present_and_validated": True,
+        "checksums_present_and_validated": True,
+    }
+
+
 def test_schema_v2_development_matrix_validates_explicit_step_accounting(
     tmp_path: Path,
 ) -> None:
@@ -616,3 +804,300 @@ def test_schema_v2_development_matrix_validates_explicit_step_accounting(
     )
     with pytest.raises(DevelopmentAggregationError, match="step accounting"):
         build_development_aggregate(matrix_root)
+
+
+def test_development_tuning_ranks_equal_cardinality_candidates_by_shared_auc(
+    tmp_path: Path,
+) -> None:
+    manifest, paths = _write_tuning_matrix(tmp_path)
+
+    result = build_development_aggregate(tmp_path)
+
+    assert result["status"] == "development_tuning_selection_aggregate_not_for_paper"
+    assert result["evidence_tier"] == "development_tuning"
+    assert result["selection_eligibility"] == {
+        "eligible_for_hyperparameter_selection": True,
+        "eligible_for_architecture_selection": False,
+        "eligible_for_checkpoint_selection": False,
+        "eligible_for_registered_final_evidence": False,
+        "eligible_for_paper_performance_claims": False,
+        "selection_scope": "candidate_within_model_family_and_environment",
+        "selection_metric": "mean_seed_auc_mean_return",
+    }
+    assert result["integrity_indexes"] == {
+        "completion_index_present_and_validated": True,
+        "checksums_present_and_validated": True,
+    }
+    assert result["candidate_families"] == [
+        {
+            "family_id": "ordered_memory",
+            "implementation_model": "arcmind",
+            "candidate_ids": [
+                "ordered_memory.lr_low",
+                "ordered_memory.lr_high",
+            ],
+        },
+        {
+            "family_id": "recurrent",
+            "implementation_model": "gru",
+            "candidate_ids": [
+                "recurrent.lr_low",
+                "recurrent.lr_high",
+            ],
+        },
+    ]
+    contract = result["environment_contracts"][0]
+    assert contract["model_family_count"] == 2
+    assert contract["candidate_count_per_family"] == 2
+    assert contract["total_candidate_count"] == 4
+    assert contract["seed_count_per_candidate"] == 5
+    assert contract["candidate_seed_cardinality_equal"] is True
+    assert contract["candidate_cardinality_equal_across_families"] is True
+    assert contract["training_curve"] == {
+        "full_environment_step_grid": [250_000, 500_000, 1_000_000],
+        "curve_start_step": 500_000,
+        "curve_end_step": 1_000_000,
+        "excluded_prefix_length": 1,
+        "retained_environment_step_grid": [500_000, 1_000_000],
+        "integration_width_environment_steps": 500_000,
+    }
+    assert len(result["candidate_selection"]) == 2
+    assert result["paired_differences_against_arcmind"] == []
+    selections = {
+        selection["model_family"]: selection for selection in result["candidate_selection"]
+    }
+    assert selections["ordered_memory"]["winner_candidate_id"] == "ordered_memory.lr_high"
+    assert selections["recurrent"]["winner_candidate_id"] == "recurrent.lr_high"
+    assert [item["candidate_id"] for item in selections["ordered_memory"]["ranking"]] == [
+        "ordered_memory.lr_high",
+        "ordered_memory.lr_low",
+    ]
+    arcmind = next(
+        group for group in result["groups"] if group["candidate_id"] == "ordered_memory.lr_high"
+    )
+    assert arcmind["model_family"] == "ordered_memory"
+    assert arcmind["implementation_model"] == "arcmind"
+    seed_row = arcmind["training_curve"]["raw_seed_returns"][0]
+    assert seed_row["mean_recent_return"] == [205.0, 207.0]
+    assert seed_row["auc_return_step"] == 103_000_000.0
+    assert seed_row["auc_mean_return"] == 206.0
+    manifest_cell = next(
+        cell
+        for cell in manifest["cells"]
+        if cell["model"] == "ordered_memory.lr_high" and cell["seed"] == 7
+    )
+    assert manifest_cell["model_family"] == "ordered_memory"
+    assert manifest_cell["implementation_model"] == "arcmind"
+    artifact = json.loads(
+        paths[("tmaze_10", "ordered_memory.lr_high", 7)].read_text(encoding="utf-8")
+    )
+    assert artifact["candidate_id"] == "ordered_memory.lr_high"
+    assert artifact["configuration"]["candidate_id"] == "ordered_memory.lr_high"
+    assert artifact["cell_id"] == registered_cell_id(
+        "tmaze_10",
+        "ordered_memory.lr_high",
+        7,
+        artifact["configuration_sha256"],
+    )
+
+
+def _downgrade_tuning_registration(value: dict[str, Any]) -> None:
+    first_learner = value["candidate_families"][0]["candidates"][0]["learner"]
+    value["schema_version"] = 2
+    value["matrix_kind"] = "primary_comparison"
+    value["models"] = ["arcmind", "gru"]
+    value["learner"] = first_learner
+    value.pop("candidate_families")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            _downgrade_tuning_registration,
+            "schema version 3",
+        ),
+        (
+            lambda value: value.update(seeds=[7, 19, 23]),
+            "published tuning-seed count",
+        ),
+        (
+            lambda value: value["environments"][0].update(total_steps=250_000),
+            "published task budget",
+        ),
+        (
+            lambda value: value["candidate_families"][0].update(
+                candidates=value["candidate_families"][0]["candidates"][:1]
+            ),
+            "at least two candidates",
+        ),
+    ],
+)
+def test_development_tuning_registration_contract_fails_closed(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    _write_tuning_matrix(tmp_path)
+    _rewrite(tmp_path / "registration.json", mutation)
+
+    with pytest.raises(DevelopmentAggregationError, match=message):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_requires_integrity_indexes(tmp_path: Path) -> None:
+    _write_tuning_matrix(tmp_path)
+    (tmp_path / "completion_index.json").unlink()
+    (tmp_path / "checksums.sha256").unlink()
+
+    with pytest.raises(
+        DevelopmentAggregationError,
+        match="validated completion and checksum indexes",
+    ):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_requires_two_shared_finite_curve_points(
+    tmp_path: Path,
+) -> None:
+    manifest, paths = _write_tuning_matrix(tmp_path)
+    path = paths[("tmaze_10", "recurrent.lr_low", 7)]
+    _rewrite(
+        path,
+        lambda value: value["training_history"][1].update(mean_recent_return=None),
+    )
+    (tmp_path / "completion_index.json").unlink()
+    (tmp_path / "checksums.sha256").unlink()
+    _write_integrity_indexes(tmp_path, manifest, paths)
+
+    with pytest.raises(
+        DevelopmentAggregationError,
+        match="at least two shared finite learning-curve points",
+    ):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_completion_index_freezes_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    _write_tuning_matrix(tmp_path)
+    completion_path = tmp_path / "completion_index.json"
+    _rewrite(
+        completion_path,
+        lambda value: value["cells"][0].update(model_family="wrong_family"),
+    )
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(
+        DevelopmentAggregationError,
+        match="candidate identity drifts",
+    ):
+        build_development_aggregate(tmp_path)
+
+
+def _remove_completion_log_fields(value: dict[str, Any]) -> None:
+    value["cells"][0].pop("log_path")
+    value["cells"][0].pop("log_sha256")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            _remove_completion_log_fields,
+            "schema v3 requires log_path and log_sha256",
+        ),
+        (
+            lambda value: value["cells"][0].update(log_path=value["cells"][1]["log_path"]),
+            "immutable cell log identity",
+        ),
+        (
+            lambda value: value["cells"][0].update(log_sha256="0" * 64),
+            "log_sha256 is incorrect",
+        ),
+    ],
+)
+def test_development_tuning_completion_logs_fail_closed(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    _write_tuning_matrix(tmp_path)
+    completion_path = tmp_path / "completion_index.json"
+    _rewrite(completion_path, mutation)
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(DevelopmentAggregationError, match=message):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_checksum_inventory_must_cover_logs(
+    tmp_path: Path,
+) -> None:
+    _write_tuning_matrix(tmp_path)
+    checksum_path = tmp_path / "checksums.sha256"
+    retained_lines = [
+        line
+        for line in checksum_path.read_text(encoding="utf-8").splitlines()
+        if ".log" not in line
+    ]
+    checksum_path.write_text("\n".join(retained_lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        DevelopmentAggregationError,
+        match="checksum manifest omits required inputs",
+    ):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_selection_never_uses_final_evaluation_return(
+    tmp_path: Path,
+) -> None:
+    manifest, paths = _write_tuning_matrix(tmp_path)
+    path = paths[("tmaze_10", "ordered_memory.lr_low", 7)]
+    _rewrite(
+        path,
+        lambda value: value.update(evaluation=_evaluation(10_000.0)),
+    )
+    (tmp_path / "completion_index.json").unlink()
+    (tmp_path / "checksums.sha256").unlink()
+    _write_integrity_indexes(tmp_path, manifest, paths)
+
+    result = build_development_aggregate(tmp_path)
+    selection = next(
+        item for item in result["candidate_selection"] if item["model_family"] == "ordered_memory"
+    )
+
+    assert selection["winner_candidate_id"] == "ordered_memory.lr_high"
+
+
+def test_development_tuning_exact_tie_uses_ascending_candidate_id(
+    tmp_path: Path,
+) -> None:
+    manifest, paths = _write_tuning_matrix(tmp_path)
+    for seed in (7, 19, 23, 31, 43):
+        winning_history = json.loads(
+            paths[("tmaze_10", "ordered_memory.lr_high", seed)].read_text(encoding="utf-8")
+        )["training_history"]
+        _rewrite(
+            paths[("tmaze_10", "ordered_memory.lr_low", seed)],
+            lambda value, history=deepcopy(winning_history): value.update(training_history=history),
+        )
+    (tmp_path / "completion_index.json").unlink()
+    (tmp_path / "checksums.sha256").unlink()
+    _write_integrity_indexes(tmp_path, manifest, paths)
+
+    result = build_development_aggregate(tmp_path)
+    selection = next(
+        item for item in result["candidate_selection"] if item["model_family"] == "ordered_memory"
+    )
+
+    assert [item["selection_score"] for item in selection["ranking"]] == [
+        selection["ranking"][0]["selection_score"]
+    ] * 2
+    assert [item["candidate_id"] for item in selection["ranking"]] == [
+        "ordered_memory.lr_high",
+        "ordered_memory.lr_low",
+    ]

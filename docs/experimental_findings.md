@@ -24,6 +24,12 @@ Evidence classes are immutable. A smoke artifact cannot become registered
 evidence after inspection. The experiment must be rerun under the registered
 protocol. A diagnostic result can motivate a registered hypothesis, but it
 cannot select a test seed, test checkpoint, or favorable reporting metric.
+The machine-readable `development_tuning` tier is selection-only diagnostic
+evidence. It may choose one frozen candidate by its predeclared
+learning-curve metric within each model family, but neither its final returns
+nor its AUC values become registered evidence. It cannot rank or remove
+architectures. Each selected candidate must be rerun on the disjoint
+registered-final seed manifest.
 
 ## Unit of record
 
@@ -302,6 +308,62 @@ with each actual experiment.
   requires a machine-verifiable link between the exact immutable manifests.
 - Evidence restriction: these gates establish artifact validity, not policy
   performance.
+
+### F-ENG-007: Tuning evidence requires a separate fail-closed selection path
+
+- Class: `engineering validation`
+- Status: protocol defect found and corrected before registered tuning
+- Date: 2026-07-23
+- Defect: smoke and pilot aggregation preserved development returns but did
+  not define an artifact tier, common curve interval, or immutable eligibility
+  label for hyperparameter selection. Using those outputs informally could
+  mix shortened pilot evidence with full-budget tuning or make a selected
+  development result appear registered.
+- Correction:
+  - add the artifact status `development_tuning_not_for_paper` and aggregate
+    status `development_tuning_selection_aggregate_not_for_paper`;
+  - reserve schema v3 and `matrix_kind: hyperparameter_selection` for tuning,
+    with immutable candidate IDs grouped under unique model-family and
+    implementation-model identities;
+  - require `arcmind_shared_comparison`, exactly one published primary task at
+    its full interaction budget, at least two candidates per family, equal
+    candidate cardinality across families, and the published task-specific
+    tuning-seed count;
+  - require identical `num_envs`, `rollout_steps`, `update_epochs`, and
+    `num_minibatches` across the entire matrix while allowing candidates to
+    vary only learning rate, GAE lambda, entropy coefficient, and
+    learning-rate annealing;
+  - require a complete Cartesian candidate matrix, validated checksum and
+    completion indexes, frozen environment semantics, frozen parameter
+    matching, and identical within-task training-step grids;
+  - require every schema-v3 completion row to identify its immutable cell log
+    and hash, and require the checksum inventory to cover every log;
+  - start every candidate curve at the latest first finite return across all
+    candidate and seed cells, require at least two retained points, integrate
+    by the trapezoidal rule without extrapolation, and divide by the common
+    interval width;
+  - rank candidates separately within each model family by mean seed
+    `auc_mean_return`, with ascending candidate ID as the deterministic
+    exact-tie rule, and never use the tuning aggregate to rank architectures;
+    and
+  - mark the aggregate eligible for hyperparameter selection only, while
+    explicitly setting registered-final and paper-performance eligibility to
+    false.
+- Interpretation: equal candidate and seed cardinality are enforced by the
+  frozen Cartesian matrix rather than inferred after execution. AUC selects
+  one candidate per architecture over a common observed interval and never
+  selects a checkpoint or removes a required baseline.
+- Validation:
+  - the focused registration and development-aggregation suite passed 90 of
+    90 tests in the pinned Ubuntu environment;
+  - the complete POBAX suite passed 269 of 269 tests in the same environment;
+    and
+  - rebuilding the legacy SHM repair aggregate produced 7,420 bytes identical
+    to the existing artifact, with SHA256
+    `c5b926b38e32b52eba45d9eaacd7b0bc9478b00c03aeb1218ae2424bb79b7a8f`.
+- Evidence restriction: the tuning aggregate can freeze a choice for a new
+  registered-final manifest. None of its performance measurements can enter a
+  registered table or paper claim.
 
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
@@ -702,6 +764,75 @@ with each actual experiment.
 - Timing restriction: local CPU validation and source auditing overlapped with
   parts of the GPU matrix, so recorded training times are engineering
   diagnostics rather than controlled throughput comparisons.
+
+### F-PILOT-002: Source-faithful SHM repair passes the three-seed numerical gate
+
+- Class: `development pilot`
+- Status: execution and integrity validation complete, numerical repair
+  accepted, not for a paper performance claim
+- Date planned and frozen: 2026-07-23
+- Date completed: 2026-07-23
+- Question: does restoring the official POMDP cell's `[-100, 100]`
+  recurrent-state clamp eliminate the SHM nonfinite failure across every
+  original pilot seed?
+- Prediction stated before execution: all three repaired `paper_uniform` SHM
+  cells will finish 250,000 transitions with finite optimizer metrics. No
+  directional return prediction was registered.
+- Frozen matrix:
+  - manifest:
+    `benchmarks/pobax/manifests/tmaze_shm_repair_v2.json`;
+  - source commit:
+    `cfe0fc3ee782b094573f22d782cf0bcd62f09978`;
+  - schema: `2`;
+  - comparison profile: `arcmind_shared_comparison`;
+  - models: repaired SHM and ArcMind as the required comparison anchor;
+  - seeds: `1103`, `2207`, and `3301`;
+  - learner: eight environments, 125 rollout steps, four update epochs, four
+    minibatches, constant learning rate `0.00025`, GAE lambda `0.95`, and
+    entropy coefficient `0.01`;
+  - budget: exactly 250,000 requested and realized transitions per cell; and
+  - evaluation: 16 episodes per environment, or 128 episodes per seed.
+- Numerical outcome:
+  - every one of the six cells recorded 250 finite PPO updates and completed
+    independent evaluation;
+  - SHM mean evaluation returns were `4.0`, `4.0`, and `4.0` for seeds `1103`,
+    `2207`, and `3301`;
+  - ArcMind mean evaluation returns were `4.0`, `4.0`, and `0.0` in the same
+    seed order; and
+  - the strict development aggregate therefore reports an across-seed mean of
+    `4.0` for SHM and `2.6667` for ArcMind.
+- Interpretation: the source-faithful POMDP recurrence clamp passes the
+  predeclared numerical acceptance gate. The historical failure in
+  `F-PILOT-001` remains a failed artifact and was not replaced or reclassified.
+  The three-seed return difference is development evidence only and cannot
+  support a comparative claim.
+- Integrity:
+  - matrix-manifest identity:
+    `e065b36a930079e601c4ca648bcf9df01246d8f53a198203e8305456fceed062`;
+  - `checksums.sha256` SHA256:
+    `fe9590afc771ea9609ffedb86391bfeb4b6ba8ebaa0a45eadd4d5a5e6a0e1aba`;
+  - frozen-manifest SHA256:
+    `f25c095e634062630aaad3fce375af0db96e4e37530de18d247ed1cc16bf4509`;
+  - completion-index SHA256:
+    `53b53490c5cf1380ff8441d70b5b5175efd47587b341a0894b3fbda705f4d082`;
+  - registration SHA256:
+    `1fc57b7760ae92d6528def20203f1f2d23a212c046ade2885acc962ae1001edd`;
+  - independent `sha256sum -c` validation passed before and after a resume
+    check; and
+  - resume completed six of six cells in 26.6 seconds without retraining or
+    changing any recorded hash.
+- Aggregate: the strict development aggregate is
+  `benchmark_results/pobax/aggregates/tmaze-shm-repair-v2-cfe0fc3.json`,
+  SHA256
+  `c5b926b38e32b52eba45d9eaacd7b0bc9478b00c03aeb1218ae2424bb79b7a8f`.
+  Its status is `development_pilot_aggregate_not_for_paper`.
+- Runtime restriction: cell artifacts record 1,677.6 training seconds in
+  total. A validation process overlapped part of the matrix, so these timings
+  are not controlled throughput evidence.
+- Disposition: retain the repaired `paper_uniform` SHM core in later shared
+  comparisons. Do not use this repair matrix in a paper table, abstract, or
+  conclusion. The next T-Maze coverage and ablation manifest was frozen before
+  this aggregate was inspected.
 
 ### F-REG-000: No registered performance finding exists
 

@@ -6,6 +6,7 @@ import argparse
 import importlib.metadata
 import json
 import platform
+import re
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -49,6 +50,7 @@ from benchmarks.pobax.registered_artifacts import (
 )
 from benchmarks.pobax.registration_protocol import (
     COMPARISON_PROFILES,
+    PUBLISHED_PRIMARY_TRAIN_STEPS,
     step_budget_mode,
 )
 from benchmarks.pobax.sequence_cores import (
@@ -187,6 +189,7 @@ REGISTERED_TRAIN_STEPS = {
 EVIDENCE_STATUS = {
     "smoke": "development_smoke_not_for_paper",
     "pilot": "development_pilot_not_for_paper",
+    "development_tuning": "development_tuning_not_for_paper",
     "registered_final": "registered_final_complete",
 }
 
@@ -530,15 +533,55 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     num_envs = 32 if args.quick else args.num_envs
     rollout_steps = 32 if args.quick else args.rollout_steps
     update_epochs = 2 if args.quick else args.update_epochs
-    if args.registration_schema_version not in {1, 2}:
-        raise ValueError("registration_schema_version must be 1 or 2")
+    candidate_id = getattr(args, "candidate_id", None)
+    model_family = getattr(args, "model_family", None)
+    if args.registration_schema_version not in {1, 2, 3}:
+        raise ValueError("registration_schema_version must be 1, 2, or 3")
     if args.registration_schema_version == 1:
         if args.comparison_profile is not None:
             raise ValueError("schema v1 does not accept a comparison_profile")
     elif args.comparison_profile not in COMPARISON_PROFILES:
-        raise ValueError("schema v2 requires a supported comparison_profile")
+        raise ValueError("schema v2 and v3 require a supported comparison_profile")
+    if args.registration_schema_version == 3:
+        if (
+            not isinstance(candidate_id, str)
+            or not isinstance(model_family, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model_family) is None
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]*", candidate_id) is None
+            or not candidate_id.startswith(f"{model_family}.")
+        ):
+            raise ValueError(
+                "schema v3 requires a portable candidate ID prefixed by its model family"
+            )
+    elif candidate_id is not None or model_family is not None:
+        raise ValueError("candidate identity is supported only by schema v3")
+    if args.registration_schema_version == 3 and args.evidence_tier != "development_tuning":
+        raise ValueError("schema v3 is reserved for development_tuning")
     if args.quick and args.evidence_tier != "smoke":
         raise ValueError("--quick requires --evidence-tier smoke")
+    if args.evidence_tier == "development_tuning":
+        if args.registration_schema_version != 3:
+            raise ValueError("development_tuning requires registration schema version 3")
+        if args.comparison_profile != "arcmind_shared_comparison":
+            raise ValueError(
+                "development_tuning requires comparison_profile 'arcmind_shared_comparison'"
+            )
+        if args.quick:
+            raise ValueError("development_tuning cannot use --quick")
+        expected_steps = PUBLISHED_PRIMARY_TRAIN_STEPS.get(args.environment)
+        if expected_steps is None:
+            raise ValueError("development_tuning requires a published POBAX primary environment")
+        if total_steps != expected_steps:
+            raise ValueError(
+                "development_tuning requires the published task budget: "
+                f"expected={expected_steps}, found={total_steps}"
+            )
+        if git_provenance["dirty"]:
+            raise RuntimeError("development_tuning requires a clean Git worktree")
+        if args.matrix_manifest_sha256 is None and not args.describe_only:
+            raise ValueError("development_tuning requires a frozen matrix manifest SHA256")
+        if args.cell_id is None and not args.describe_only:
+            raise ValueError("development_tuning requires a frozen cell ID")
     if args.evidence_tier == "registered_final":
         if args.quick:
             raise ValueError("registered_final cannot use --quick")
@@ -659,7 +702,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "perfect_memory": False,
             },
         ),
-        "model": args.model,
+        "model": candidate_id or args.model,
         "seed": args.seed,
         "policy_core": asdict(policy_core),
         "reference_implementation": REFERENCE_IMPLEMENTATIONS.get(args.model),
@@ -682,7 +725,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "dependency_lock_sha256": lock_sha256,
         "runtime_contract": installed_runtime,
     }
-    if args.registration_schema_version == 2:
+    if args.registration_schema_version == 3:
+        frozen_configuration.update(
+            {
+                "candidate_id": candidate_id,
+                "model_family": model_family,
+                "implementation_model": args.model,
+            }
+        )
+    if args.registration_schema_version in {2, 3}:
         frozen_configuration.update(
             {
                 "comparison_profile": args.comparison_profile,
@@ -741,7 +792,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         evaluation_steps=evaluation_steps,
     )
     record: dict[str, object] = {
-        "schema_version": 5 if args.registration_schema_version == 2 else 4,
+        "schema_version": (
+            6
+            if args.registration_schema_version == 3
+            else 5
+            if args.registration_schema_version == 2
+            else 4
+        ),
         "status": EVIDENCE_STATUS[args.evidence_tier],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "configuration_sha256": configuration_sha256,
@@ -756,7 +813,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "runtime_contract": installed_runtime,
         },
         "environment": args.environment,
-        "model": args.model,
+        "model": candidate_id or args.model,
         "seed": args.seed,
         "parameter_count": parameter_count,
         "effective_parameter_count": effective_parameter_count,
@@ -803,7 +860,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "contract": installed_runtime,
         },
     }
-    if args.registration_schema_version == 2:
+    if args.registration_schema_version == 3:
+        record.update(
+            {
+                "candidate_id": candidate_id,
+                "model_family": model_family,
+                "implementation_model": args.model,
+            }
+        )
+    if args.registration_schema_version in {2, 3}:
         record.update(
             {
                 "comparison_profile": args.comparison_profile,
@@ -867,9 +932,11 @@ def main() -> None:
     parser.add_argument(
         "--registration-schema-version",
         type=int,
-        choices=(1, 2),
+        choices=(1, 2, 3),
         default=1,
     )
+    parser.add_argument("--candidate-id")
+    parser.add_argument("--model-family")
     parser.add_argument(
         "--comparison-profile",
         choices=tuple(COMPARISON_PROFILES),

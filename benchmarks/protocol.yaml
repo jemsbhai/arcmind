@@ -1,4 +1,4 @@
-protocol_version: 6
+protocol_version: 7
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -24,6 +24,16 @@ result_tiers:
     allowed_budget: may_be_shorter_than_published_reference
     typical_seed_count: 3
     paper_status: development_only
+  development_tuning:
+    purpose: select_frozen_candidates_by_predeclared_learning_curve_auc
+    registration_schema: 3
+    budget_rule: use_published_reference_steps_for_pobax
+    seed_rule: use_published_task_specific_tuning_count
+    comparison_profile: arcmind_shared_comparison
+    matrix_kind: hyperparameter_selection
+    matrix_rule: one_primary_environment_complete_cartesian_candidate_grid
+    selection_scope: within_model_family_only
+    paper_status: selection_only_not_performance_evidence
   registered_final:
     purpose: evaluate_frozen_methods_on_paired_seed_manifests
     budget_rule: use_published_reference_steps_for_pobax
@@ -121,6 +131,7 @@ stages:
     minimum_seed_count_for_preliminary_tables: 10
     policy_selection: final_policy_after_fixed_interaction_budget
     registration_schema: 2
+    tuning_registration_schema: 3
     comparison_profiles:
       pobax_author_semantics:
         purpose: mirror_pinned_author_ppo_settings_and_step_semantics_in_shared_runner
@@ -141,8 +152,38 @@ stages:
       - gae_lambda
       - entropy_coefficient
       - anneal_learning_rate
-    development_tuning_seeds: [1103, 2207, 3301]
+    pilot_screening_seeds: [1103, 2207, 3301]
     registered_tuning_seed_rule: match_published_task_count
+    tuning_aggregation:
+      evidence_tier: development_tuning
+      matrix_kind: hyperparameter_selection
+      immutable_identity:
+        - model_family
+        - implementation_model
+        - candidate_id
+      candidate_cardinality: equal_across_model_families
+      candidates_per_family_minimum: 2
+      immutable_cell_logs:
+        completion_index_path_and_sha256: required
+        checksum_inventory_coverage: required
+      controlled_structural_learner_fields:
+        - num_envs
+        - rollout_steps
+        - update_epochs
+        - num_minibatches
+      tunable_learner_fields:
+        - learning_rate
+        - gae_lambda
+        - entropy_coefficient
+        - anneal_learning_rate
+      primary_metric: mean_seed_auc_mean_return
+      selection_scope: within_model_family_only
+      architecture_ranking: prohibited
+      integration: trapezoid_over_shared_complete_case_suffix
+      minimum_shared_finite_points: 2
+      checkpoint_selection: prohibited
+      registered_final_evidence: prohibited
+      paper_performance_claims: prohibited
     artifact_requirements:
       aggregate_output_location: outside_immutable_raw_matrix
       freeze_environment_source_and_reference: true

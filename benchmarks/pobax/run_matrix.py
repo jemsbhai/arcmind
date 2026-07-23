@@ -23,10 +23,12 @@ from benchmarks.pobax.registered_artifacts import (
     write_checksum_manifest,
 )
 from benchmarks.pobax.registration_protocol import (
+    normalize_candidate_families,
     normalize_learner,
     realized_environment_steps,
     registration_fields,
     validate_comparison_profile,
+    validate_development_tuning_contract,
 )
 from benchmarks.pobax.run_pilot import (
     EVIDENCE_STATUS,
@@ -40,7 +42,11 @@ _QUICK_LEARNER_VALUES = {
     "rollout_steps": 32,
     "update_epochs": 2,
 }
-_MATRIX_KINDS = {"primary_comparison", "upper_reference"}
+_MATRIX_KINDS = {
+    "primary_comparison",
+    "upper_reference",
+    "hyperparameter_selection",
+}
 
 
 def _load_registration(path: Path) -> dict[str, Any]:
@@ -57,23 +63,36 @@ def _load_registration(path: Path) -> dict[str, Any]:
     tier = registration.get("evidence_tier")
     if tier not in EVIDENCE_STATUS:
         raise ValueError(f"unsupported evidence_tier: {tier!r}")
+    if schema_version == 3 and tier != "development_tuning":
+        raise ValueError("registration schema version 3 is reserved for development_tuning")
     matrix_kind = registration.get("matrix_kind")
     if matrix_kind not in _MATRIX_KINDS:
         raise ValueError(f"unsupported matrix_kind: {matrix_kind!r}")
 
-    models = registration.get("models")
-    if (
-        not isinstance(models, list)
-        or not models
-        or any(not isinstance(model, str) or not model for model in models)
-    ):
-        raise ValueError("models must be a non-empty list of names")
-    if len(set(models)) != len(models):
-        raise ValueError("models must not contain duplicates")
+    candidate_families: tuple[dict[str, Any], ...] = ()
+    if schema_version == 3:
+        candidate_families = normalize_candidate_families(registration.get("candidate_families"))
+        models = [
+            candidate["candidate_id"]
+            for family in candidate_families
+            for candidate in family["candidates"]
+        ]
+    else:
+        models = registration.get("models")
+        if (
+            not isinstance(models, list)
+            or not models
+            or any(not isinstance(model, str) or not model for model in models)
+        ):
+            raise ValueError("models must be a non-empty list of names")
+        if len(set(models)) != len(models):
+            raise ValueError("models must not contain duplicates")
     if matrix_kind == "primary_comparison" and "arcmind" not in models:
         raise ValueError("primary_comparison matrices must contain arcmind")
     if matrix_kind == "upper_reference" and models != ["memoryless_mlp"]:
         raise ValueError("upper_reference matrices must contain only memoryless_mlp")
+    if matrix_kind == "hyperparameter_selection" and schema_version != 3:
+        raise ValueError("hyperparameter_selection requires registration schema version 3")
 
     seeds = registration.get("seeds")
     validate_paired_seed_manifests({model: seeds for model in models})
@@ -104,17 +123,28 @@ def _load_registration(path: Path) -> dict[str, Any]:
                 f"registered adapters: {unsupported}"
             )
 
-    learner = normalize_learner(
-        registration.get("learner"),
-        schema_version=schema_version,
+    learners = (
+        [
+            candidate["learner"]
+            for family in candidate_families
+            for candidate in family["candidates"]
+        ]
+        if schema_version == 3
+        else [
+            normalize_learner(
+                registration.get("learner"),
+                schema_version=schema_version,
+            )
+        ]
     )
-    for environment in environments:
-        realized_environment_steps(
-            environment["total_steps"],
-            num_envs=int(learner["num_envs"]),
-            rollout_steps=int(learner["rollout_steps"]),
-            comparison_profile=comparison_profile,
-        )
+    for learner in learners:
+        for environment in environments:
+            realized_environment_steps(
+                environment["total_steps"],
+                num_envs=int(learner["num_envs"]),
+                rollout_steps=int(learner["rollout_steps"]),
+                comparison_profile=comparison_profile,
+            )
 
     evaluation_episodes = registration.get("evaluation_episodes_per_env")
     if (
@@ -133,8 +163,20 @@ def _load_registration(path: Path) -> dict[str, Any]:
         if any(environment["total_steps"] != 8_192 for environment in environments):
             raise ValueError("quick registrations must record total_steps=8192")
         for field, expected in _QUICK_LEARNER_VALUES.items():
-            if learner[field] != expected:
+            if learners[0][field] != expected:
                 raise ValueError(f"quick registrations must record learner.{field}={expected}")
+    if tier == "development_tuning":
+        validate_development_tuning_contract(
+            schema_version=schema_version,
+            comparison_profile=comparison_profile,
+            matrix_kind=matrix_kind,
+            candidate_families=candidate_families,
+            environments={
+                environment["id"]: environment["total_steps"] for environment in environments
+            },
+            seeds=seeds,
+            quick=registration["quick"],
+        )
     if tier == "registered_final" and len(registration["seeds"]) != 30:
         raise ValueError("registered_final requires exactly 30 paired seeds")
     return registration
@@ -151,10 +193,32 @@ def _cell_namespace(
     cell_id: str | None,
     describe_only: bool,
 ) -> Namespace:
-    learner = registration["learner"]
+    candidate_id: str | None = None
+    model_family: str | None = None
+    implementation_model = model
+    if registration["schema_version"] == 3:
+        candidate = next(
+            (
+                (family["family_id"], item)
+                for family in normalize_candidate_families(registration["candidate_families"])
+                for item in family["candidates"]
+                if item["candidate_id"] == model
+            ),
+            None,
+        )
+        if candidate is None:  # pragma: no cover - registration validates
+            raise AssertionError(f"unknown tuning candidate: {model}")
+        model_family, candidate_spec = candidate
+        candidate_id = candidate_spec["candidate_id"]
+        implementation_model = candidate_spec["implementation_model"]
+        learner = candidate_spec["learner"]
+    else:
+        learner = registration["learner"]
     return Namespace(
         environment=environment["id"],
-        model=model,
+        model=implementation_model,
+        candidate_id=candidate_id,
+        model_family=model_family,
         seed=seed,
         total_steps=environment["total_steps"],
         num_envs=learner["num_envs"],
@@ -224,6 +288,9 @@ def _command_for_cell(args: Namespace) -> list[str]:
         command.append("--anneal-learning-rate")
     if args.comparison_profile is not None:
         command.extend(["--comparison-profile", args.comparison_profile])
+    if getattr(args, "candidate_id", None) is not None:
+        command.extend(["--candidate-id", args.candidate_id])
+        command.extend(["--model-family", args.model_family])
     if args.require_gpu:
         command.append("--require-gpu")
     if args.quick:
@@ -246,8 +313,10 @@ def _load_matching_artifact(
     if not path.exists():
         return None
     artifact = json.loads(path.read_text(encoding="utf-8"))
-    if artifact.get("schema_version") not in {4, 5}:
+    if artifact.get("schema_version") not in {4, 5, 6}:
         raise ExistingArtifactMismatchError(f"existing cell has the wrong schema: {path}")
+    if expected_status == EVIDENCE_STATUS["development_tuning"] and artifact["schema_version"] != 6:
+        raise ExistingArtifactMismatchError(f"existing tuning cell has the wrong schema: {path}")
     expected = {
         "status": expected_status,
         "environment": environment,
@@ -272,6 +341,20 @@ def _load_matching_artifact(
         raise ExistingArtifactMismatchError(
             f"existing cell configuration content does not match its hash: {path}"
         )
+    if artifact["schema_version"] == 6:
+        candidate_identity = {
+            "candidate_id": model,
+            "model_family": configuration.get("model_family"),
+            "implementation_model": configuration.get("implementation_model"),
+        }
+        if (
+            configuration.get("model") != model
+            or configuration.get("candidate_id") != model
+            or {field: artifact.get(field) for field in candidate_identity} != candidate_identity
+        ):
+            raise ExistingArtifactMismatchError(
+                f"existing cell candidate identity does not match its configuration: {path}"
+            )
     return artifact
 
 
@@ -281,9 +364,31 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
     output_root = output_root.resolve()
     cells: list[dict[str, Any]] = []
     provenance: dict[str, Any] | None = None
+    candidate_families = (
+        normalize_candidate_families(registration["candidate_families"])
+        if registration["schema_version"] == 3
+        else ()
+    )
+    matrix_models = (
+        [
+            candidate["candidate_id"]
+            for family in candidate_families
+            for candidate in family["candidates"]
+        ]
+        if candidate_families
+        else registration["models"]
+    )
+    candidate_index = {
+        candidate["candidate_id"]: {
+            "model_family": family["family_id"],
+            "implementation_model": candidate["implementation_model"],
+        }
+        for family in candidate_families
+        for candidate in family["candidates"]
+    }
 
     for environment in registration["environments"]:
-        for model in registration["models"]:
+        for model in matrix_models:
             for seed in registration["seeds"]:
                 description = run(
                     _cell_namespace(
@@ -331,16 +436,17 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     seed,
                     configuration_sha256,
                 )
-                cells.append(
-                    {
-                        "cell_id": cell_id,
-                        "environment": environment["id"],
-                        "model": model,
-                        "seed": seed,
-                        "configuration_sha256": configuration_sha256,
-                        "artifact_path": relative_path.as_posix(),
-                    }
-                )
+                cell = {
+                    "cell_id": cell_id,
+                    "environment": environment["id"],
+                    "model": model,
+                    "seed": seed,
+                    "configuration_sha256": configuration_sha256,
+                    "artifact_path": relative_path.as_posix(),
+                }
+                if registration["schema_version"] == 3:
+                    cell.update(candidate_index[model])
+                cells.append(cell)
 
     validate_unique_cell_ids(cell["cell_id"] for cell in cells)
     if provenance is None:
@@ -349,12 +455,14 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         "schema_version": registration["schema_version"],
         "status": "frozen",
         "matrix_kind": registration["matrix_kind"],
-        "models": registration["models"],
+        "models": matrix_models,
         "environments": [environment["id"] for environment in registration["environments"]],
         "seeds": registration["seeds"],
         "provenance": provenance,
         "cells": cells,
     }
+    if registration["schema_version"] == 3:
+        manifest_without_hash["candidate_families"] = registration["candidate_families"]
     manifest_sha256 = canonical_json_sha256(manifest_without_hash)
     manifest = {
         **manifest_without_hash,
@@ -367,7 +475,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
     expected_status = EVIDENCE_STATUS[registration["evidence_tier"]]
     completed_cells: list[dict[str, Any]] = []
     for environment in registration["environments"]:
-        for model in registration["models"]:
+        for model in matrix_models:
             for seed in registration["seeds"]:
                 cell = next(
                     candidate
