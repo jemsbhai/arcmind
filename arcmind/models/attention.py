@@ -55,12 +55,14 @@ class SlowAttentionLayer(nn.Module):
         self,
         x: torch.Tensor,
         memory: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
             x: Input tensor, shape (batch, seq_len, d_model).
             memory: Optional episodic memory slots, shape (batch, num_slots, d_model).
                     If provided, concatenated to KV for cross-attention over memory.
+            memory_mask: Optional valid-memory mask, shape (batch, num_slots).
 
         Returns:
             Output tensor, shape (batch, seq_len, d_model).
@@ -72,7 +74,13 @@ class SlowAttentionLayer(nn.Module):
 
         # If memory is provided, concatenate it to context for KV
         if memory is not None:
+            if memory_mask is not None and memory_mask.shape != memory.shape[:2]:
+                raise ValueError(
+                    "memory_mask must match the memory batch and slot dimensions"
+                )
             kv_context = torch.cat([memory, x], dim=1)
+        elif memory_mask is not None:
+            raise ValueError("memory_mask requires memory")
         else:
             kv_context = x
 
@@ -104,10 +112,17 @@ class SlowAttentionLayer(nn.Module):
         # query, while the query sequence itself uses causal local attention.
         if memory is not None:
             mem_len = memory.shape[1]
-            causal_mask = torch.ones(seq_len, kv_len, device=x.device, dtype=torch.bool)
-            causal_mask[:, mem_len:] = local_causal_mask
-            causal_mask[:, :mem_len] = True
-            causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+            causal_mask = torch.ones(
+                batch,
+                seq_len,
+                kv_len,
+                device=x.device,
+                dtype=torch.bool,
+            )
+            causal_mask[:, :, mem_len:] = local_causal_mask.unsqueeze(0)
+            if memory_mask is not None:
+                causal_mask[:, :, :mem_len] = memory_mask.unsqueeze(1)
+            causal_mask = causal_mask.unsqueeze(1)
             attn_weights = attn_weights.masked_fill(~causal_mask, float("-inf"))
         else:
             causal_mask = local_causal_mask.unsqueeze(0).unsqueeze(0)
@@ -142,14 +157,26 @@ class SlowAttention(nn.Module):
             [SlowAttentionLayer(config) for _ in range(config.num_attn_layers)]
         )
 
-    def _prepare_memory(self, memory: torch.Tensor | None) -> torch.Tensor | None:
+    def _prepare_memory(
+        self,
+        memory: torch.Tensor | None,
+        memory_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Apply the bounded window and encode age relative to the query."""
         if memory is None or memory.shape[1] == 0:
-            return None
+            if memory_mask is not None:
+                raise ValueError("memory_mask requires non-empty memory")
+            return None, None
+        if memory_mask is not None and memory_mask.shape != memory.shape[:2]:
+            raise ValueError(
+                "memory_mask must match the memory batch and slot dimensions"
+            )
 
         memory = memory[:, -self.config.attn_window_size :, :]
+        if memory_mask is not None:
+            memory_mask = memory_mask[:, -self.config.attn_window_size :]
         if self.config.ablate_temporal_encoding:
-            return memory
+            return memory, memory_mask
 
         memory_len = memory.shape[1]
         # Memory arrives oldest-to-newest. Age zero denotes the newest prior
@@ -160,22 +187,27 @@ class SlowAttention(nn.Module):
             -1,
             device=memory.device,
         )
-        return memory + self.memory_age_embedding(ages).unsqueeze(0)
+        return (
+            memory + self.memory_age_embedding(ages).unsqueeze(0),
+            memory_mask,
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         memory: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
             x: Input tensor, shape (batch, seq_len, d_model).
             memory: Optional episodic memory slots.
+            memory_mask: Optional valid-memory mask.
 
         Returns:
             Output tensor, shape (batch, seq_len, d_model).
         """
-        memory = self._prepare_memory(memory)
+        memory, memory_mask = self._prepare_memory(memory, memory_mask)
         for layer in self.layers:
-            x = layer(x, memory=memory)
+            x = layer(x, memory=memory, memory_mask=memory_mask)
         return x

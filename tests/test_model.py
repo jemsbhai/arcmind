@@ -253,6 +253,30 @@ class TestSlowAttention:
 
         assert torch.allclose(original, old_slots_changed, atol=1e-6)
 
+    def test_memory_mask_excludes_ineligible_slots(self, tiny_config):
+        config = replace(
+            tiny_config,
+            attn_window_size=4,
+            ablate_temporal_encoding=True,
+        )
+        attn = SlowAttention(config)
+        attn.eval()
+        query = torch.randn(1, 1, config.d_model)
+        memory = torch.randn(1, 2, config.d_model)
+        changed = memory.clone()
+        changed[:, 1, :] += 100.0
+        mask = torch.tensor([[True, False]])
+
+        with torch.no_grad():
+            original = attn(query, memory=memory, memory_mask=mask)
+            masked_slot_changed = attn(
+                query,
+                memory=changed,
+                memory_mask=mask,
+            )
+
+        assert torch.allclose(original, masked_slot_changed, atol=1e-6)
+
 
 # ============================================================
 # EpisodicMemory tests

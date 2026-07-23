@@ -109,6 +109,16 @@ explicit random-address keys, and run a time-major scan. It must match the
 released PyTorch equations under a fixed address sequence and validate
 stochastic addressing distributionally before registered use.
 
+The SHM audit found a source-level incompatibility that must remain explicit.
+The paper and the official POMDP implementation sample uniformly from all 128
+address rows, but the standalone and POPGym `v1.1` implementations call
+`uniform_(0, 1).long()`. Values in that interval truncate to zero, so those
+paths always select address row zero. The JAX port therefore requires two
+named modes: `paper_uniform`, which follows the paper and POMDP code, and
+`v1_1_popgym_compat`, which reproduces the released POPGym behavior. The main
+shared-learner baseline should use `paper_uniform` and must not be described
+as an exact reproduction of the published POPGym agent.
+
 The implemented memory-trace adapter applies the fixed exponential averages to
 the common causal policy input rather than the original paper's
 environment-specific one-hot observation encoder. The implemented MS4/MS4N

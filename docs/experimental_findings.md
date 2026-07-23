@@ -288,6 +288,76 @@ with each actual experiment.
 - Evidence restriction: this run is development evidence and is not eligible
   for a paper performance table.
 
+### F-REF-001: SHM paper and POPGym source use different addressing
+
+- Class: `development smoke` and `null or negative result`
+- Status: verified source audit, no performance claim
+- Date: 2026-07-23
+- Sources: the ICLR 2025 SHM paper and official `v1.1` commit
+  `40d73d44936e47a29e2c76a481d93c434b857ea1`
+- Observation: the paper specifies uniform sampling from 128 trainable address
+  rows. The official standalone and POPGym implementations sample with
+  `uniform_(0, 1).long()`, which always produces integer zero. The official
+  POMDP implementation instead uses `randint(0, L)` and can reach every row.
+  A direct execution of the pinned standalone path over 40,960 positions
+  selected only row zero.
+- Interpretation: one JAX port cannot simultaneously reproduce the paper's
+  intended mechanism and the released POPGym source. Any SHM result must name
+  its compatibility mode.
+- Disposition: implement `paper_uniform` as the scientific baseline and
+  `v1_1_popgym_compat` as a source-compatibility check. Replay collection-time
+  addresses during PPO loss recomputation so internal randomness cannot alter
+  probability ratios.
+- Primary source record:
+  [paper](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf),
+  [standalone source](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/shm.py#L33-L38),
+  [POPGym source](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/popgym/baselines/ray_models/ray_shm.py#L57-L62),
+  and
+  [POMDP source](https://github.com/thaihungle/SHM/blob/40d73d44936e47a29e2c76a481d93c434b857ea1/pomdp-baselines/torchkit/shm.py#L39-L44)
+
+### F-DIAG-005: Predeclared fusion-interference controls
+
+- Class: `diagnostic evidence`
+- Status: planned, not yet executed
+- Date planned: 2026-07-23, before outcome inspection
+- Task: the F-DIAG-004 delayed-recall task, seed `2207`, 4,096 training
+  examples, 1,024 validation examples, 2,048 test examples, 20 epochs, and
+  validation-NLL checkpoint selection
+- Cells, in fixed order:
+  1. instrumented default ArcMind;
+  2. SSM-only reference;
+  3. fast-start ArcMind, with gate weight zero and gate bias
+     `logit(0.05) = -2.944439`;
+  4. fast-preserving ArcMind, with training loss
+     `CE(fused) + CE(fast)` and the same shared action head; and
+  5. observable match-abstention, which exposes only visible write slots whose
+     observable key matches the query and forces the slow gate to zero when no
+     match is visible.
+- Passive measurements: exact-lag accuracy and query count, counterfactual
+  shared-head accuracy on the fast representation, mean slow-path gate, and
+  mean norm of the slow residual delta. Match-abstention is a task-specific
+  control, not a proposed general model.
+- Prediction: default ArcMind will replicate the sharp boundary after lag
+  eight. Fast-start will reduce early interference but may converge toward the
+  same shortcut. The auxiliary fast loss will improve long-lag fast-path
+  decodability if joint optimization caused representation specialization.
+  Match-abstention will improve fused long-lag accuracy only if irrelevant
+  retrieval is a major remaining cause.
+- Descriptive decision rules:
+  - a change of less than `0.10` long-lag accuracy is not treated as a
+    practically clear one-seed effect;
+  - fast-start must lose no more than `0.02` short-lag accuracy to count as a
+    useful initialization change;
+  - counterfactual fast accuracy at least `0.45` with fused accuracy at most
+    `0.30` indicates destructive fusion;
+  - fast-path accuracy below `0.30` that improves by at least `0.10` with the
+    auxiliary loss supports representation specialization; and
+  - no one-seed outcome is an inferential or paper-ready claim.
+- Raw artifact directory:
+  `benchmark_results/delayed_recall/dev-fusion-seed2207`
+- Evidence restriction: all cells remain diagnostic and cannot enter a paper
+  performance table.
+
 ## Finding promotion checklist
 
 A finding may be cited as registered evidence only when all answers are yes:

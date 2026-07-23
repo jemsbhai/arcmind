@@ -13,6 +13,56 @@ import torch
 from torch.utils.data import Dataset
 
 
+def latest_value_oracle(
+    inputs: torch.Tensor,
+    config: "DelayedRecallConfig",
+) -> torch.Tensor:
+    """Recover every query target directly from the observable event stream."""
+    if inputs.ndim != 3 or inputs.shape[1:] != (
+        config.sequence_length,
+        config.input_dim,
+    ):
+        raise ValueError(
+            "inputs must have shape "
+            f"(batch, {config.sequence_length}, {config.input_dim})"
+        )
+
+    targets = torch.full(
+        inputs.shape[:2],
+        DelayedRecallDataset.ignore_index,
+        dtype=torch.long,
+        device=inputs.device,
+    )
+    key_start = 2
+    value_start = key_start + config.num_keys
+    for example in range(inputs.shape[0]):
+        values_by_key: dict[int, int] = {}
+        for decision in range(config.num_decisions):
+            timestep = decision * config.sensor_stride
+            event = inputs[example, timestep]
+            key = int(
+                event[key_start : key_start + config.num_keys].argmax().item()
+            )
+            if event[0] > 0.5:
+                value = int(
+                    event[
+                        value_start : value_start + config.num_values
+                    ].argmax().item()
+                )
+                values_by_key[key] = value
+            elif event[1] > 0.5:
+                if key not in values_by_key:
+                    raise ValueError(
+                        f"query before first write for key {key}"
+                    )
+                targets[example, timestep] = values_by_key[key]
+            else:
+                raise ValueError(
+                    f"missing event at decision {decision}"
+                )
+    return targets
+
+
 @dataclass(frozen=True)
 class DelayedRecallConfig:
     """Configuration for the deterministic delayed sensor-recall task."""
@@ -52,12 +102,24 @@ class DelayedRecallDataset(Dataset):
             raise ValueError("num_examples must be positive")
         self.config = config or DelayedRecallConfig()
         self.seed = seed
-        self.inputs, self.targets, self.query_lags = self._generate(num_examples)
+        (
+            self.inputs,
+            self.targets,
+            self.query_lags,
+            self.query_write_counts,
+            self.query_target_ages,
+        ) = self._generate(num_examples)
 
     def _generate(
         self,
         num_examples: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         config = self.config
         rng = np.random.default_rng(self.seed)
         inputs = np.zeros(
@@ -70,6 +132,8 @@ class DelayedRecallDataset(Dataset):
             dtype=np.int64,
         )
         query_lags = np.full_like(targets, -1)
+        query_write_counts = np.full_like(targets, -1)
+        query_target_ages = np.full_like(targets, -1)
 
         noise_start = 2 + config.num_keys + config.num_values
         inputs[:, :, noise_start:] = rng.normal(
@@ -81,6 +145,7 @@ class DelayedRecallDataset(Dataset):
         for example in range(num_examples):
             values_by_key: dict[int, int] = {}
             last_write: dict[int, int] = {}
+            writes_by_key: dict[int, int] = {}
             initial_keys = rng.permutation(config.num_keys)
 
             for decision in range(config.num_decisions):
@@ -110,16 +175,23 @@ class DelayedRecallDataset(Dataset):
                     inputs[example, timestep, value_offset] = 1.0
                     values_by_key[key] = value
                     last_write[key] = decision
+                    writes_by_key[key] = writes_by_key.get(key, 0) + 1
                 else:
                     inputs[example, timestep, 1] = 1.0
                     inputs[example, timestep, 2 + key] = 1.0
                     targets[example, timestep] = values_by_key[key]
                     query_lags[example, timestep] = decision - last_write[key]
+                    query_write_counts[example, timestep] = writes_by_key[key]
+                    query_target_ages[example, timestep] = (
+                        decision - last_write[key] - 1
+                    )
 
         return (
             torch.from_numpy(inputs),
             torch.from_numpy(targets),
             torch.from_numpy(query_lags),
+            torch.from_numpy(query_write_counts),
+            torch.from_numpy(query_target_ages),
         )
 
     def __len__(self) -> int:

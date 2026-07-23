@@ -100,6 +100,90 @@ class CausalTransformerBaseline(nn.Module):
         return self.output(hidden)
 
 
+class MatchAbstentionArcMind(ArcMindModel):
+    """Task-specific control with observable key matching and abstention."""
+
+    def __init__(self, config: ArcMindConfig, *, num_keys: int):
+        super().__init__(config)
+        self.num_keys = num_keys
+        self._last_actual_gate_values: torch.Tensor | None = None
+
+    def forward(
+        self,
+        sensor_input: torch.Tensor,
+        use_memory: bool = True,
+    ) -> torch.Tensor:
+        """Run ArcMind while exposing only matching write slots to recall."""
+        _, seq_len, _ = sensor_input.shape
+        cfg = self.config
+        tokens = self.tokenizer(sensor_input)
+        fast_output = self.ssm_core(tokens)
+        effective_memory = use_memory and not cfg.ablate_memory
+        memory_slots: list[torch.Tensor] = []
+        memory_keys: list[torch.Tensor] = []
+        fused_segments = []
+        actual_gate_segments = []
+
+        for start in range(0, seq_len, self.decision_stride):
+            end = min(start + self.decision_stride, seq_len)
+            snapshot = fast_output[:, start, :]
+            event = sensor_input[:, start, :]
+            current_key = event[
+                :,
+                2 : 2 + self.num_keys,
+            ].argmax(dim=-1)
+            is_query = event[:, 1] > 0.5
+
+            if effective_memory and memory_slots:
+                memory_context = torch.stack(memory_slots, dim=1)
+                memory_key_context = torch.stack(memory_keys, dim=1)
+                memory_mask = (
+                    memory_key_context == current_key.unsqueeze(1)
+                ) & is_query.unsqueeze(1)
+                has_match = memory_mask[
+                    :,
+                    -cfg.attn_window_size :,
+                ].any(dim=1)
+            else:
+                memory_context = None
+                memory_mask = None
+                has_match = torch.zeros_like(is_query)
+
+            slow_decision = self.slow_attention(
+                snapshot.unsqueeze(1),
+                memory=memory_context,
+                memory_mask=memory_mask,
+            )
+
+            if effective_memory:
+                memory_slots.append(self.memory.compressor(snapshot))
+                stored_key = torch.where(
+                    event[:, 0] > 0.5,
+                    current_key,
+                    torch.full_like(current_key, -1),
+                )
+                memory_keys.append(stored_key)
+                memory_slots = memory_slots[-cfg.num_memory_slots :]
+                memory_keys = memory_keys[-cfg.num_memory_slots :]
+
+            segment_fast = fast_output[:, start:end, :]
+            segment_slow = slow_decision.expand(-1, end - start, -1)
+            combined = torch.cat([segment_fast, segment_slow], dim=-1)
+            gate_values = self.gate(combined)
+            gate_values = gate_values * has_match[:, None, None]
+            fused_segments.append(
+                gate_values * segment_slow
+                + (1 - gate_values) * segment_fast
+            )
+            actual_gate_segments.append(gate_values)
+
+        self._last_actual_gate_values = torch.cat(
+            actual_gate_segments,
+            dim=1,
+        ).detach()
+        return self.action_head(torch.cat(fused_segments, dim=1))
+
+
 def build_arcmind(
     input_dim: int,
     output_dim: int,
@@ -108,6 +192,7 @@ def build_arcmind(
     exact_recall_window: int,
     variant: str,
     d_model: int = 32,
+    num_keys: int = 4,
 ) -> ArcMindModel:
     """Construct the registered compact ArcMind diagnostic variants."""
     config = ArcMindConfig(
@@ -127,13 +212,33 @@ def build_arcmind(
         action_dim=output_dim,
         dropout=0.0,
     )
+    fast_start_gate = False
     if variant == "arcmind_ssm_only":
         config.ablate_attention = True
     elif variant == "arcmind_unordered":
         config.ablate_temporal_encoding = True
+    elif variant == "arcmind_no_memory":
+        config.ablate_memory = True
+    elif variant == "arcmind_no_gate":
+        config.ablate_gating = True
+    elif variant == "arcmind_fast_start":
+        fast_start_gate = True
+    elif variant == "arcmind_fast_aux":
+        pass
+    elif variant == "arcmind_match_abstention":
+        pass
     elif variant != "arcmind":
         raise ValueError(f"unknown ArcMind variant: {variant}")
-    return ArcMindModel(config)
+    if variant == "arcmind_match_abstention":
+        model = MatchAbstentionArcMind(config, num_keys=num_keys)
+    else:
+        model = ArcMindModel(config)
+    if fast_start_gate:
+        # Begin with 5% slow-path influence so recall must earn influence
+        # during optimization. The gate remains fully learnable.
+        nn.init.zeros_(model.gate[0].weight)
+        nn.init.constant_(model.gate[0].bias, -2.944439)
+    return model
 
 
 def _best_width(

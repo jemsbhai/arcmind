@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import math
 import platform
 import subprocess
 import time
@@ -31,6 +32,14 @@ REGISTERED_MODELS = (
     "arcmind_ssm_only",
     "arcmind_unordered",
     "arcmind",
+)
+
+EXPLORATORY_MODELS = (
+    "arcmind_no_memory",
+    "arcmind_no_gate",
+    "arcmind_fast_start",
+    "arcmind_fast_aux",
+    "arcmind_match_abstention",
 )
 
 
@@ -64,6 +73,68 @@ def _forward(model: torch.nn.Module, inputs: torch.Tensor) -> torch.Tensor:
     return model(inputs)
 
 
+def _forward_with_arcmind_diagnostics(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
+    """Capture fast, slow, and gate tensors without changing the model API."""
+    if (
+        not isinstance(model, ArcMindModel)
+        or model.config.ablate_ssm
+        or model.config.ablate_attention
+        or model.config.ablate_gating
+    ):
+        return _forward(model, inputs), None
+
+    fast_outputs: list[torch.Tensor] = []
+    slow_outputs: list[torch.Tensor] = []
+    gate_outputs: list[torch.Tensor] = []
+    handles = [
+        model.ssm_core.register_forward_hook(
+            lambda _module, _arguments, output: fast_outputs.append(output)
+        ),
+        model.slow_attention.register_forward_hook(
+            lambda _module, _arguments, output: slow_outputs.append(output)
+        ),
+        model.gate.register_forward_hook(
+            lambda _module, _arguments, output: gate_outputs.append(output)
+        ),
+    ]
+    try:
+        logits = _forward(model, inputs)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    expected_decisions = (
+        inputs.shape[1] + model.decision_stride - 1
+    ) // model.decision_stride
+    if (
+        len(fast_outputs) != 1
+        or len(slow_outputs) != expected_decisions
+        or len(gate_outputs) != expected_decisions
+    ):
+        raise RuntimeError(
+            "ArcMind diagnostic capture did not match the forward schedule: "
+            f"fast={len(fast_outputs)}, slow={len(slow_outputs)}, "
+            f"gate={len(gate_outputs)}, expected_decisions={expected_decisions}"
+        )
+    actual_gate_values = getattr(
+        model,
+        "_last_actual_gate_values",
+        None,
+    )
+    return logits, {
+        "fast": fast_outputs[0],
+        "slow": torch.cat(slow_outputs, dim=1),
+        "gate": (
+            actual_gate_values
+            if actual_gate_values is not None
+            else torch.cat(gate_outputs, dim=1)
+        ),
+    }
+
+
 def _synchronize(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -76,7 +147,8 @@ def evaluate(
     *,
     device: torch.device,
     short_lag_limit: int,
-) -> dict[str, float | int]:
+    collect_arcmind_diagnostics: bool = False,
+) -> dict[str, object]:
     """Evaluate all query labels in a split."""
     model.eval()
     loss_sum = 0.0
@@ -86,6 +158,17 @@ def evaluate(
     short_queries = 0
     long_correct = 0
     long_queries = 0
+    max_lag = loader.dataset.config.num_decisions
+    lag_queries = torch.zeros(max_lag + 1, dtype=torch.long, device=device)
+    lag_correct = torch.zeros_like(lag_queries)
+    diagnostic_queries = torch.zeros_like(lag_queries)
+    diagnostic_fast_correct = torch.zeros_like(lag_queries)
+    diagnostic_gate_sum = torch.zeros(
+        max_lag + 1,
+        dtype=torch.float64,
+        device=device,
+    )
+    diagnostic_delta_sum = torch.zeros_like(diagnostic_gate_sum)
     _synchronize(device)
     started = time.perf_counter()
 
@@ -93,7 +176,14 @@ def evaluate(
         inputs = inputs.to(device)
         targets = targets.to(device)
         query_lags = query_lags.to(device)
-        logits = _forward(model, inputs)
+        if collect_arcmind_diagnostics:
+            logits, diagnostic_capture = _forward_with_arcmind_diagnostics(
+                model,
+                inputs,
+            )
+        else:
+            logits = _forward(model, inputs)
+            diagnostic_capture = None
         mask = targets != DelayedRecallDataset.ignore_index
         query_logits = logits[mask]
         query_targets = targets[mask]
@@ -108,6 +198,14 @@ def evaluate(
         is_correct = predictions == query_targets
         correct += is_correct.sum().item()
         queries += query_targets.numel()
+        lag_queries += torch.bincount(
+            query_lag_values,
+            minlength=max_lag + 1,
+        )
+        lag_correct += torch.bincount(
+            query_lag_values[is_correct],
+            minlength=max_lag + 1,
+        )
 
         short_mask = query_lag_values <= short_lag_limit
         long_mask = ~short_mask
@@ -116,9 +214,50 @@ def evaluate(
         long_correct += is_correct[long_mask].sum().item()
         long_queries += long_mask.sum().item()
 
+        if diagnostic_capture is not None:
+            query_locations = mask.nonzero(as_tuple=False)
+            query_batches = query_locations[:, 0]
+            query_timesteps = query_locations[:, 1]
+            query_decisions = query_timesteps // model.decision_stride
+            fast_query = diagnostic_capture["fast"][mask]
+            slow_query = diagnostic_capture["slow"][
+                query_batches,
+                query_decisions,
+            ]
+            gate_query = diagnostic_capture["gate"][mask]
+            counterfactual_fast_logits = model.action_head(fast_query)
+            counterfactual_fast_correct = (
+                counterfactual_fast_logits.argmax(dim=-1) == query_targets
+            )
+            slow_delta_norm = torch.linalg.vector_norm(
+                slow_query - fast_query,
+                dim=-1,
+            ) / math.sqrt(model.config.d_model)
+            mean_slow_gate = gate_query.mean(dim=-1)
+
+            diagnostic_queries += torch.bincount(
+                query_lag_values,
+                minlength=max_lag + 1,
+            )
+            diagnostic_fast_correct += torch.bincount(
+                query_lag_values[counterfactual_fast_correct],
+                minlength=max_lag + 1,
+            )
+            diagnostic_gate_sum.index_add_(
+                0,
+                query_lag_values,
+                mean_slow_gate.to(torch.float64),
+            )
+            diagnostic_delta_sum.index_add_(
+                0,
+                query_lag_values,
+                slow_delta_norm.to(torch.float64),
+            )
+
     _synchronize(device)
     elapsed = time.perf_counter() - started
-    return {
+    populated_lags = torch.nonzero(lag_queries, as_tuple=False).flatten().tolist()
+    result: dict[str, object] = {
         "nll": loss_sum / queries,
         "accuracy": correct / queries,
         "short_lag_accuracy": short_correct / short_queries,
@@ -128,7 +267,57 @@ def evaluate(
         "queries": queries,
         "examples_per_second": len(loader.dataset) / elapsed,
         "evaluation_seconds": elapsed,
+        "query_count_by_lag": {
+            str(lag): int(lag_queries[lag].item())
+            for lag in populated_lags
+        },
+        "accuracy_by_lag": {
+            str(lag): lag_correct[lag].item() / lag_queries[lag].item()
+            for lag in populated_lags
+        },
     }
+    diagnostic_lags = torch.nonzero(
+        diagnostic_queries,
+        as_tuple=False,
+    ).flatten().tolist()
+    if diagnostic_lags:
+        total_diagnostic_queries = diagnostic_queries.sum().item()
+        result["arcmind_diagnostics"] = {
+            "counterfactual_fast_path_accuracy": (
+                diagnostic_fast_correct.sum().item()
+                / total_diagnostic_queries
+            ),
+            "counterfactual_fast_path_accuracy_by_lag": {
+                str(lag): (
+                    diagnostic_fast_correct[lag].item()
+                    / diagnostic_queries[lag].item()
+                )
+                for lag in diagnostic_lags
+            },
+            "mean_slow_gate": (
+                diagnostic_gate_sum.sum().item()
+                / total_diagnostic_queries
+            ),
+            "mean_slow_gate_by_lag": {
+                str(lag): (
+                    diagnostic_gate_sum[lag].item()
+                    / diagnostic_queries[lag].item()
+                )
+                for lag in diagnostic_lags
+            },
+            "mean_slow_delta_norm": (
+                diagnostic_delta_sum.sum().item()
+                / total_diagnostic_queries
+            ),
+            "mean_slow_delta_norm_by_lag": {
+                str(lag): (
+                    diagnostic_delta_sum[lag].item()
+                    / diagnostic_queries[lag].item()
+                )
+                for lag in diagnostic_lags
+            },
+        }
+    return result
 
 
 def train_one_run(
@@ -183,6 +372,7 @@ def train_one_run(
         sensor_stride=task_config.sensor_stride,
         exact_recall_window=task_config.exact_recall_window,
         variant="arcmind",
+        num_keys=task_config.num_keys,
     )
     target_parameters = count_parameters(reference_model)
     set_seed(seed)
@@ -193,6 +383,7 @@ def train_one_run(
             sensor_stride=task_config.sensor_stride,
             exact_recall_window=task_config.exact_recall_window,
             variant=model_name,
+            num_keys=task_config.num_keys,
         )
     else:
         model = build_parameter_matched_baseline(
@@ -223,9 +414,22 @@ def train_one_run(
         for inputs, targets, _ in loaders["train"]:
             inputs = inputs.to(device)
             targets = targets.to(device)
-            logits = _forward(model, inputs)
+            if model_name == "arcmind_fast_aux":
+                logits, diagnostic_capture = _forward_with_arcmind_diagnostics(
+                    model,
+                    inputs,
+                )
+            else:
+                logits = _forward(model, inputs)
+                diagnostic_capture = None
             mask = targets != DelayedRecallDataset.ignore_index
             loss = F.cross_entropy(logits[mask], targets[mask])
+            if diagnostic_capture is not None:
+                fast_logits = model.action_head(diagnostic_capture["fast"])
+                loss = loss + F.cross_entropy(
+                    fast_logits[mask],
+                    targets[mask],
+                )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -275,6 +479,7 @@ def train_one_run(
         loaders["test"],
         device=device,
         short_lag_limit=task_config.exact_recall_window,
+        collect_arcmind_diagnostics=True,
     )
     result = {
         "schema_version": 1,
@@ -302,6 +507,9 @@ def train_one_run(
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "weight_decay": weight_decay,
+            "fast_path_auxiliary_weight": (
+                1.0 if model_name == "arcmind_fast_aux" else 0.0
+            ),
         },
     }
     return result, model
@@ -323,7 +531,11 @@ def main() -> None:
     protocol = _load_protocol()
     stage = protocol["stages"]["local_diagnostic"]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", choices=REGISTERED_MODELS)
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=REGISTERED_MODELS + EXPLORATORY_MODELS,
+    )
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=64)
