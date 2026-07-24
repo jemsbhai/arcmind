@@ -1341,6 +1341,23 @@ def _validate_artifact(
         provenance=manifest["provenance"],
         field=f"{field}.configuration",
     )
+    if registration["schema_version"] == 3:
+        try:
+            validate_causal_transformer_horizon_contract(
+                implementation_model,
+                artifact.get("policy_core"),
+                evaluation_horizon,
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
+        if (
+            implementation_model == "causal_transformer"
+            and artifact.get("policy_core") != configuration.get("policy_core")
+        ):
+            raise DevelopmentAggregationError(
+                f"{field}.policy_core does not match the frozen configuration"
+            )
     parameter_match = _validate_parameter_match(
         artifact,
         field=field,

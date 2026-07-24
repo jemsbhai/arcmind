@@ -1446,6 +1446,23 @@ def _validate_artifact(
         selection=expected if manifest_schema_version == 4 else None,
         field=f"{field}.configuration",
     )
+    if manifest_schema_version == 4:
+        try:
+            validate_causal_transformer_horizon_contract(
+                model,
+                artifact.get("policy_core"),
+                evaluation_horizon,
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+        if (
+            model == "causal_transformer"
+            and artifact.get("policy_core") != configuration.get("policy_core")
+        ):
+            raise RegisteredAggregationError(
+                f"{field}.policy_core does not match the frozen configuration"
+            )
     for name in (
         "environment_source",
         "environment_reference",
