@@ -48,16 +48,21 @@ from typing import Any
 
 import numpy as np
 
+from benchmarks.pobax.aggregate_development import build_development_aggregate
 from benchmarks.pobax.registered_artifacts import (
     atomic_write_json,
+    canonical_json_bytes,
     canonical_json_sha256,
     registered_cell_id,
+    sha256_file,
 )
 from benchmarks.pobax.registration_protocol import (
     LEARNER_FIELDS_V2,
+    normalize_final_selection_binding,
     normalize_learner,
     realized_environment_steps,
     step_budget_mode,
+    validate_final_selection_against_aggregate,
 )
 from benchmarks.pobax.upper_reference_registry import (
     UPPER_REFERENCE_ENVIRONMENTS,
@@ -81,6 +86,7 @@ _MANIFEST_KEYS = {
     "provenance",
     "cells",
 }
+_MANIFEST_KEYS_V4 = _MANIFEST_KEYS | {"tuning_selection"}
 _CELL_MANIFEST_KEYS = {
     "cell_id",
     "environment",
@@ -88,6 +94,12 @@ _CELL_MANIFEST_KEYS = {
     "seed",
     "configuration_sha256",
     "artifact_path",
+}
+_CELL_MANIFEST_KEYS_V4 = _CELL_MANIFEST_KEYS | {
+    "candidate_id",
+    "model_family",
+    "implementation_model",
+    "tuning_aggregate_sha256",
 }
 _PROVENANCE_KEYS = {
     "git",
@@ -141,6 +153,7 @@ _REGISTERED_TRAIN_STEPS = {
     "Navix-DMLab-Maze-01-v0": 10_000_000,
     "Navix-DMLab-Maze-01-fully-observable": 10_000_000,
 }
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class RegisteredAggregationError(ValueError):
@@ -332,6 +345,7 @@ def _validate_frozen_configuration(
     identity: tuple[str, str, int],
     provenance: Mapping[str, Any],
     field: str,
+    selection: Mapping[str, Any] | None = None,
 ) -> tuple[int, int, int]:
     configuration = _mapping(value, field=field)
     required = {
@@ -358,8 +372,8 @@ def _validate_frozen_configuration(
     if missing:
         raise RegisteredAggregationError(f"{field} is missing required fields: {missing}")
     configuration_schema = configuration["schema_version"]
-    if configuration_schema not in {1, 2}:
-        raise RegisteredAggregationError(f"{field}.schema_version must equal 1 or 2")
+    if configuration_schema not in {1, 2, 4}:
+        raise RegisteredAggregationError(f"{field}.schema_version must equal 1, 2, or 4")
     if configuration["evidence_tier"] != "registered_final":
         raise RegisteredAggregationError(f"{field}.evidence_tier must equal 'registered_final'")
 
@@ -371,6 +385,26 @@ def _validate_frozen_configuration(
     )
     if configured_identity != identity:
         raise RegisteredAggregationError(f"{field} identity does not match its artifact")
+    if configuration_schema == 4:
+        for name in (
+            "candidate_id",
+            "model_family",
+            "implementation_model",
+            "tuning_aggregate_sha256",
+        ):
+            if name not in configuration:
+                raise RegisteredAggregationError(f"{field} is missing {name}")
+        if selection is None or (
+            configuration["candidate_id"] != selection["candidate_id"]
+            or configuration["model_family"] != selection["model_family"]
+            or configuration["implementation_model"] != identity[1]
+            or configuration["tuning_aggregate_sha256"] != selection["tuning_aggregate_sha256"]
+        ):
+            raise RegisteredAggregationError(
+                f"{field} tuning-selection identity drifts from the manifest"
+            )
+    elif selection is not None:
+        raise RegisteredAggregationError(f"{field} has an unexpected tuning selection")
     environment_source = _mapping(
         configuration["environment_source"],
         field=f"{field}.environment_source",
@@ -437,7 +471,7 @@ def _validate_frozen_configuration(
             f"expected={expected_budget}, found={total_steps}"
         )
     realized_steps = total_steps
-    if configuration_schema == 2:
+    if configuration_schema in {2, 4}:
         for name in (
             "comparison_profile",
             "requested_environment_steps",
@@ -452,12 +486,18 @@ def _validate_frozen_configuration(
                 f"{field}.ppo is missing registered learner fields: {missing_learner_fields}"
             )
         try:
-            normalize_learner(
+            normalized_learner = normalize_learner(
                 {name: ppo[name] for name in LEARNER_FIELDS_V2},
-                schema_version=2,
+                schema_version=configuration_schema,
             )
         except ValueError as error:
             raise RegisteredAggregationError(str(error)) from error
+        if configuration_schema == 4 and (
+            selection is None or normalized_learner != selection["learner"]
+        ):
+            raise RegisteredAggregationError(
+                f"{field}.ppo learner drifts from the tuning aggregate winner"
+            )
         ppo_num_envs = _integer(
             ppo.get("num_envs"),
             field=f"{field}.ppo.num_envs",
@@ -802,13 +842,83 @@ def _trapezoid_by_step(values: Sequence[float], steps: Sequence[int]) -> float:
     return float(np.sum((x[1:] - x[:-1]) * (y[1:] + y[:-1]) * 0.5))
 
 
+def _bound_repository_path(relative_path: str, *, field: str) -> Path:
+    path = _REPOSITORY_ROOT.joinpath(*Path(relative_path).parts).resolve()
+    if not path.is_relative_to(_REPOSITORY_ROOT):
+        raise RegisteredAggregationError(f"{field} escapes the repository root")
+    return path
+
+
+def _validate_manifest_tuning_selection(
+    value: object,
+    *,
+    models: tuple[str, ...],
+    environments: tuple[str, ...],
+    final_seeds: tuple[int, ...],
+) -> dict[str, Any]:
+    try:
+        binding = normalize_final_selection_binding(value)
+    except ValueError as error:
+        raise RegisteredAggregationError(str(error)) from error
+    aggregate_path = _bound_repository_path(
+        binding["aggregate_path"],
+        field="manifest.tuning_selection.aggregate_path",
+    )
+    try:
+        aggregate_hash = sha256_file(aggregate_path)
+    except OSError as error:
+        raise RegisteredAggregationError(
+            f"cannot read bound tuning aggregate: {aggregate_path}"
+        ) from error
+    if aggregate_hash != binding["aggregate_sha256"]:
+        raise RegisteredAggregationError(
+            "manifest tuning aggregate SHA256 does not match aggregate bytes"
+        )
+    raw_matrix_path = _bound_repository_path(
+        binding["raw_matrix_path"],
+        field="manifest.tuning_selection.raw_matrix_path",
+    )
+    try:
+        rebuilt = build_development_aggregate(raw_matrix_path)
+        aggregate_bytes = aggregate_path.read_bytes()
+    except (OSError, ValueError) as error:
+        raise RegisteredAggregationError(
+            "cannot rebuild the bound development-tuning aggregate"
+        ) from error
+    if aggregate_bytes != canonical_json_bytes(rebuilt) + b"\n":
+        raise RegisteredAggregationError(
+            "bound tuning aggregate is not the canonical rebuild of its raw matrix"
+        )
+    if (
+        rebuilt["registration_sha256"] != binding["source_registration_sha256"]
+        or rebuilt["matrix_manifest_sha256"] != binding["source_manifest_sha256"]
+    ):
+        raise RegisteredAggregationError("bound tuning source registration or manifest hash drifts")
+    try:
+        validate_final_selection_against_aggregate(
+            binding,
+            rebuilt,
+            models=models,
+            environments=environments,
+            final_seeds=final_seeds,
+        )
+    except ValueError as error:
+        raise RegisteredAggregationError(str(error)) from error
+    return binding
+
+
 def _validate_manifest(
     manifest_path: Path,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], Any]]:
     manifest = _mapping(_load_json(manifest_path, kind="matrix manifest"), field="manifest")
-    _exact_keys(manifest, _MANIFEST_KEYS, field="manifest")
-    if manifest["schema_version"] not in {1, 2}:
-        raise RegisteredAggregationError("manifest.schema_version must equal 1 or 2")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {1, 2, 4}:
+        raise RegisteredAggregationError("manifest.schema_version must equal 1, 2, or 4")
+    _exact_keys(
+        manifest,
+        _MANIFEST_KEYS_V4 if schema_version == 4 else _MANIFEST_KEYS,
+        field="manifest",
+    )
     if manifest["status"] != "frozen":
         raise RegisteredAggregationError("manifest.status must equal 'frozen'")
     manifest_sha256 = _sha256(manifest["manifest_sha256"], field="manifest.manifest_sha256")
@@ -853,6 +963,18 @@ def _validate_manifest(
             "primary_comparison manifest contains upper-reference aliases: "
             f"{sorted(selected_upper_references)}"
         )
+    if schema_version == 4 and matrix_kind != "primary_comparison":
+        raise RegisteredAggregationError("schema-v4 manifest must be a primary comparison")
+    tuning_selection = (
+        _validate_manifest_tuning_selection(
+            manifest["tuning_selection"],
+            models=models,
+            environments=environments,
+            final_seeds=seeds,
+        )
+        if schema_version == 4
+        else None
+    )
     provenance = _validate_provenance(manifest["provenance"], field="manifest.provenance")
     cells = manifest["cells"]
     if not isinstance(cells, list) or not cells:
@@ -870,7 +992,11 @@ def _validate_manifest(
     for index, raw_entry in enumerate(cells):
         field = f"manifest.cells[{index}]"
         entry = _mapping(raw_entry, field=field)
-        _exact_keys(entry, _CELL_MANIFEST_KEYS, field=field)
+        _exact_keys(
+            entry,
+            _CELL_MANIFEST_KEYS_V4 if schema_version == 4 else _CELL_MANIFEST_KEYS,
+            field=field,
+        )
         environment = _string(entry["environment"], field=f"{field}.environment")
         model = _string(entry["model"], field=f"{field}.model")
         seed = _integer(entry["seed"], field=f"{field}.seed")
@@ -903,10 +1029,34 @@ def _validate_manifest(
             raise RegisteredAggregationError(f"duplicate manifest artifact path: {path}")
         seen_cell_ids.add(cell_id)
         seen_paths.add(path)
+        selection_metadata: dict[str, Any] = {}
+        if tuning_selection is not None:
+            selection = next(
+                item
+                for item in tuning_selection["selections"]
+                if item["environment"] == environment and item["implementation_model"] == model
+            )
+            if (
+                entry["candidate_id"] != selection["candidate_id"]
+                or entry["model_family"] != selection["model_family"]
+                or entry["implementation_model"] != model
+                or entry["tuning_aggregate_sha256"] != tuning_selection["aggregate_sha256"]
+            ):
+                raise RegisteredAggregationError(
+                    f"{field} tuning-selection identity drifts from the manifest binding"
+                )
+            selection_metadata = {
+                "candidate_id": selection["candidate_id"],
+                "model_family": selection["model_family"],
+                "implementation_model": model,
+                "tuning_aggregate_sha256": tuning_selection["aggregate_sha256"],
+                "learner": selection["learner"],
+            }
         indexed[identity] = {
             "cell_id": cell_id,
             "configuration_sha256": configuration_sha256,
             "artifact_path": path,
+            **selection_metadata,
         }
     missing = sorted(expected - set(indexed))
     if missing:
@@ -922,6 +1072,7 @@ def _validate_manifest(
         "environments": environments,
         "seeds": seeds,
         "provenance": provenance,
+        "tuning_selection": tuning_selection,
     }
     return normalized, indexed
 
@@ -968,7 +1119,18 @@ def _validate_artifact(
     missing = sorted(required - set(artifact))
     if missing:
         raise RegisteredAggregationError(f"{field} is missing required fields: {missing}")
-    expected_artifact_schema = 5 if manifest_schema_version == 2 else 4
+    if manifest_schema_version == 4:
+        for name in (
+            "candidate_id",
+            "model_family",
+            "implementation_model",
+            "tuning_aggregate_sha256",
+        ):
+            if name not in artifact:
+                raise RegisteredAggregationError(f"{field} is missing {name}")
+    expected_artifact_schema = (
+        7 if manifest_schema_version == 4 else 5 if manifest_schema_version == 2 else 4
+    )
     if artifact["schema_version"] != expected_artifact_schema:
         raise RegisteredAggregationError(
             f"{field}.schema_version must equal current schema {expected_artifact_schema}"
@@ -1008,6 +1170,15 @@ def _validate_artifact(
     artifact_seed = _integer(artifact["seed"], field=f"{field}.seed")
     if artifact_environment != environment or artifact_model != model or artifact_seed != seed:
         raise RegisteredAggregationError(f"{field} identity does not match the manifest")
+    if manifest_schema_version == 4 and (
+        artifact["candidate_id"] != expected["candidate_id"]
+        or artifact["model_family"] != expected["model_family"]
+        or artifact["implementation_model"] != expected["implementation_model"]
+        or artifact["tuning_aggregate_sha256"] != expected["tuning_aggregate_sha256"]
+    ):
+        raise RegisteredAggregationError(
+            f"{field} tuning-selection identity drifts from the manifest"
+        )
     artifact_provenance = _validate_provenance(
         artifact["provenance"],
         field=f"{field}.provenance",
@@ -1018,6 +1189,7 @@ def _validate_artifact(
         configuration,
         identity=identity,
         provenance=provenance,
+        selection=expected if manifest_schema_version == 4 else None,
         field=f"{field}.configuration",
     )
     for name in (
@@ -1041,7 +1213,7 @@ def _validate_artifact(
         raise RegisteredAggregationError(
             f"{field}.actual_environment_steps does not match the registered budget"
         )
-    if manifest_schema_version == 2:
+    if manifest_schema_version in {2, 4}:
         for name in (
             "comparison_profile",
             "requested_environment_steps",
@@ -1338,7 +1510,7 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
                 },
             }
         )
-    return {
+    result = {
         "schema_version": 1,
         "status": "registered_matrix_aggregate",
         "matrix_manifest_sha256": manifest["manifest_sha256"],
@@ -1367,6 +1539,28 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
         "groups": groups,
         "paired_differences_against_arcmind": paired,
     }
+    if manifest["tuning_selection"] is not None:
+        result["tuning_selection_binding"] = {
+            "aggregate_path": manifest["tuning_selection"]["aggregate_path"],
+            "aggregate_sha256": manifest["tuning_selection"]["aggregate_sha256"],
+            "source_registration_sha256": manifest["tuning_selection"][
+                "source_registration_sha256"
+            ],
+            "source_manifest_sha256": manifest["tuning_selection"]["source_manifest_sha256"],
+            "validated": True,
+            "final_seeds_disjoint_from_tuning": True,
+            "selections": [
+                {
+                    "environment": selection["environment"],
+                    "model_family": selection["model_family"],
+                    "implementation_model": selection["implementation_model"],
+                    "candidate_id": selection["candidate_id"],
+                    "learner": selection["learner"],
+                }
+                for selection in manifest["tuning_selection"]["selections"]
+            ],
+        }
+    return result
 
 
 def aggregate_registered(

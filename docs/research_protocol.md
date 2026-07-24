@@ -274,7 +274,11 @@ Classify every run before execution:
   seed learning-curve AUC on the shared complete-case suffix. It cannot rank
   architectures, select a checkpoint, or serve as paper performance evidence.
 - A registered final run uses frozen choices, paired seed manifests, and the
-  published interaction budget for every method in a task cell.
+  published interaction budget for every method in a task cell. A primary
+  comparison must use schema v4 and bind every learner to the exact winner of
+  one verified tuning aggregate on the same task. Final seeds must be
+  disjoint from tuning seeds. Separately labeled schema-v2 upper references
+  do not require a tuning binding.
 
 Primary and upper-reference results require a cross-matrix link artifact
 before comparison. The linker validates the complete raw checksum inventories,
@@ -303,9 +307,10 @@ aggregation. It requires schema v3, explicit immutable candidate IDs grouped
 by implementation model, the shared exact-step comparison profile, one
 complete Cartesian candidate matrix, checksum and completion indexes, frozen
 environment semantics, and frozen parameter matching. Every model family has
-the same candidate count. All candidates share `num_envs`, `rollout_steps`,
-`update_epochs`, and `num_minibatches`; only learning rate, GAE lambda,
-entropy coefficient, and learning-rate annealing may vary. The common curve
+the same candidate count and the exact same normalized learner configuration
+set. All candidates share `num_envs`, `rollout_steps`, `update_epochs`, and
+`num_minibatches`; only learning rate, GAE lambda, entropy coefficient, and
+learning-rate annealing may vary. The common curve
 starts at the latest first finite return across all candidate and seed cells
 and must retain at least two observations. Per-seed AUC uses trapezoidal
 integration over environment steps with no extrapolation. Dividing by the
@@ -314,6 +319,20 @@ its seed mean only within their model family. The selected configurations must
 be frozen in a new manifest and rerun on disjoint registered-final seeds.
 Every tuning completion row must identify its immutable cell log and SHA256,
 and the matrix checksum inventory must cover all of those logs.
+
+Schema v4 closes the selection-to-final boundary. Its registration names the
+raw tuning matrix and canonical tuning aggregate by repository-relative path,
+binds both source hashes and the aggregate file SHA256, and copies only the
+winning candidate identity and complete learner for each model family. The
+loader rebuilds the tuning aggregate, requires exact canonical bytes, checks
+every declared winner and learner, and rejects any overlap between tuning and
+final seeds. The same binding is frozen in the final matrix manifest and
+revalidated during registered aggregation.
+
+Canonical cell logs identify successful executions only. Output from a
+failed child is retained under a unique failed-attempt path, together with any
+partial artifact, and cannot be reused by a later successful completion or
+resume.
 
 ### Track B: state-based robot imitation (primary application)
 

@@ -9,10 +9,12 @@ from typing import Any
 import numpy as np
 import pytest
 
+import benchmarks.pobax.aggregate_registered as aggregate_registered_module
 from benchmarks.pobax.aggregate_registered import (
     BOOTSTRAP_RESAMPLES,
     RegisteredAggregationError,
     _validate_frozen_configuration,
+    _validate_manifest_tuning_selection,
     aggregate_registered,
     build_registered_aggregate,
     interquartile_mean,
@@ -21,6 +23,7 @@ from benchmarks.pobax.registered_artifacts import (
     atomic_write_json,
     canonical_json_sha256,
     registered_cell_id,
+    sha256_file,
 )
 from benchmarks.pobax.upper_reference_registry import (
     expected_environment_reference,
@@ -143,6 +146,163 @@ def _evaluation(value: float, *, episodes_per_environment: int = 2) -> dict[str,
         "scan_steps_per_environment": episodes_per_environment * EVALUATION_HORIZON,
         "returns_by_environment": rows,
     }
+
+
+def test_registered_aggregation_revalidates_schema_v4_tuning_binding(
+    tmp_path,
+    monkeypatch,
+):
+    learner = {
+        "num_envs": 8,
+        "rollout_steps": 125,
+        "update_epochs": 4,
+        "num_minibatches": 4,
+        "learning_rate": 0.001,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": False,
+    }
+    tuning_aggregate = {
+        "schema_version": 1,
+        "status": "development_tuning_selection_aggregate_not_for_paper",
+        "evidence_tier": "development_tuning",
+        "matrix_kind": "hyperparameter_selection",
+        "not_for_paper": True,
+        "registration_sha256": "1" * 64,
+        "matrix_manifest_sha256": "2" * 64,
+        "environments": ["tmaze_10"],
+        "seeds": [1103, 2207, 3301, 4409, 5519],
+        "integrity_indexes": {
+            "completion_index_present_and_validated": True,
+            "checksums_present_and_validated": True,
+        },
+        "frozen_semantic_contract": {
+            "environment_source_in_every_configuration": True,
+            "parameter_match_in_every_configuration": True,
+            "artifact_parameter_match_validated": True,
+        },
+        "selection_eligibility": {
+            "eligible_for_hyperparameter_selection": True,
+            "eligible_for_architecture_selection": False,
+            "eligible_for_checkpoint_selection": False,
+            "eligible_for_registered_final_evidence": False,
+            "eligible_for_paper_performance_claims": False,
+            "selection_scope": "candidate_within_model_family_and_environment",
+        },
+        "candidate_selection": [
+            {
+                "environment": "tmaze_10",
+                "model_family": "ordered_memory",
+                "implementation_model": "arcmind",
+                "winner_candidate_id": "ordered_memory.lr_high",
+                "ranking": [{"rank": 1, "candidate_id": "ordered_memory.lr_high"}],
+            }
+        ],
+        "groups": [
+            {
+                "environment": "tmaze_10",
+                "candidate_id": "ordered_memory.lr_high",
+                "model_family": "ordered_memory",
+                "implementation_model": "arcmind",
+                "learner": learner,
+            }
+        ],
+    }
+    raw_matrix_path = tmp_path / "raw-tuning"
+    raw_matrix_path.mkdir()
+    aggregate_path = tmp_path / "tuning-selection.json"
+    atomic_write_json(aggregate_path, tuning_aggregate)
+    binding = {
+        "raw_matrix_path": "raw-tuning",
+        "aggregate_path": "tuning-selection.json",
+        "aggregate_sha256": sha256_file(aggregate_path),
+        "source_registration_sha256": tuning_aggregate["registration_sha256"],
+        "source_manifest_sha256": tuning_aggregate["matrix_manifest_sha256"],
+        "selections": [
+            {
+                "environment": "tmaze_10",
+                "model_family": "ordered_memory",
+                "implementation_model": "arcmind",
+                "candidate_id": "ordered_memory.lr_high",
+                "learner": learner,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        aggregate_registered_module,
+        "_REPOSITORY_ROOT",
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        aggregate_registered_module,
+        "build_development_aggregate",
+        lambda path: deepcopy(tuning_aggregate),
+    )
+
+    normalized = _validate_manifest_tuning_selection(
+        binding,
+        models=("arcmind",),
+        environments=("tmaze_10",),
+        final_seeds=tuple(range(10_000, 10_030)),
+    )
+
+    assert normalized["aggregate_sha256"] == sha256_file(aggregate_path)
+    assert normalized["selections"][0]["learner"] == learner
+
+
+def test_schema_v4_configuration_must_match_selected_winner_learner():
+    configuration = _configuration(
+        "tmaze_10",
+        "arcmind",
+        11,
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+    configuration.update(
+        schema_version=4,
+        candidate_id="ordered_memory.lr_high",
+        model_family="ordered_memory",
+        implementation_model="arcmind",
+        tuning_aggregate_sha256="5" * 64,
+    )
+    learner = {
+        name: configuration["ppo"][name]
+        for name in (
+            "num_envs",
+            "rollout_steps",
+            "update_epochs",
+            "num_minibatches",
+            "learning_rate",
+            "gae_lambda",
+            "entropy_coefficient",
+            "anneal_learning_rate",
+        )
+    }
+    selection = {
+        "candidate_id": "ordered_memory.lr_high",
+        "model_family": "ordered_memory",
+        "implementation_model": "arcmind",
+        "tuning_aggregate_sha256": "5" * 64,
+        "learner": learner,
+    }
+
+    assert _validate_frozen_configuration(
+        configuration,
+        identity=("tmaze_10", "arcmind", 11),
+        provenance=PROVENANCE,
+        field="configuration",
+        selection=selection,
+    ) == (1_000_000, 2, EVALUATION_HORIZON)
+
+    configuration["ppo"]["learning_rate"] = 0.0005
+    with pytest.raises(RegisteredAggregationError, match="learner drifts"):
+        _validate_frozen_configuration(
+            configuration,
+            identity=("tmaze_10", "arcmind", 11),
+            provenance=PROVENANCE,
+            field="configuration",
+            selection=selection,
+        )
 
 
 def _write_matrix(

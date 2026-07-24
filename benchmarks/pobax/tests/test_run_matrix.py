@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.pobax import run_pilot
+from benchmarks.pobax import run_matrix, run_pilot
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
+    atomic_write_json,
     canonical_json_sha256,
+    sha256_file,
 )
 from benchmarks.pobax.run_matrix import (
     _cell_namespace,
     _command_for_cell,
     _load_matching_artifact,
     _load_registration,
+    execute_matrix,
 )
 from benchmarks.pobax.run_pilot import (
     environment_horizon_and_gamma,
@@ -103,6 +108,135 @@ def _registration_v3() -> dict[str, object]:
         ],
     )
     return registration
+
+
+def _tuning_aggregate() -> dict[str, object]:
+    learners = {
+        "ordered_memory": {
+            "num_envs": 8,
+            "rollout_steps": 125,
+            "update_epochs": 4,
+            "num_minibatches": 4,
+            "learning_rate": 0.001,
+            "gae_lambda": 0.95,
+            "entropy_coefficient": 0.01,
+            "anneal_learning_rate": False,
+        },
+        "recurrent": {
+            "num_envs": 8,
+            "rollout_steps": 125,
+            "update_epochs": 4,
+            "num_minibatches": 4,
+            "learning_rate": 0.001,
+            "gae_lambda": 0.95,
+            "entropy_coefficient": 0.01,
+            "anneal_learning_rate": False,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "status": "development_tuning_selection_aggregate_not_for_paper",
+        "evidence_tier": "development_tuning",
+        "matrix_kind": "hyperparameter_selection",
+        "not_for_paper": True,
+        "registration_sha256": "1" * 64,
+        "matrix_manifest_sha256": "2" * 64,
+        "environments": ["tmaze_10"],
+        "seeds": [1103, 2207, 3301, 4409, 5519],
+        "integrity_indexes": {
+            "completion_index_present_and_validated": True,
+            "checksums_present_and_validated": True,
+        },
+        "frozen_semantic_contract": {
+            "environment_source_in_every_configuration": True,
+            "parameter_match_in_every_configuration": True,
+            "artifact_parameter_match_validated": True,
+        },
+        "selection_eligibility": {
+            "eligible_for_hyperparameter_selection": True,
+            "eligible_for_architecture_selection": False,
+            "eligible_for_checkpoint_selection": False,
+            "eligible_for_registered_final_evidence": False,
+            "eligible_for_paper_performance_claims": False,
+            "selection_scope": "candidate_within_model_family_and_environment",
+        },
+        "candidate_selection": [
+            {
+                "environment": "tmaze_10",
+                "model_family": family,
+                "implementation_model": implementation,
+                "winner_candidate_id": f"{family}.lr_high",
+                "ranking": [
+                    {"rank": 1, "candidate_id": f"{family}.lr_high"},
+                    {"rank": 2, "candidate_id": f"{family}.lr_low"},
+                ],
+            }
+            for family, implementation in (
+                ("ordered_memory", "arcmind"),
+                ("recurrent", "gru"),
+            )
+        ],
+        "groups": [
+            {
+                "environment": "tmaze_10",
+                "candidate_id": f"{family}.lr_high",
+                "model_family": family,
+                "implementation_model": implementation,
+                "learner": learners[family],
+            }
+            for family, implementation in (
+                ("ordered_memory", "arcmind"),
+                ("recurrent", "gru"),
+            )
+        ],
+    }
+
+
+def _registration_v4(tmp_path: Path, monkeypatch) -> tuple[dict[str, object], Path]:
+    aggregate = _tuning_aggregate()
+    raw_matrix = tmp_path / "raw-tuning"
+    raw_matrix.mkdir()
+    aggregate_path = tmp_path / "tuning-selection.json"
+    atomic_write_json(aggregate_path, aggregate)
+    monkeypatch.setattr(run_matrix, "_REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        run_matrix,
+        "build_development_aggregate",
+        lambda path: deepcopy(aggregate),
+    )
+    selections = [
+        {
+            "environment": "tmaze_10",
+            "model_family": group["model_family"],
+            "implementation_model": group["implementation_model"],
+            "candidate_id": group["candidate_id"],
+            "learner": deepcopy(group["learner"]),
+        }
+        for group in aggregate["groups"]
+    ]
+    registration = {
+        "schema_version": 4,
+        "status": "frozen",
+        "evidence_tier": "registered_final",
+        "matrix_kind": "primary_comparison",
+        "models": ["arcmind", "gru"],
+        "environments": [{"id": "tmaze_10", "total_steps": 1_000_000}],
+        "seeds": list(range(10_000, 10_030)),
+        "comparison_profile": "arcmind_shared_comparison",
+        "tuning_selection": {
+            "raw_matrix_path": "raw-tuning",
+            "aggregate_path": "tuning-selection.json",
+            "aggregate_sha256": sha256_file(aggregate_path),
+            "source_registration_sha256": aggregate["registration_sha256"],
+            "source_manifest_sha256": aggregate["matrix_manifest_sha256"],
+            "selections": selections,
+        },
+        "evaluation_episodes_per_env": 128,
+        "require_gpu": True,
+        "quick": False,
+    }
+    path = tmp_path / "registration-v4.json"
+    return registration, path
 
 
 @pytest.mark.parametrize(
@@ -372,12 +506,105 @@ def test_quick_registration_cannot_misstate_overridden_values(
 
 
 def test_registered_final_requires_full_seed_cardinality(tmp_path):
-    registration = _registration()
-    registration.update(evidence_tier="registered_final")
+    registration = _registration_v2(comparison_profile="pobax_author_semantics")
+    registration.update(
+        evidence_tier="registered_final",
+        matrix_kind="upper_reference",
+        models=["memoryless_mlp"],
+        environments=[{"id": "Walker-F-v0", "total_steps": 50_000_000}],
+    )
     path = tmp_path / "registration.json"
     path.write_text(json.dumps(registration), encoding="utf-8")
 
     with pytest.raises(ValueError, match="exactly 30 paired seeds"):
+        _load_registration(path)
+
+
+def test_schema_v2_author_semantics_upper_reference_needs_no_tuning_binding(
+    tmp_path,
+):
+    registration = _registration_v2(comparison_profile="pobax_author_semantics")
+    registration.update(
+        evidence_tier="registered_final",
+        matrix_kind="upper_reference",
+        models=["memoryless_mlp"],
+        environments=[{"id": "Walker-F-v0", "total_steps": 50_000_000}],
+        seeds=list(range(10_000, 10_030)),
+    )
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    assert _load_registration(path) == registration
+
+
+def test_registered_primary_comparison_requires_schema_v4_binding(tmp_path):
+    registration = _registration_v2()
+    registration.update(
+        evidence_tier="registered_final",
+        seeds=list(range(10_000, 10_030)),
+        environments=[{"id": "tmaze_10", "total_steps": 1_000_000}],
+    )
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema version 4"):
+        _load_registration(path)
+
+
+def test_schema_v4_registered_final_binds_exact_tuning_winners(
+    tmp_path,
+    monkeypatch,
+):
+    registration, path = _registration_v4(tmp_path, monkeypatch)
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    assert _load_registration(path) == registration
+
+
+def _overlap_tuning_and_final_seeds(registration):
+    registration["seeds"] = [1103, *range(10_000, 10_029)]
+
+
+def _select_nonwinner(registration):
+    registration["tuning_selection"]["selections"][0]["candidate_id"] = "ordered_memory.lr_low"
+
+
+def _drift_selected_learner(registration):
+    registration["tuning_selection"]["selections"][0]["learner"]["learning_rate"] = 0.0005
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            _overlap_tuning_and_final_seeds,
+            "disjoint from tuning seeds",
+        ),
+        (
+            _select_nonwinner,
+            "does not match the tuning aggregate winner",
+        ),
+        (
+            lambda value: value["tuning_selection"].update(aggregate_sha256="0" * 64),
+            "does not match aggregate bytes",
+        ),
+        (
+            _drift_selected_learner,
+            "learner drifts from the tuning aggregate winner",
+        ),
+    ],
+)
+def test_schema_v4_registered_final_binding_fails_closed(
+    tmp_path,
+    monkeypatch,
+    mutation,
+    message,
+):
+    registration, path = _registration_v4(tmp_path, monkeypatch)
+    mutation(registration)
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         _load_registration(path)
 
 
@@ -449,6 +676,11 @@ def _drift_structural_learner(registration):
     learner.update(num_envs=4, rollout_steps=250)
 
 
+def _drift_cross_family_tuning_grid(registration):
+    learner = registration["candidate_families"][1]["candidates"][1]["learner"]
+    learner["learning_rate"] = 0.002
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -477,6 +709,10 @@ def _drift_structural_learner(registration):
         (
             _drift_structural_learner,
             "identical num_envs",
+        ),
+        (
+            _drift_cross_family_tuning_grid,
+            "exact same normalized learner configuration grid",
         ),
     ],
 )
@@ -550,6 +786,7 @@ def test_existing_artifact_must_match_identity_and_provenance(tmp_path):
             manifest_sha256="f" * 64,
             cell_id="1" * 64,
             provenance=provenance,
+            registration_schema_version=1,
         )
         == artifact
     )
@@ -566,6 +803,7 @@ def test_existing_artifact_must_match_identity_and_provenance(tmp_path):
             manifest_sha256="f" * 64,
             cell_id="1" * 64,
             provenance=altered,
+            registration_schema_version=1,
         )
 
     artifact["configuration"]["seed"] = 999
@@ -581,6 +819,7 @@ def test_existing_artifact_must_match_identity_and_provenance(tmp_path):
             manifest_sha256="f" * 64,
             cell_id="1" * 64,
             provenance=provenance,
+            registration_schema_version=1,
         )
 
 
@@ -622,6 +861,7 @@ def test_existing_tuning_artifact_must_match_candidate_identity(tmp_path):
         "matrix_manifest_sha256": "f" * 64,
         "cell_id": "1" * 64,
         "provenance": provenance,
+        "registration_schema_version": 3,
     }
     path.write_text(json.dumps(artifact), encoding="utf-8")
     arguments = {
@@ -633,13 +873,14 @@ def test_existing_tuning_artifact_must_match_candidate_identity(tmp_path):
         "manifest_sha256": "f" * 64,
         "cell_id": "1" * 64,
         "provenance": provenance,
+        "registration_schema_version": 3,
     }
 
     assert _load_matching_artifact(path, **arguments) == artifact
 
     artifact["schema_version"] = 5
     path.write_text(json.dumps(artifact), encoding="utf-8")
-    with pytest.raises(ExistingArtifactMismatchError, match="tuning cell.*wrong schema"):
+    with pytest.raises(ExistingArtifactMismatchError, match="wrong schema"):
         _load_matching_artifact(path, **arguments)
 
     artifact["schema_version"] = 6
@@ -740,6 +981,149 @@ def test_tuning_cell_namespace_separates_family_candidate_and_implementation():
     assert args.model_family == "ordered_memory"
     assert args.candidate_id == "ordered_memory.lr_high"
     assert args.learning_rate == 0.001
+
+
+def test_schema_v4_cell_namespace_carries_bound_final_selection(
+    tmp_path,
+    monkeypatch,
+):
+    registration, _ = _registration_v4(tmp_path, monkeypatch)
+
+    args = _cell_namespace(
+        registration,
+        environment=registration["environments"][0],
+        model="arcmind",
+        seed=10_000,
+        output=tmp_path / "cell.json",
+        manifest_sha256="a" * 64,
+        cell_id="b" * 64,
+        describe_only=False,
+    )
+    command = _command_for_cell(args)
+
+    assert args.model == "arcmind"
+    assert args.model_family == "ordered_memory"
+    assert args.candidate_id == "ordered_memory.lr_high"
+    assert args.learning_rate == 0.001
+    assert args.tuning_aggregate_sha256 == registration["tuning_selection"]["aggregate_sha256"]
+    assert (
+        command[command.index("--tuning-aggregate-sha256") + 1]
+        == (registration["tuning_selection"]["aggregate_sha256"])
+    )
+
+
+def test_failed_attempt_log_is_never_certified_by_later_success(
+    tmp_path,
+    monkeypatch,
+):
+    registration = _registration()
+    registration.update(models=["arcmind"], seeds=[1103])
+    registration_path = tmp_path / "registration.json"
+    registration_path.write_text(json.dumps(registration), encoding="utf-8")
+    output_root = tmp_path / "matrix"
+    provenance = {
+        "git": {"commit": "a" * 40, "dirty": False, "diff_sha256": None},
+        "dependency_lock_sha256": "b" * 64,
+        "pobax_commit": "c" * 40,
+        "navix_commit": "d" * 40,
+        "runtime_contract": {"runtime": "test"},
+    }
+
+    def configuration(environment, model, seed):
+        return {
+            "schema_version": 1,
+            "evidence_tier": "pilot",
+            "environment": environment,
+            "model": model,
+            "seed": seed,
+            "dependency_lock_sha256": provenance["dependency_lock_sha256"],
+            "pobax_commit": provenance["pobax_commit"],
+            "navix_commit": provenance["navix_commit"],
+            "runtime_contract": provenance["runtime_contract"],
+        }
+
+    def fake_describe(args):
+        frozen = configuration(args.environment, args.model, args.seed)
+        return {
+            "configuration_sha256": canonical_json_sha256(frozen),
+            "configuration": frozen,
+            "runtime": {"git": provenance["git"]},
+        }
+
+    attempts = []
+
+    def argument(command, name):
+        return command[command.index(name) + 1]
+
+    def fake_subprocess(command, **kwargs):
+        del kwargs
+        attempts.append(list(command))
+        environment = argument(command, "--environment")
+        model = argument(command, "--model")
+        seed = int(argument(command, "--seed"))
+        frozen = configuration(environment, model, seed)
+        artifact_path = Path(argument(command, "--output"))
+        artifact = {
+            "schema_version": 4,
+            "status": "development_pilot_not_for_paper",
+            "environment": environment,
+            "model": model,
+            "seed": seed,
+            "configuration_sha256": canonical_json_sha256(frozen),
+            "configuration": frozen,
+            "matrix_manifest_sha256": argument(command, "--matrix-manifest-sha256"),
+            "cell_id": argument(command, "--cell-id"),
+            "provenance": provenance,
+        }
+        if len(attempts) == 2:
+            artifact["status"] = "invalid_success_artifact"
+        atomic_write_json(artifact_path, artifact)
+        if len(attempts) == 1:
+            return SimpleNamespace(returncode=1, stdout=b"failed attempt\n")
+        if len(attempts) == 2:
+            return SimpleNamespace(returncode=0, stdout=b"invalid success attempt\n")
+        return SimpleNamespace(returncode=0, stdout=b"successful attempt\n")
+
+    monkeypatch.setattr(run_matrix, "run", fake_describe)
+    monkeypatch.setattr(run_matrix.subprocess, "run", fake_subprocess)
+
+    with pytest.raises(RuntimeError, match="cell failed"):
+        execute_matrix(registration_path, output_root)
+
+    manifest = json.loads((output_root / "frozen_manifest.json").read_text(encoding="utf-8"))
+    canonical_log_before_success = (
+        output_root / manifest["cells"][0]["artifact_path"]
+    ).with_suffix(".log")
+    assert not canonical_log_before_success.exists()
+    failed_logs = list(output_root.rglob("*.failed.log"))
+    failed_artifacts = list(output_root.rglob("*.failed.json"))
+    assert len(failed_logs) == 1
+    assert failed_logs[0].read_bytes() == b"failed attempt\n"
+    assert len(failed_artifacts) == 1
+
+    with pytest.raises(RuntimeError, match="returned success with an invalid artifact"):
+        execute_matrix(registration_path, output_root)
+
+    assert not canonical_log_before_success.exists()
+    failed_logs = sorted(output_root.rglob("*.failed.log"))
+    failed_artifacts = sorted(output_root.rglob("*.failed.json"))
+    assert len(failed_logs) == 2
+    assert {path.read_bytes() for path in failed_logs} == {
+        b"failed attempt\n",
+        b"invalid success attempt\n",
+    }
+    assert len(failed_artifacts) == 2
+
+    completion = execute_matrix(registration_path, output_root)
+    canonical_log = output_root / completion["cells"][0]["log_path"]
+    assert canonical_log.read_bytes() == b"successful attempt\n"
+    assert sha256_file(canonical_log) == completion["cells"][0]["log_sha256"]
+    assert len(attempts) == 3
+
+    resumed = execute_matrix(registration_path, output_root)
+    assert resumed == completion
+    assert len(attempts) == 3
+    assert canonical_log.read_bytes() == b"successful attempt\n"
 
 
 def test_environment_horizon_and_gamma_uses_source_contract():

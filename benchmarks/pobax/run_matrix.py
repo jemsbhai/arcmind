@@ -6,14 +6,17 @@ import argparse
 import json
 import subprocess
 import sys
+import uuid
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
+from benchmarks.pobax.aggregate_development import build_development_aggregate
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
     atomic_write_bytes,
     atomic_write_json,
+    canonical_json_bytes,
     canonical_json_sha256,
     registered_cell_id,
     registered_cell_path,
@@ -24,11 +27,13 @@ from benchmarks.pobax.registered_artifacts import (
 )
 from benchmarks.pobax.registration_protocol import (
     normalize_candidate_families,
+    normalize_final_selection_binding,
     normalize_learner,
     realized_environment_steps,
     registration_fields,
     validate_comparison_profile,
     validate_development_tuning_contract,
+    validate_final_selection_against_aggregate,
 )
 from benchmarks.pobax.run_pilot import (
     EVIDENCE_STATUS,
@@ -47,6 +52,53 @@ _MATRIX_KINDS = {
     "upper_reference",
     "hyperparameter_selection",
 }
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _bound_repository_path(relative_path: str, *, field: str) -> Path:
+    path = _REPOSITORY_ROOT.joinpath(*Path(relative_path).parts).resolve()
+    if not path.is_relative_to(_REPOSITORY_ROOT):
+        raise ValueError(f"{field} escapes the repository root")
+    return path
+
+
+def _validate_final_tuning_selection(
+    registration: dict[str, Any],
+) -> dict[str, Any]:
+    binding = normalize_final_selection_binding(registration["tuning_selection"])
+    aggregate_path = _bound_repository_path(
+        binding["aggregate_path"],
+        field="tuning_selection.aggregate_path",
+    )
+    try:
+        aggregate_hash = sha256_file(aggregate_path)
+    except OSError as error:
+        raise ValueError(f"cannot read tuning selection aggregate: {aggregate_path}") from error
+    if aggregate_hash != binding["aggregate_sha256"]:
+        raise ValueError("tuning_selection.aggregate_sha256 does not match aggregate bytes")
+    raw_matrix_path = _bound_repository_path(
+        binding["raw_matrix_path"],
+        field="tuning_selection.raw_matrix_path",
+    )
+    rebuilt = build_development_aggregate(raw_matrix_path)
+    aggregate_bytes = aggregate_path.read_bytes()
+    if aggregate_bytes != canonical_json_bytes(rebuilt) + b"\n":
+        raise ValueError(
+            "tuning selection aggregate is not the canonical rebuild of its raw matrix"
+        )
+    if (
+        rebuilt["registration_sha256"] != binding["source_registration_sha256"]
+        or rebuilt["matrix_manifest_sha256"] != binding["source_manifest_sha256"]
+    ):
+        raise ValueError("tuning selection source registration or manifest hash drifts")
+    validate_final_selection_against_aggregate(
+        binding,
+        rebuilt,
+        models=registration["models"],
+        environments=[item["id"] for item in registration["environments"]],
+        final_seeds=registration["seeds"],
+    )
+    return binding
 
 
 def _load_registration(path: Path) -> dict[str, Any]:
@@ -65,6 +117,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
         raise ValueError(f"unsupported evidence_tier: {tier!r}")
     if schema_version == 3 and tier != "development_tuning":
         raise ValueError("registration schema version 3 is reserved for development_tuning")
+    if schema_version == 4 and tier != "registered_final":
+        raise ValueError("registration schema version 4 is reserved for registered_final")
     matrix_kind = registration.get("matrix_kind")
     if matrix_kind not in _MATRIX_KINDS:
         raise ValueError(f"unsupported matrix_kind: {matrix_kind!r}")
@@ -93,6 +147,13 @@ def _load_registration(path: Path) -> dict[str, Any]:
         raise ValueError("upper_reference matrices must contain only memoryless_mlp")
     if matrix_kind == "hyperparameter_selection" and schema_version != 3:
         raise ValueError("hyperparameter_selection requires registration schema version 3")
+    if schema_version == 4 and matrix_kind != "primary_comparison":
+        raise ValueError("registration schema version 4 requires primary_comparison")
+    if tier == "registered_final" and matrix_kind == "primary_comparison" and schema_version != 4:
+        raise ValueError(
+            "registered-final primary comparisons require schema version 4 "
+            "and an explicit tuning selection"
+        )
 
     seeds = registration.get("seeds")
     validate_paired_seed_manifests({model: seeds for model in models})
@@ -123,6 +184,9 @@ def _load_registration(path: Path) -> dict[str, Any]:
                 f"registered adapters: {unsupported}"
             )
 
+    final_selection = (
+        _validate_final_tuning_selection(registration) if schema_version == 4 else None
+    )
     learners = (
         [
             candidate["learner"]
@@ -130,6 +194,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
             for candidate in family["candidates"]
         ]
         if schema_version == 3
+        else [selection["learner"] for selection in final_selection["selections"]]
+        if schema_version == 4
         else [
             normalize_learner(
                 registration.get("learner"),
@@ -177,6 +243,10 @@ def _load_registration(path: Path) -> dict[str, Any]:
             seeds=seeds,
             quick=registration["quick"],
         )
+    if schema_version == 4 and comparison_profile != "arcmind_shared_comparison":
+        raise ValueError(
+            "schema-v4 registered final requires comparison_profile 'arcmind_shared_comparison'"
+        )
     if tier == "registered_final" and len(registration["seeds"]) != 30:
         raise ValueError("registered_final requires exactly 30 paired seeds")
     return registration
@@ -195,6 +265,7 @@ def _cell_namespace(
 ) -> Namespace:
     candidate_id: str | None = None
     model_family: str | None = None
+    tuning_aggregate_sha256: str | None = None
     implementation_model = model
     if registration["schema_version"] == 3:
         candidate = next(
@@ -212,6 +283,25 @@ def _cell_namespace(
         candidate_id = candidate_spec["candidate_id"]
         implementation_model = candidate_spec["implementation_model"]
         learner = candidate_spec["learner"]
+    elif registration["schema_version"] == 4:
+        binding = normalize_final_selection_binding(registration["tuning_selection"])
+        selection = next(
+            (
+                item
+                for item in binding["selections"]
+                if item["environment"] == environment["id"]
+                and item["implementation_model"] == model
+            ),
+            None,
+        )
+        if selection is None:  # pragma: no cover - registration validates
+            raise AssertionError(
+                f"unknown registered-final selected implementation: {environment['id']}, {model}"
+            )
+        candidate_id = selection["candidate_id"]
+        model_family = selection["model_family"]
+        learner = selection["learner"]
+        tuning_aggregate_sha256 = binding["aggregate_sha256"]
     else:
         learner = registration["learner"]
     return Namespace(
@@ -219,6 +309,7 @@ def _cell_namespace(
         model=implementation_model,
         candidate_id=candidate_id,
         model_family=model_family,
+        tuning_aggregate_sha256=tuning_aggregate_sha256,
         seed=seed,
         total_steps=environment["total_steps"],
         num_envs=learner["num_envs"],
@@ -291,6 +382,8 @@ def _command_for_cell(args: Namespace) -> list[str]:
     if getattr(args, "candidate_id", None) is not None:
         command.extend(["--candidate-id", args.candidate_id])
         command.extend(["--model-family", args.model_family])
+    if getattr(args, "tuning_aggregate_sha256", None) is not None:
+        command.extend(["--tuning-aggregate-sha256", args.tuning_aggregate_sha256])
     if args.require_gpu:
         command.append("--require-gpu")
     if args.quick:
@@ -309,14 +402,14 @@ def _load_matching_artifact(
     manifest_sha256: str,
     cell_id: str,
     provenance: dict[str, Any],
+    registration_schema_version: int,
 ) -> dict[str, Any] | None:
     if not path.exists():
         return None
     artifact = json.loads(path.read_text(encoding="utf-8"))
-    if artifact.get("schema_version") not in {4, 5, 6}:
+    expected_artifact_schema = {1: 4, 2: 5, 3: 6, 4: 7}.get(registration_schema_version)
+    if artifact.get("schema_version") != expected_artifact_schema:
         raise ExistingArtifactMismatchError(f"existing cell has the wrong schema: {path}")
-    if expected_status == EVIDENCE_STATUS["development_tuning"] and artifact["schema_version"] != 6:
-        raise ExistingArtifactMismatchError(f"existing tuning cell has the wrong schema: {path}")
     expected = {
         "status": expected_status,
         "environment": environment,
@@ -341,7 +434,7 @@ def _load_matching_artifact(
         raise ExistingArtifactMismatchError(
             f"existing cell configuration content does not match its hash: {path}"
         )
-    if artifact["schema_version"] == 6:
+    if registration_schema_version == 3:
         candidate_identity = {
             "candidate_id": model,
             "model_family": configuration.get("model_family"),
@@ -355,7 +448,39 @@ def _load_matching_artifact(
             raise ExistingArtifactMismatchError(
                 f"existing cell candidate identity does not match its configuration: {path}"
             )
+    if registration_schema_version == 4:
+        if (
+            configuration.get("model") != model
+            or configuration.get("implementation_model") != model
+            or artifact.get("candidate_id") != configuration.get("candidate_id")
+            or artifact.get("model_family") != configuration.get("model_family")
+            or artifact.get("implementation_model") != model
+            or artifact.get("tuning_aggregate_sha256")
+            != configuration.get("tuning_aggregate_sha256")
+        ):
+            raise ExistingArtifactMismatchError(
+                f"existing cell final-selection identity does not match its configuration: {path}"
+            )
     return artifact
+
+
+def _preserve_failed_attempt(
+    artifact_path: Path,
+    stdout: bytes,
+    *,
+    label: str,
+) -> Path:
+    attempt_id = uuid.uuid4().hex
+    failed_log_path = artifact_path.with_name(
+        f"{artifact_path.stem}.attempt-{attempt_id}.{label}.log"
+    )
+    atomic_write_bytes(failed_log_path, stdout)
+    if artifact_path.exists():
+        failed_artifact_path = artifact_path.with_name(
+            f"{artifact_path.stem}.attempt-{attempt_id}.{label}.json"
+        )
+        artifact_path.replace(failed_artifact_path)
+    return failed_log_path
 
 
 def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]:
@@ -368,6 +493,11 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         normalize_candidate_families(registration["candidate_families"])
         if registration["schema_version"] == 3
         else ()
+    )
+    final_selection = (
+        normalize_final_selection_binding(registration["tuning_selection"])
+        if registration["schema_version"] == 4
+        else None
     )
     matrix_models = (
         [
@@ -386,6 +516,16 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         for family in candidate_families
         for candidate in family["candidates"]
     }
+    if final_selection is not None:
+        candidate_index = {
+            selection["implementation_model"]: {
+                "candidate_id": selection["candidate_id"],
+                "model_family": selection["model_family"],
+                "implementation_model": selection["implementation_model"],
+                "tuning_aggregate_sha256": final_selection["aggregate_sha256"],
+            }
+            for selection in final_selection["selections"]
+        }
 
     for environment in registration["environments"]:
         for model in matrix_models:
@@ -444,7 +584,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     "configuration_sha256": configuration_sha256,
                     "artifact_path": relative_path.as_posix(),
                 }
-                if registration["schema_version"] == 3:
+                if registration["schema_version"] in {3, 4}:
                     cell.update(candidate_index[model])
                 cells.append(cell)
 
@@ -463,6 +603,8 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
     }
     if registration["schema_version"] == 3:
         manifest_without_hash["candidate_families"] = registration["candidate_families"]
+    if registration["schema_version"] == 4:
+        manifest_without_hash["tuning_selection"] = registration["tuning_selection"]
     manifest_sha256 = canonical_json_sha256(manifest_without_hash)
     manifest = {
         **manifest_without_hash,
@@ -486,6 +628,18 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 )
                 artifact_path = output_root / cell["artifact_path"]
                 log_path = artifact_path.with_suffix(".log")
+                if artifact_path.exists() and not log_path.exists():
+                    attempt_id = uuid.uuid4().hex
+                    orphaned_artifact_path = artifact_path.with_name(
+                        f"{artifact_path.stem}.attempt-{attempt_id}.orphaned.json"
+                    )
+                    artifact_path.replace(orphaned_artifact_path)
+                if log_path.exists() and not artifact_path.exists():
+                    attempt_id = uuid.uuid4().hex
+                    orphaned_log_path = artifact_path.with_name(
+                        f"{artifact_path.stem}.attempt-{attempt_id}.orphaned.log"
+                    )
+                    log_path.replace(orphaned_log_path)
                 artifact = _load_matching_artifact(
                     artifact_path,
                     expected_status=expected_status,
@@ -496,6 +650,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     manifest_sha256=manifest_sha256,
                     cell_id=cell["cell_id"],
                     provenance=provenance,
+                    registration_schema_version=registration["schema_version"],
                 )
                 if artifact is None:
                     cell_args = _cell_namespace(
@@ -514,25 +669,56 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                     )
-                    atomic_write_bytes(log_path, process.stdout)
                     if process.returncode != 0:
+                        failed_log_path = _preserve_failed_attempt(
+                            artifact_path,
+                            process.stdout,
+                            label="failed",
+                        )
                         raise RuntimeError(
                             f"cell failed with exit code {process.returncode}: "
-                            f"{cell['cell_id']}; log={log_path}"
+                            f"{cell['cell_id']}; log={failed_log_path}"
                         )
-                    artifact = _load_matching_artifact(
-                        artifact_path,
-                        expected_status=expected_status,
-                        environment=environment["id"],
-                        model=model,
-                        seed=seed,
-                        configuration_sha256=cell["configuration_sha256"],
-                        manifest_sha256=manifest_sha256,
-                        cell_id=cell["cell_id"],
-                        provenance=provenance,
-                    )
+                    try:
+                        artifact = _load_matching_artifact(
+                            artifact_path,
+                            expected_status=expected_status,
+                            environment=environment["id"],
+                            model=model,
+                            seed=seed,
+                            configuration_sha256=cell["configuration_sha256"],
+                            manifest_sha256=manifest_sha256,
+                            cell_id=cell["cell_id"],
+                            provenance=provenance,
+                            registration_schema_version=registration["schema_version"],
+                        )
+                    except (
+                        ExistingArtifactMismatchError,
+                        OSError,
+                        TypeError,
+                        UnicodeError,
+                        ValueError,
+                    ) as error:
+                        failed_log_path = _preserve_failed_attempt(
+                            artifact_path,
+                            process.stdout,
+                            label="failed",
+                        )
+                        raise RuntimeError(
+                            f"cell returned success with an invalid artifact: "
+                            f"{cell['cell_id']}; log={failed_log_path}"
+                        ) from error
                     if artifact is None:
-                        raise RuntimeError(f"cell completed without creating {artifact_path}")
+                        failed_log_path = _preserve_failed_attempt(
+                            artifact_path,
+                            process.stdout,
+                            label="failed",
+                        )
+                        raise RuntimeError(
+                            f"cell completed without creating {artifact_path}; "
+                            f"log={failed_log_path}"
+                        )
+                    atomic_write_bytes(log_path, process.stdout)
                 if not log_path.is_file():
                     raise RuntimeError(f"completed cell is missing its immutable log: {log_path}")
                 completed_cells.append(

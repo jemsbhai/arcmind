@@ -535,14 +535,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     update_epochs = 2 if args.quick else args.update_epochs
     candidate_id = getattr(args, "candidate_id", None)
     model_family = getattr(args, "model_family", None)
-    if args.registration_schema_version not in {1, 2, 3}:
-        raise ValueError("registration_schema_version must be 1, 2, or 3")
+    tuning_aggregate_sha256 = getattr(args, "tuning_aggregate_sha256", None)
+    if args.registration_schema_version not in {1, 2, 3, 4}:
+        raise ValueError("registration_schema_version must be 1, 2, 3, or 4")
     if args.registration_schema_version == 1:
         if args.comparison_profile is not None:
             raise ValueError("schema v1 does not accept a comparison_profile")
     elif args.comparison_profile not in COMPARISON_PROFILES:
-        raise ValueError("schema v2 and v3 require a supported comparison_profile")
-    if args.registration_schema_version == 3:
+        raise ValueError("schema v2, v3, and v4 require a supported comparison_profile")
+    if args.registration_schema_version in {3, 4}:
         if (
             not isinstance(candidate_id, str)
             or not isinstance(model_family, str)
@@ -551,12 +552,24 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             or not candidate_id.startswith(f"{model_family}.")
         ):
             raise ValueError(
-                "schema v3 requires a portable candidate ID prefixed by its model family"
+                "schema v3 and v4 require a portable candidate ID prefixed by its model family"
             )
     elif candidate_id is not None or model_family is not None:
-        raise ValueError("candidate identity is supported only by schema v3")
+        raise ValueError("candidate identity is supported only by schema v3 and v4")
     if args.registration_schema_version == 3 and args.evidence_tier != "development_tuning":
         raise ValueError("schema v3 is reserved for development_tuning")
+    if args.registration_schema_version == 4 and args.evidence_tier != "registered_final":
+        raise ValueError("schema v4 is reserved for registered_final")
+    if args.registration_schema_version == 4:
+        if (
+            not isinstance(tuning_aggregate_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", tuning_aggregate_sha256) is None
+        ):
+            raise ValueError("schema v4 requires a tuning aggregate SHA256")
+        if args.comparison_profile != "arcmind_shared_comparison":
+            raise ValueError("schema v4 requires comparison_profile 'arcmind_shared_comparison'")
+    elif tuning_aggregate_sha256 is not None:
+        raise ValueError("tuning aggregate identity is supported only by schema v4")
     if args.quick and args.evidence_tier != "smoke":
         raise ValueError("--quick requires --evidence-tier smoke")
     if args.evidence_tier == "development_tuning":
@@ -585,6 +598,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if args.evidence_tier == "registered_final":
         if args.quick:
             raise ValueError("registered_final cannot use --quick")
+        is_upper_reference = args.environment in UPPER_REFERENCE_TARGETS
+        if is_upper_reference and args.registration_schema_version == 4:
+            raise ValueError("schema v4 is only for registered primary comparisons")
+        if not is_upper_reference and args.registration_schema_version != 4:
+            raise ValueError(
+                "registered-final primary tasks require schema version 4 "
+                "and an explicit tuning selection"
+            )
         expected_steps = REGISTERED_TRAIN_STEPS.get(args.environment)
         if expected_steps is None:
             raise ValueError(f"{args.environment!r} is not a registered primary task")
@@ -702,7 +723,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "perfect_memory": False,
             },
         ),
-        "model": candidate_id or args.model,
+        "model": candidate_id if args.registration_schema_version == 3 else args.model,
         "seed": args.seed,
         "policy_core": asdict(policy_core),
         "reference_implementation": REFERENCE_IMPLEMENTATIONS.get(args.model),
@@ -725,7 +746,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "dependency_lock_sha256": lock_sha256,
         "runtime_contract": installed_runtime,
     }
-    if args.registration_schema_version == 3:
+    if args.registration_schema_version in {3, 4}:
         frozen_configuration.update(
             {
                 "candidate_id": candidate_id,
@@ -733,7 +754,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "implementation_model": args.model,
             }
         )
-    if args.registration_schema_version in {2, 3}:
+    if args.registration_schema_version == 4:
+        frozen_configuration["tuning_aggregate_sha256"] = tuning_aggregate_sha256
+    if args.registration_schema_version in {2, 3, 4}:
         frozen_configuration.update(
             {
                 "comparison_profile": args.comparison_profile,
@@ -793,7 +816,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     record: dict[str, object] = {
         "schema_version": (
-            6
+            7
+            if args.registration_schema_version == 4
+            else 6
             if args.registration_schema_version == 3
             else 5
             if args.registration_schema_version == 2
@@ -813,7 +838,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "runtime_contract": installed_runtime,
         },
         "environment": args.environment,
-        "model": candidate_id or args.model,
+        "model": candidate_id if args.registration_schema_version == 3 else args.model,
         "seed": args.seed,
         "parameter_count": parameter_count,
         "effective_parameter_count": effective_parameter_count,
@@ -860,7 +885,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "contract": installed_runtime,
         },
     }
-    if args.registration_schema_version == 3:
+    if args.registration_schema_version in {3, 4}:
         record.update(
             {
                 "candidate_id": candidate_id,
@@ -868,7 +893,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "implementation_model": args.model,
             }
         )
-    if args.registration_schema_version in {2, 3}:
+    if args.registration_schema_version == 4:
+        record["tuning_aggregate_sha256"] = tuning_aggregate_sha256
+    if args.registration_schema_version in {2, 3, 4}:
         record.update(
             {
                 "comparison_profile": args.comparison_profile,
@@ -932,11 +959,12 @@ def main() -> None:
     parser.add_argument(
         "--registration-schema-version",
         type=int,
-        choices=(1, 2, 3),
+        choices=(1, 2, 3, 4),
         default=1,
     )
     parser.add_argument("--candidate-id")
     parser.add_argument("--model-family")
+    parser.add_argument("--tuning-aggregate-sha256")
     parser.add_argument(
         "--comparison-profile",
         choices=tuple(COMPARISON_PROFILES),

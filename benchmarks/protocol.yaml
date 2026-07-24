@@ -1,4 +1,4 @@
-protocol_version: 7
+protocol_version: 8
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -36,8 +36,11 @@ result_tiers:
     paper_status: selection_only_not_performance_evidence
   registered_final:
     purpose: evaluate_frozen_methods_on_paired_seed_manifests
+    primary_registration_schema: 4
+    upper_reference_registration_schema: 2
     budget_rule: use_published_reference_steps_for_pobax
     target_seed_count: 30
+    tuning_seed_overlap: prohibited
     paper_status: eligible_after_all_release_gates_pass
 
 stages:
@@ -130,7 +133,8 @@ stages:
     target_final_seed_count: 30
     minimum_seed_count_for_preliminary_tables: 10
     policy_selection: final_policy_after_fixed_interaction_budget
-    registration_schema: 2
+    primary_registration_schema: 4
+    upper_reference_registration_schema: 2
     tuning_registration_schema: 3
     comparison_profiles:
       pobax_author_semantics:
@@ -162,6 +166,7 @@ stages:
         - implementation_model
         - candidate_id
       candidate_cardinality: equal_across_model_families
+      normalized_learner_grid: identical_across_model_families
       candidates_per_family_minimum: 2
       immutable_cell_logs:
         completion_index_path_and_sha256: required
@@ -184,6 +189,19 @@ stages:
       checkpoint_selection: prohibited
       registered_final_evidence: prohibited
       paper_performance_claims: prohibited
+    final_selection_binding:
+      registration_schema: 4
+      scope: one_primary_environment
+      comparison_profile: arcmind_shared_comparison
+      raw_tuning_matrix: canonical_rebuild_required
+      tuning_aggregate_bytes: exact_canonical_identity
+      aggregate_sha256: required
+      source_registration_sha256: required
+      source_manifest_sha256: required
+      winner_candidate_identity: exact
+      winner_learner: exact
+      final_seed_overlap_with_tuning: prohibited
+      author_semantics_upper_reference_binding: not_required
     artifact_requirements:
       aggregate_output_location: outside_immutable_raw_matrix
       freeze_environment_source_and_reference: true
@@ -198,8 +216,11 @@ stages:
           - entropy
           - approximate_kl
         validate_every_update: true
-        validate_final_training_metrics: true
-        fail_training_before_evaluation: true
+      validate_final_training_metrics: true
+      fail_training_before_evaluation: true
+      canonical_cell_log: successful_child_only
+      failed_attempt_logs: unique_noncanonical_paths
+      failed_partial_artifacts: unique_noncanonical_paths
       parameter_ratio_bounds: [0.9, 1.1]
       upper_reference_link:
         required: true

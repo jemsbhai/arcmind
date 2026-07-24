@@ -365,6 +365,53 @@ with each actual experiment.
   registered-final manifest. None of its performance measurements can enter a
   registered table or paper claim.
 
+### F-ENG-008: Selection-to-final identity and attempt logs require stronger binding
+
+- Class: `engineering validation`
+- Status: three protocol gaps found by independent audit and corrected before
+  registered tuning
+- Date: 2026-07-23
+- Gaps:
+  - schema-v2 primary registered-final matrices could declare any global
+    learner and could reuse tuning seeds;
+  - equal tuning-grid cardinality did not require the same normalized learner
+    configuration set across model families; and
+  - a fixed canonical log path was written before the child return code was
+    checked, so a failed-attempt log could survive beside a later successful
+    artifact.
+- Correction:
+  - reserve schema v4 for primary registered-final comparisons and require a
+    `tuning_selection` binding to the raw schema-v3 matrix, canonical tuning
+    aggregate and file SHA256, source registration and manifest hashes, and
+    the exact winner identity and complete learner for every model family;
+  - rebuild the tuning aggregate during final registration loading, require
+    exact canonical byte identity, revalidate the binding during registered
+    aggregation, and prohibit all overlap between tuning and final seeds;
+  - retain schema-v2 registered upper references without a tuning binding,
+    including the author-semantics lane;
+  - require the exact same normalized learner configuration set across every
+    tuning family, in addition to equal cardinality and shared structural
+    fields; and
+  - write the canonical cell log only after a successful child exit, while
+    moving failed logs and any partial artifacts to unique noncanonical
+    attempt paths.
+- Interpretation: a final primary cell is now mechanically derived from one
+  verified tuning winner, not merely labeled as selected. Search-space
+  fairness is enforced by configuration identity rather than trial count
+  alone. A canonical log now certifies the same successful attempt that
+  produced the canonical artifact.
+- Validation:
+  - the focused schema, aggregation, matrix, and linking suite passed 170 of
+    170 tests in the pinned Ubuntu environment;
+  - the complete POBAX suite passed 287 of 287 tests in the same environment;
+    and
+  - rebuilding the legacy SHM repair aggregate produced 7,420 bytes identical
+    to the existing artifact, with SHA256
+    `c5b926b38e32b52eba45d9eaacd7b0bc9478b00c03aeb1218ae2424bb79b7a8f`.
+- Evidence restriction: this correction validates selection provenance and
+  execution identity only. It introduces no performance result or paper
+  claim.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`
@@ -959,9 +1006,9 @@ with each actual experiment.
 ### F-PILOT-004: T-Maze attention-horizon repair pilot
 
 - Class: `development pilot`
-- Status: planned and frozen before execution, not for a paper performance
-  claim
+- Status: completed, not for a paper performance claim
 - Date planned and frozen: 2026-07-23
+- Date completed: 2026-07-23
 - Question: does extending the benchmark attention window from eight to 16
   prior snapshots translate the semantic T-Maze repair into reliable
   three-seed accuracy?
@@ -976,8 +1023,8 @@ with each actual experiment.
     `benchmarks/pobax/manifests/tmaze_attention_horizon_repair_v3.json`;
   - repair implementation commit:
     `2d01d304c6fe112822d5fffe804873860f90a12b`;
-  - execution source commit: pending; the launcher requires clean Git and
-    records the exact commit;
+  - execution source commit:
+    `390d5996024b41d0506b2611f22ef33db619284b`;
   - schema: `2`;
   - comparison profile: `arcmind_shared_comparison`;
   - model: ArcMind only;
@@ -989,6 +1036,47 @@ with each actual experiment.
   - budget: exactly 250,000 requested and realized transitions per cell;
   - evaluation: 16 episodes per environment, or 128 episodes per seed; and
   - accelerator: GPU required.
+- Raw artifact directory:
+  `benchmark_results/pobax/tmaze-attention-horizon-repair-v3-390d599`.
+- Derived aggregate:
+  `benchmark_results/pobax/aggregates/tmaze-attention-horizon-repair-v3-390d599.json`.
+- Integrity:
+  - canonical expanded-manifest identity:
+    `bad6b5d00684ec2f9cbb40f2b65e018eb5e36661b46994755f9cfed14c999ea1`;
+  - source manifest file SHA256:
+    `36b41ba20a5da85f733c7c2d99820266f5cb93d212b85f672391d802e1993425`;
+  - frozen manifest file SHA256:
+    `474607c21488268355db1ab5ff31176576746793aac6d2f4888b7a270d35c4c4`;
+  - registration file SHA256:
+    `cad6a1066ce15559a6748b6e7cf71521b48446819415b6ee378fe0917cb866d1`;
+  - completion-index file SHA256:
+    `f900915470b02d7afba7029f06cbf6e821801c1cc5de3db2537ad72e05434547`;
+  - checksum-inventory file SHA256:
+    `124f931c93c9e78b72bc53bb2535d9dda4f3c9c58e4cd9f7c2f629dc09896784`;
+  - aggregate file SHA256:
+    `9929b47f8a9a1c62bd1d50f296e85adaf5e3b867efea5347269220ec72e7df01`;
+  - all checksum entries passed before and after the resume check;
+  - the completion and checksum indexes validated during aggregation;
+  - every artifact records clean Git provenance at the execution source
+    commit; and
+  - a second launcher invocation completed in 17 seconds, skipped all three
+    compatible cells, and preserved all listed raw-matrix hashes.
+- Observation:
+  - seed `1103`: mean return `4.0`;
+  - seed `2207`: mean return `4.0`;
+  - seed `3301`: mean return `4.0`;
+  - across-seed mean, median, and interquartile mean: `4.0`;
+  - every seed used 128 evaluation episodes;
+  - every cell realized exactly 250,000 environment transitions and 250
+    optimizer updates; and
+  - all histories and final optimizer metrics were finite. Total recorded
+    training time was `1172.55904429` seconds.
+- Decision: the preregistered accuracy-repair criterion is satisfied. The
+  repaired mean is at least `3.5`, every seed is strictly above `0`, and all
+  cells are finite.
+- Interpretation: window 16 restores access to the start cue and removes the
+  accuracy failure observed in the window-eight pilot under this exact
+  three-seed development protocol.
 - Evidence restriction: this pilot can accept or reject the stated
   development repair criterion. It cannot establish comparative performance,
   support a paper result, or replace a registered-final matrix.

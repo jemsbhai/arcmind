@@ -194,8 +194,8 @@ provenance and a GPU. This pilot remains ineligible for paper performance
 claims.
 
 Registration schema v1 remains readable for existing development matrices.
-New pilot and registered-final experiment registrations use schema v2 and
-must name one of two comparison profiles:
+New pilot registrations and separately labeled registered upper references
+use schema v2 and must name one of two comparison profiles:
 
 - `pobax_author_semantics` follows the pinned author's optimizer, update, and
   step-budget semantics inside ArcMind's shared runner. If the requested
@@ -224,7 +224,18 @@ configurations, cell IDs, artifact paths, manifests, completion indexes, and
 aggregate rows, while `model_family` and `implementation_model` remain
 explicit. Family IDs, implementation models, and candidate IDs are unique.
 Every family has the same number of candidates, with no duplicate normalized
-learner configuration inside a family.
+learner configuration inside a family. The exact normalized learner
+configuration set must also be identical across families.
+
+Primary registered-final comparisons use schema v4. They contain no free
+global learner block. Instead, `tuning_selection` binds one task to the raw
+schema-v3 tuning matrix, its canonical aggregate and SHA256, its source
+registration and manifest hashes, and the exact winning candidate and learner
+for every model family. Loading the registration rebuilds the tuning
+aggregate from the raw matrix and requires byte identity with the bound
+aggregate. The final 30-seed manifest must be disjoint from all tuning seeds.
+Schema-v2 registered upper references remain valid without this binding,
+including the `pobax_author_semantics` lane.
 
 An exact author-code reproduction requires a separate pinned author-code
 runner and separately labeled artifacts. Results from that lane cannot be
@@ -243,12 +254,19 @@ skips only identity-, configuration-, and provenance-compatible completed
 cells, refuses collisions, records the dependency lock, external source
 commits, and actual Python, package, JAX, backend, and accelerator identities,
 then writes a stable completion index plus checksum manifest.
+The canonical per-cell log is written only after the child process exits
+successfully. A failed attempt keeps its output under a unique
+`attempt-*.failed.log` path, and any partial artifact is moved to the matching
+failed-attempt identity. Neither can enter the completion index as the
+canonical successful log or artifact.
 Every registration declares `matrix_kind`. A `primary_comparison` matrix must
 include ArcMind. An `upper_reference` matrix contains only the memoryless
 policy on its separately labeled privileged or full-observation task. A
 `hyperparameter_selection` matrix contains schema-v3 candidate families and
 cannot be aggregated by the registered-final path. A
 registered-final matrix is accepted only with exactly 30 paired seeds.
+Primary registered-final matrices additionally require the schema-v4 tuning
+selection binding.
 Each child process writes an immutable per-cell log beside its JSON artifact.
 The completion index records both hashes, and the directory checksum covers
 the logs as well as the structured results.
@@ -298,6 +316,8 @@ the entire matrix. Candidates may vary only `learning_rate`, `gae_lambda`,
 indexes, frozen environment semantics, and parameter-match contracts are
 mandatory. Every schema-v3 completion row must carry the immutable cell log
 path and hash, and the checksum inventory must cover every log.
+Equal cardinality is not sufficient: every family must use the exact same
+normalized set of complete learner configurations.
 
 For tuning only, the aggregator removes the leading prefix through the latest
 first finite `mean_recent_return` across all candidate and seed cells, then
@@ -312,7 +332,8 @@ preserved for audit but cannot affect selection. The aggregate status is
 `development_tuning_selection_aggregate_not_for_paper`, and its eligibility
 block explicitly prohibits registered-final evidence and paper performance
 claims. A selected configuration must be frozen in a new registered-final
-manifest and rerun on the disjoint final seed manifest.
+schema-v4 manifest and rerun on the disjoint final seed manifest. The binding
+is revalidated when the registered matrix is aggregated.
 
 Primary and upper-reference matrices are paired only through a validated link:
 
