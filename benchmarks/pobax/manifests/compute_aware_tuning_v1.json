@@ -1,0 +1,120 @@
+{
+  "schema_version": 5,
+  "status": "frozen",
+  "evidence_tier": "development_tuning",
+  "matrix_kind": "hyperparameter_selection",
+  "tuned_families": [
+    {
+      "family_id": "memoryless_mlp",
+      "implementation_model": "memoryless_mlp"
+    },
+    {
+      "family_id": "frame_stack_mlp",
+      "implementation_model": "frame_stack_mlp"
+    },
+    {
+      "family_id": "gru",
+      "implementation_model": "gru"
+    },
+    {
+      "family_id": "memory_trace_shared",
+      "implementation_model": "memory_trace_shared"
+    },
+    {
+      "family_id": "s5rl",
+      "implementation_model": "s5rl"
+    },
+    {
+      "family_id": "mamba1",
+      "implementation_model": "mamba1"
+    },
+    {
+      "family_id": "agalite_shared",
+      "implementation_model": "agalite_shared"
+    },
+    {
+      "family_id": "arcmind",
+      "implementation_model": "arcmind"
+    },
+    {
+      "family_id": "ffm",
+      "implementation_model": "ffm"
+    },
+    {
+      "family_id": "shm",
+      "implementation_model": "shm"
+    },
+    {
+      "family_id": "lru",
+      "implementation_model": "lru"
+    },
+    {
+      "family_id": "s4d",
+      "implementation_model": "s4d"
+    },
+    {
+      "family_id": "transformer_xl",
+      "implementation_model": "transformer_xl"
+    }
+  ],
+  "learner_grid": [
+    {
+      "learner_id": "lr_low",
+      "learner": {
+        "num_envs": 8,
+        "rollout_steps": 125,
+        "update_epochs": 4,
+        "num_minibatches": 4,
+        "learning_rate": 0.0001,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": false
+      }
+    },
+    {
+      "learner_id": "lr_mid",
+      "learner": {
+        "num_envs": 8,
+        "rollout_steps": 125,
+        "update_epochs": 4,
+        "num_minibatches": 4,
+        "learning_rate": 0.00025,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": false
+      }
+    },
+    {
+      "learner_id": "lr_high",
+      "learner": {
+        "num_envs": 8,
+        "rollout_steps": 125,
+        "update_epochs": 4,
+        "num_minibatches": 4,
+        "learning_rate": 0.0005,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": false
+      }
+    }
+  ],
+  "environments": [
+    {
+      "id": "tmaze_10",
+      "total_steps": 1000000
+    },
+    {
+      "id": "rocksample_11_11",
+      "total_steps": 1000000
+    }
+  ],
+  "seeds": [
+    4409,
+    5519,
+    6637
+  ],
+  "comparison_profile": "arcmind_shared_comparison",
+  "evaluation_episodes_per_env": 1,
+  "require_gpu": true,
+  "quick": false
+}
