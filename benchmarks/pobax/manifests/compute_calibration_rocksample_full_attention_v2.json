@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "status": "frozen",
+  "evidence_tier": "pilot",
+  "matrix_kind": "primary_comparison",
+  "comparison_profile": "arcmind_shared_comparison",
+  "models": [
+    "causal_transformer",
+    "arcmind"
+  ],
+  "environments": [
+    {
+      "id": "rocksample_11_11",
+      "total_steps": 128000
+    }
+  ],
+  "seeds": [
+    1701
+  ],
+  "learner": {
+    "num_envs": 8,
+    "rollout_steps": 125,
+    "update_epochs": 4,
+    "num_minibatches": 4,
+    "learning_rate": 0.00025,
+    "gae_lambda": 0.95,
+    "entropy_coefficient": 0.01,
+    "anneal_learning_rate": false
+  },
+  "evaluation_episodes_per_env": 1,
+  "require_gpu": true,
+  "quick": false
+}
