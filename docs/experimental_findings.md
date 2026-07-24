@@ -865,6 +865,17 @@ with each actual experiment.
   | Shared Memory Traces | 28,553 | 72.926713 |
   | ArcMind | 28,717 | 648.643372 |
 
+- Representative two-task timing gate:
+
+  | Model | T-Maze seconds | RockSample seconds | RockSample/T-Maze |
+  |---|---:|---:|---:|
+  | FFM | 16.776180 | 21.376309 | 1.274206 |
+  | SHM | 44.431188 | 61.499952 | 1.384162 |
+  | LRU | 128.589027 | 102.169138 | 0.794540 |
+  | S4D | 77.354113 | 71.689651 | 0.926772 |
+  | Transformer-XL | 151.686930 | 155.476880 | 1.024985 |
+  | ArcMind | 203.447793 | 226.309223 | 1.112370 |
+
 - Timing integrity:
   - the common timing matrix completed all five planned cells at clean commit
     `03abcf15b992c1591cce4ef0332e350b11e75da2`;
@@ -883,20 +894,46 @@ with each actual experiment.
     and
   - the raw directory is
     `benchmark_results/pobax/compute-calibration-03abcf1/tmaze-common-v2`.
+- Representative-gate integrity:
+  - both six-cell matrices ran from clean commit
+    `bf79bb5ab2aab00dd57a7d55ea200999b02d303f` and completed every planned
+    cell;
+  - the T-Maze source registration, frozen manifest, completion index, and
+    checksum manifest SHA256 values are
+    `cd7503809b77f4f773005abbe32283d239b753ef293792f6c7b23ed83f89d95d`,
+    `f6c42518e667520d74ab440b976553142ea50d640b8a3359c52fe59231f600cc`,
+    `2cdc969f482ec0bfc5be0ffc3eadb0a7fb69352c8fb94e3868cb3cf5721ec890`,
+    and
+    `d6ad7ad5906ff86cc16c73f8d1df51be502a2e1437b6b2856f6f19326dd50aed`;
+  - the RockSample source registration, frozen manifest, completion index,
+    and checksum manifest SHA256 values are
+    `3dff2514fd7c7944b718791fa0c7a85de0584619de162fe9b9a7172b1a7d2b3e`,
+    `3a268b74878e6ac6c3dfa00907512d3c31eb12345483b8ca92654963d8c41939`,
+    `2ff8bac268015b9df9f40e158d2e8c8f980f07f7ac3e33e08510359c3632f574`,
+    and
+    `f6a6047312bb37fe718489f9ae1516c3f54c0aa0d8358a9c6141bd4981803273`;
+    and
+  - the raw directories are
+    `benchmark_results/pobax/compute-calibration-bf79bb5/tmaze-representative-v3`
+    and
+    `benchmark_results/pobax/compute-calibration-bf79bb5/rocksample-representative-v3`.
 - Unexpected observation: the ArcMind timing was 2.98 times the
   217.655288-second measurement from the earlier T-Maze calibration even
   though the ArcMind execution path, dependency versions, learner, task,
   parameter count, and step budget were unchanged. The runtime manifest does
   not capture accelerator clocks or power state, so these measurements do not
-  identify the source of the difference. Compute planning must use the slower
-  measurement or add replicated hardware-state measurements. It must not
-  average the discrepancy away.
+  identify the source of the difference. A third clean T-Maze replicate took
+  203.447793 seconds, close to the first measurement, while its paired
+  RockSample cell took 226.309223 seconds. Compute planning must report both
+  the median-rate estimate and a worst-observed sensitivity bound. It must not
+  average the outlier away.
 - Decision:
   - do not silently shorten the causal Transformer context;
   - exclude full-episode causal attention from trainable registered
     comparisons on the declared 16 GiB device;
-  - retain bounded Transformer-XL as the trainable recurrent-attention
-    baseline where task incidence permits; and
+  - retain FFM, SHM, LRU, S4D, and bounded Transformer-XL on both T-Maze and
+    RockSample because all five controls passed the same local timing gate;
+    and
   - retain full-episode causal attention only as an explicitly labeled
     resource reference unless a new frozen resource contract makes it
     feasible.
