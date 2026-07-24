@@ -543,6 +543,16 @@ with each actual experiment.
   - the integration-focused slices passed 225 of 225 tests in the pinned
     Ubuntu environment; and
   - the complete POBAX suite passed 340 of 340 tests in that environment.
+- Independent audit:
+  - the five pinned upstream source hashes and the `v2.2.6.post3` tag were
+    verified from an independent checkout;
+  - an independent PyTorch fixture replay had maximum output error
+    `1.19e-7` and exact final recurrent caches;
+  - a 16,384-case analytic width grid stayed within the 10 percent parameter
+    tolerance, with worst ratio `0.98558`;
+  - the focused audit suite passed 200 of 200 tests and the complete POBAX
+    suite passed 340 of 340 tests; and
+  - no P0, P1, or P2 correctness or evidence-integrity issue was found.
 - Interpretation: Mamba-1 is now an executable, source-audited comparison
   core. This engineering result establishes implementation identity and
   learner parity only.
