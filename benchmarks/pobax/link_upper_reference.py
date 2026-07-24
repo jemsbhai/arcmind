@@ -15,7 +15,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from benchmarks.pobax.aggregate_development import build_development_aggregate
-from benchmarks.pobax.aggregate_registered import build_registered_aggregate
+from benchmarks.pobax.aggregate_registered import (
+    RegisteredAggregationError,
+    build_registered_aggregate,
+    validate_bound_compute_aware_primary_matrix,
+)
 from benchmarks.pobax.registered_artifacts import (
     ArtifactChecksumError,
     atomic_write_json,
@@ -26,8 +30,14 @@ from benchmarks.pobax.registered_artifacts import (
     validate_checksum_manifest,
 )
 from benchmarks.pobax.registration_protocol import (
+    COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV,
+    COMPUTE_AWARE_FINAL_PANEL,
+    COMPUTE_AWARE_FINAL_SEEDS,
+    COMPUTE_AWARE_UPPER_REFERENCE_PANEL,
     normalize_final_selection_binding,
     normalize_learner,
+    normalize_memoryless_learner_binding,
+    normalize_primary_matrix_binding,
     realized_environment_steps,
     registration_fields,
     validate_comparison_profile,
@@ -704,6 +714,365 @@ def _validate_registered_budgets(
                 )
 
 
+def _registration_schema(root: Path, *, label: str) -> object:
+    registration = _mapping(
+        _load_json(root / "registration.json", field=f"{label} registration"),
+        field=f"{label} registration",
+    )
+    return registration.get("schema_version")
+
+
+def _compute_aware_contracts_by_environment(
+    root: Path,
+    manifest: Mapping[str, Any],
+    *,
+    model: str,
+) -> dict[str, dict[str, Any]]:
+    environments = manifest.get("environments")
+    seeds = manifest.get("seeds")
+    raw_cells = manifest.get("cells")
+    if (
+        not isinstance(environments, list)
+        or not isinstance(seeds, list)
+        or not isinstance(raw_cells, list)
+    ):
+        raise UpperReferenceLinkError(
+            "compute-aware manifest lacks its environment, seed, or cell inventory"
+        )
+    contracts: dict[str, dict[str, Any]] = {}
+    counts = {environment: 0 for environment in environments}
+    for index, raw_cell in enumerate(raw_cells):
+        if not isinstance(raw_cell, Mapping) or raw_cell.get("model") != model:
+            continue
+        environment = raw_cell.get("environment")
+        seed = raw_cell.get("seed")
+        if environment not in counts or seed not in seeds:
+            raise UpperReferenceLinkError(
+                "compute-aware manifest contains an invalid learner-lane identity"
+            )
+        _, artifact_path = _safe_relative_path(
+            root,
+            raw_cell.get("artifact_path"),
+            field=f"compute_aware_manifest.cells[{index}].artifact_path",
+        )
+        artifact = _mapping(
+            _load_json(
+                artifact_path,
+                field=f"compute-aware artifact[{environment},{model},{seed}]",
+            ),
+            field=f"compute-aware artifact[{environment},{model},{seed}]",
+        )
+        configuration = _mapping(
+            artifact.get("configuration"),
+            field=f"artifact[{environment},{model},{seed}].configuration",
+        )
+        ppo = _mapping(
+            configuration.get("ppo"),
+            field=f"artifact[{environment},{model},{seed}].configuration.ppo",
+        )
+        evaluation = _mapping(
+            artifact.get("evaluation"),
+            field=f"artifact[{environment},{model},{seed}].evaluation",
+        )
+        contract = {
+            "ppo": dict(ppo),
+            "evaluation": {
+                "evaluation_episodes_per_environment": artifact.get(
+                    "evaluation_episodes_per_environment"
+                ),
+                "evaluation_max_episode_steps": artifact.get("evaluation_max_episode_steps"),
+                "actual_evaluation_steps_per_environment": artifact.get(
+                    "actual_evaluation_steps_per_environment"
+                ),
+                "actual_evaluation_transitions": artifact.get("actual_evaluation_transitions"),
+                "episodes": evaluation.get("episodes"),
+                "episodes_per_environment": evaluation.get("episodes_per_environment"),
+                "num_environments": evaluation.get("num_environments"),
+                "scan_steps_per_environment": evaluation.get("scan_steps_per_environment"),
+            },
+            "execution": {
+                "comparison_profile": configuration.get("comparison_profile"),
+                "requested_environment_steps": configuration.get("requested_environment_steps"),
+                "realized_environment_steps": configuration.get("realized_environment_steps"),
+                "actual_environment_steps": artifact.get("actual_environment_steps"),
+            },
+        }
+        if environment in contracts and contracts[environment] != contract:
+            raise UpperReferenceLinkError(
+                "compute-aware PPO or evaluation contract differs across seeds "
+                f"for {(environment, model)!r}"
+            )
+        contracts[environment] = contract
+        counts[environment] += 1
+    expected_count = len(seeds)
+    if set(contracts) != set(environments) or any(
+        count != expected_count for count in counts.values()
+    ):
+        raise UpperReferenceLinkError(
+            "compute-aware learner lane does not contain one cell per registered seed"
+        )
+    return contracts
+
+
+def _build_compute_aware_upper_reference_link(
+    primary_path: Path,
+    upper_path: Path,
+) -> dict[str, Any]:
+    try:
+        upper_aggregate = build_registered_aggregate(upper_path / "frozen_manifest.json")
+    except (OSError, TypeError, ValueError) as error:
+        raise UpperReferenceLinkError(
+            f"schema-7 upper-reference validation failed: {error}"
+        ) from error
+    if (
+        upper_aggregate.get("schema_version") != 3
+        or upper_aggregate.get("matrix_kind") != "upper_reference"
+        or upper_aggregate.get("raw_integrity", {}).get("primary_matrix_binding_validated")
+        is not True
+    ):
+        raise UpperReferenceLinkError(
+            "schema-7 upper-reference aggregate has the wrong evidence identity"
+        )
+    try:
+        primary_binding = normalize_primary_matrix_binding(
+            upper_aggregate["primary_matrix_binding"]
+        )
+        learner_binding = normalize_memoryless_learner_binding(
+            upper_aggregate["memoryless_learner_binding"]
+        )
+        (
+            validated_primary_binding,
+            validated_learner_binding,
+            primary_aggregate,
+            _,
+        ) = validate_bound_compute_aware_primary_matrix(
+            primary_binding,
+            learner_binding,
+            expected_primary_root=primary_path,
+        )
+    except (KeyError, RegisteredAggregationError, ValueError) as error:
+        raise UpperReferenceLinkError(
+            f"schema-6 primary binding validation failed: {error}"
+        ) from error
+    if (
+        validated_primary_binding != primary_binding or validated_learner_binding != learner_binding
+    ):  # pragma: no cover - normalizers are deterministic
+        raise UpperReferenceLinkError(
+            "normalized compute-aware primary bindings are not deterministic"
+        )
+    if (
+        primary_aggregate.get("schema_version") != 2
+        or primary_aggregate.get("matrix_kind") != "primary_comparison"
+    ):
+        raise UpperReferenceLinkError("supplied primary root is not a schema-6 primary aggregate")
+
+    primary_registration = _mapping(
+        _load_json(
+            primary_path / "registration.json",
+            field="schema-6 primary registration",
+        ),
+        field="schema-6 primary registration",
+    )
+    upper_registration = _mapping(
+        _load_json(
+            upper_path / "registration.json",
+            field="schema-7 upper-reference registration",
+        ),
+        field="schema-7 upper-reference registration",
+    )
+    primary_manifest = _mapping(
+        _load_json(
+            primary_path / "frozen_manifest.json",
+            field="schema-6 primary manifest",
+        ),
+        field="schema-6 primary manifest",
+    )
+    upper_manifest = _mapping(
+        _load_json(
+            upper_path / "frozen_manifest.json",
+            field="schema-7 upper-reference manifest",
+        ),
+        field="schema-7 upper-reference manifest",
+    )
+    if (
+        primary_registration.get("schema_version") != 6
+        or upper_registration.get("schema_version") != 7
+        or primary_registration.get("evidence_tier") != "registered_final"
+        or upper_registration.get("evidence_tier") != "registered_final"
+        or primary_registration.get("comparison_profile") != "arcmind_shared_comparison"
+        or upper_registration.get("comparison_profile") != "arcmind_shared_comparison"
+        or primary_registration.get("evaluation_episodes_per_env")
+        != COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV
+        or upper_registration.get("evaluation_episodes_per_env")
+        != COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV
+        or primary_registration.get("require_gpu") is not True
+        or upper_registration.get("require_gpu") is not True
+        or primary_registration.get("quick") is not False
+        or upper_registration.get("quick") is not False
+        or primary_registration.get("seeds") != list(COMPUTE_AWARE_FINAL_SEEDS)
+        or upper_registration.get("seeds") != list(COMPUTE_AWARE_FINAL_SEEDS)
+    ):
+        raise UpperReferenceLinkError(
+            "compute-aware primary and upper registrations do not share the "
+            "exact final execution contract"
+        )
+    try:
+        registration_primary_binding = normalize_primary_matrix_binding(
+            upper_registration.get("primary_matrix_binding")
+        )
+        registration_learner_binding = normalize_memoryless_learner_binding(
+            upper_registration.get("memoryless_learner_binding")
+        )
+    except ValueError as error:
+        raise UpperReferenceLinkError(str(error)) from error
+    if (
+        registration_primary_binding != primary_binding
+        or registration_learner_binding != learner_binding
+    ):
+        raise UpperReferenceLinkError(
+            "schema-7 registration bindings drift from its validated aggregate"
+        )
+
+    expected_primary_environments = [environment for environment, _ in COMPUTE_AWARE_FINAL_PANEL]
+    expected_upper_environments = [
+        environment for environment, _ in COMPUTE_AWARE_UPPER_REFERENCE_PANEL
+    ]
+    if (
+        primary_aggregate.get("environments") != expected_primary_environments
+        or upper_aggregate.get("environments") != expected_upper_environments
+        or upper_aggregate.get("models") != ["memoryless_mlp"]
+        or [
+            (group.get("environment"), group.get("model"))
+            for group in upper_aggregate.get("groups", [])
+            if isinstance(group, Mapping)
+        ]
+        != [(environment, "memoryless_mlp") for environment in expected_upper_environments]
+        or upper_aggregate.get("paired_differences_against_arcmind") != []
+        or upper_aggregate.get("supplemental_paired_differences_against_arcmind") != []
+    ):
+        raise UpperReferenceLinkError(
+            "schema-7 aggregate must contain only four diagnostic memoryless groups"
+        )
+    alias_mapping = [
+        {
+            "upper_reference_environment": upper_environment,
+            "primary_environment": UPPER_TO_PRIMARY_ENVIRONMENT[upper_environment],
+        }
+        for upper_environment in expected_upper_environments
+    ]
+    if [item["primary_environment"] for item in alias_mapping] != (
+        expected_primary_environments
+    ) or upper_aggregate.get("upper_reference_alias_mapping") != alias_mapping:
+        raise UpperReferenceLinkError(
+            "schema-7 upper-reference aliases do not map exactly to the primary panel"
+        )
+
+    primary_contracts = _compute_aware_contracts_by_environment(
+        primary_path,
+        primary_manifest,
+        model="memoryless_mlp",
+    )
+    upper_contracts = _compute_aware_contracts_by_environment(
+        upper_path,
+        upper_manifest,
+        model="memoryless_mlp",
+    )
+    paired_contracts: list[dict[str, Any]] = []
+    for mapping in alias_mapping:
+        primary_environment = mapping["primary_environment"]
+        upper_environment = mapping["upper_reference_environment"]
+        primary_contract = primary_contracts[primary_environment]
+        upper_contract = upper_contracts[upper_environment]
+        if primary_contract != upper_contract:
+            raise UpperReferenceLinkError(
+                "full PPO or evaluation contract differs for paired environments "
+                f"{primary_environment!r} and {upper_environment!r}"
+            )
+        paired_contracts.append(
+            {
+                **mapping,
+                "model": "memoryless_mlp",
+                **primary_contract,
+            }
+        )
+
+    primary_provenance = _mapping(
+        primary_aggregate.get("provenance"),
+        field="schema-6 primary aggregate provenance",
+    )
+    upper_provenance = _mapping(
+        upper_aggregate.get("provenance"),
+        field="schema-7 upper-reference aggregate provenance",
+    )
+    if dict(primary_provenance) != dict(upper_provenance):
+        raise UpperReferenceLinkError(
+            "schema-6 and schema-7 matrices require exact provenance equality"
+        )
+    primary_git = _mapping(
+        primary_provenance.get("git"),
+        field="schema-6 primary aggregate provenance.git",
+    )
+    if primary_git.get("dirty") is not False:
+        raise UpperReferenceLinkError(
+            "compute-aware linked matrices must come from clean Git worktrees"
+        )
+
+    upper_evidence_hashes = {
+        "registration_file_sha256": sha256_file(upper_path / "registration.json"),
+        "manifest_file_sha256": sha256_file(upper_path / "frozen_manifest.json"),
+        "manifest_internal_sha256": upper_manifest["manifest_sha256"],
+        "completion_index_file_sha256": sha256_file(upper_path / "completion_index.json"),
+        "checksum_manifest_file_sha256": sha256_file(upper_path / "checksums.sha256"),
+    }
+    return {
+        "schema_version": 2,
+        "status": "registered_final_primary_upper_reference_link",
+        "paper_status": "eligible_only_after_all_other_release_gates_pass",
+        "not_for_paper": False,
+        "evidence_tier": "registered_final",
+        "pairing_mode": ("schema6_selected_memoryless_to_schema7_compute_aware_upper_reference"),
+        "statistical_unit": "seed",
+        "seeds": list(COMPUTE_AWARE_FINAL_SEEDS),
+        "alias_mapping": alias_mapping,
+        "primary_matrix_binding": dict(primary_binding),
+        "memoryless_learner_binding": {
+            **dict(learner_binding),
+            "learner": dict(learner_binding["learner"]),
+        },
+        "contract_equality": {
+            "full_ppo_and_evaluation_validated": True,
+            "full_provenance_validated": True,
+            "all_bound_primary_hashes_validated": True,
+            "raw_returns_included": False,
+            "task_pairs": paired_contracts,
+        },
+        "primary": {
+            "registration_file_sha256": primary_binding["primary_registration_file_sha256"],
+            "manifest_internal_sha256": primary_binding["primary_manifest_internal_sha256"],
+            "manifest_file_sha256": primary_binding["primary_manifest_file_sha256"],
+            "aggregate_file_sha256": primary_binding["primary_aggregate_file_sha256"],
+            "completion_index_file_sha256": primary_binding["primary_completion_index_file_sha256"],
+            "checksum_manifest_file_sha256": primary_binding[
+                "primary_checksum_manifest_file_sha256"
+            ],
+            "provenance": dict(primary_provenance),
+            "raw_integrity": primary_aggregate.get("raw_integrity"),
+        },
+        "upper_reference": {
+            **upper_evidence_hashes,
+            "provenance": dict(upper_provenance),
+            "raw_integrity": upper_aggregate.get("raw_integrity"),
+        },
+        "source_pairing": {
+            "git_commit": primary_git["commit"],
+            "dependency_lock_sha256": primary_provenance["dependency_lock_sha256"],
+            "pobax_commit": primary_provenance["pobax_commit"],
+            "navix_commit": primary_provenance["navix_commit"],
+            "provenance_equality": "exact",
+        },
+    }
+
+
 def build_upper_reference_link(
     primary_root: str | Path,
     upper_reference_root: str | Path,
@@ -716,6 +1085,20 @@ def build_upper_reference_link(
         raise UpperReferenceLinkError("both raw matrix roots must be existing directories")
     if primary_path == upper_path:
         raise UpperReferenceLinkError("primary and upper-reference roots must be distinct")
+
+    schema_pair = (
+        _registration_schema(primary_path, label="primary"),
+        _registration_schema(upper_path, label="upper-reference"),
+    )
+    if schema_pair == (6, 7):
+        return _build_compute_aware_upper_reference_link(
+            primary_path,
+            upper_path,
+        )
+    if 6 in schema_pair or 7 in schema_pair:
+        raise UpperReferenceLinkError(
+            "compute-aware linking requires the exact registration schema pair (6, 7)"
+        )
 
     primary_registration, primary_registration_sha256 = _validate_registration(primary_path)
     upper_registration, upper_registration_sha256 = _validate_registration(upper_path)
@@ -967,10 +1350,16 @@ def main() -> None:
             {
                 "output": str(arguments.output.resolve()),
                 "status": result["status"],
-                "primary_manifest_sha256": result["primary"]["matrix_manifest_sha256"],
-                "upper_reference_manifest_sha256": result["upper_reference"][
-                    "matrix_manifest_sha256"
-                ],
+                "primary_manifest_sha256": (
+                    result["primary"]["manifest_internal_sha256"]
+                    if result["schema_version"] == 2
+                    else result["primary"]["matrix_manifest_sha256"]
+                ),
+                "upper_reference_manifest_sha256": (
+                    result["upper_reference"]["manifest_internal_sha256"]
+                    if result["schema_version"] == 2
+                    else result["upper_reference"]["matrix_manifest_sha256"]
+                ),
             },
             sort_keys=True,
         )

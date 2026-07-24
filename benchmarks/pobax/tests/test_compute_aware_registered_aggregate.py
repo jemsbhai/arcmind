@@ -12,6 +12,8 @@ import benchmarks.pobax.aggregate_registered as aggregate_module
 from benchmarks.pobax.aggregate_registered import (
     RegisteredAggregationError,
     _schema6_arcmind_vs_common,
+    _schema6_task_bootstrap_indices,
+    _schema6_task_specific_arcmind_comparisons,
     _validate_artifact,
     _validate_manifest,
     _validate_manifest_panel_selection,
@@ -21,6 +23,7 @@ from benchmarks.pobax.aggregate_registered import (
 from benchmarks.pobax.implementation_provenance import (
     IMPLEMENTATION_SOURCE_ALGORITHM,
 )
+from benchmarks.pobax.model_registry import SUPPLEMENTAL_COMPARISON_ROLE
 from benchmarks.pobax.registered_artifacts import (
     atomic_write_bytes,
     atomic_write_json,
@@ -699,6 +702,112 @@ def test_schema6_stratified_bootstrap_is_deterministic_and_scores_ties_half() ->
     assert [task["weight"] for task in tie["tasks"]] == [0.25] * 4
     assert all(len(task["raw_paired_seed_values"]) == 10 for task in tie["tasks"])
     assert "raw_paired_seed_values" not in tie
+
+
+def test_schema6_task_specific_comparisons_are_exact_stratified_and_deterministic() -> None:
+    records = {}
+    for environment, models in COMPUTE_AWARE_TASK_MODEL_INCIDENCE:
+        for seed_index, seed in enumerate(COMPUTE_AWARE_FINAL_SEEDS):
+            arcmind_return = float(seed_index)
+            for model in models:
+                value = (
+                    arcmind_return
+                    if model
+                    in {
+                        "arcmind",
+                        "frame_stack_mlp",
+                        "ffm",
+                        "memory_trace_official",
+                    }
+                    else arcmind_return - float(seed_index % 3)
+                )
+                records[(environment, model, seed)] = {"evaluation": {"mean_return": value}}
+    manifest = {
+        "environments": tuple(environment for environment, _ in COMPUTE_AWARE_FINAL_PANEL),
+        "seeds": COMPUTE_AWARE_FINAL_SEEDS,
+        "task_model_incidence": _incidence(),
+    }
+    draws = _schema6_task_bootstrap_indices(
+        manifest["environments"],
+        len(COMPUTE_AWARE_FINAL_SEEDS),
+    )
+
+    common = _schema6_arcmind_vs_common(
+        manifest,
+        records,
+        draw_indices=draws,
+    )
+    first = _schema6_task_specific_arcmind_comparisons(
+        manifest,
+        records,
+        draw_indices=draws,
+    )
+    second = _schema6_task_specific_arcmind_comparisons(
+        manifest,
+        records,
+        draw_indices=draws,
+    )
+
+    assert first == second
+    assert {name: len(items) for name, items in first.items()} == {
+        "primary_controls": 10,
+        "ablations": 5,
+        "supplemental_source_compatible": 2,
+    }
+    assert sum(map(len, first.values())) == 17
+    assert [
+        (item["environment"], item["comparison_model"]) for item in first["primary_controls"]
+    ] == [
+        (environment, model)
+        for environment in ("tmaze_10", "rocksample_11_11")
+        for model in ("ffm", "shm", "lru", "s4d", "transformer_xl")
+    ]
+    assert all(
+        item["comparison_role"] == SUPPLEMENTAL_COMPARISON_ROLE
+        for item in first["supplemental_source_compatible"]
+    )
+    assert all(
+        item["comparison_role"] != SUPPLEMENTAL_COMPARISON_ROLE
+        for block in ("primary_controls", "ablations")
+        for item in first[block]
+    )
+    ffm = next(
+        item
+        for item in first["primary_controls"]
+        if item["environment"] == "tmaze_10" and item["comparison_model"] == "ffm"
+    )
+    frame_stack = next(item for item in common if item["comparison_model"] == "frame_stack_mlp")[
+        "tasks"
+    ][0]
+    assert ffm["arcmind_probability_of_improvement"]["estimate"] == 0.5
+    assert (
+        ffm["arcmind_probability_of_improvement"]["bootstrap_95_ci"]
+        == frame_stack["arcmind_probability_of_improvement"]["bootstrap_95_ci"]
+        == [0.5, 0.5]
+    )
+    assert all(
+        len(item["raw_paired_seed_values"]) == 10 for items in first.values() for item in items
+    )
+
+
+def test_schema6_task_specific_comparisons_reject_inventory_drift() -> None:
+    manifest = {
+        "environments": tuple(environment for environment, _ in COMPUTE_AWARE_FINAL_PANEL),
+        "seeds": COMPUTE_AWARE_FINAL_SEEDS,
+        "task_model_incidence": _incidence(),
+    }
+    manifest["task_model_incidence"][0]["models"].remove("ffm")
+    draws = _schema6_task_bootstrap_indices(
+        manifest["environments"],
+        len(COMPUTE_AWARE_FINAL_SEEDS),
+    )
+
+    with pytest.raises(RegisteredAggregationError, match="inventory drifts"):
+        _schema6_task_specific_arcmind_comparisons(
+            manifest,
+            {},
+            draw_indices=draws,
+        )
 
 
 def test_legacy_registered_aggregate_remains_schema1(tmp_path: Path) -> None:
