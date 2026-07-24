@@ -80,6 +80,26 @@ COMPUTE_AWARE_TUNING_PANEL = (
 )
 COMPUTE_AWARE_TUNING_SEEDS = (4409, 5519, 6637)
 COMPUTE_AWARE_FINAL_SEEDS = tuple(range(10_000, 10_010))
+COMPUTE_AWARE_FINAL_PANEL = (
+    ("tmaze_10", 1_000_000),
+    ("rocksample_11_11", 5_000_000),
+    ("battleship_10", 10_000_000),
+    ("Navix-DMLab-Maze-01-v0", 10_000_000),
+)
+COMPUTE_AWARE_LEARNER_GRID = (
+    ("lr_low", 0.0001),
+    ("lr_mid", 0.00025),
+    ("lr_high", 0.0005),
+)
+COMPUTE_AWARE_INHERITED_LEARNER_SOURCES = {
+    "arcmind_ssm_only": "arcmind",
+    "arcmind_unordered": "arcmind",
+    "arcmind_no_memory": "arcmind",
+    "arcmind_no_ssm": "arcmind",
+    "arcmind_no_gate": "arcmind",
+    "memory_trace_official": "memory_trace_shared",
+    "agalite_source_compat": "agalite_shared",
+}
 PUBLISHED_PRIMARY_TRAIN_STEPS = {
     "tmaze_10": 1_000_000,
     "rocksample_11_11": 5_000_000,
@@ -702,9 +722,7 @@ def normalize_tuned_families(value: object) -> tuple[dict[str, str], ...]:
             "family_id",
             "implementation_model",
         }:
-            raise ValueError(
-                f"{field} must contain exactly family_id and implementation_model"
-            )
+            raise ValueError(f"{field} must contain exactly family_id and implementation_model")
         family_id = raw_family["family_id"]
         if (
             not isinstance(family_id, str)
@@ -750,8 +768,8 @@ def normalize_tuned_families(value: object) -> tuple[dict[str, str], ...]:
 def normalize_shared_learner_grid(value: object) -> tuple[dict[str, Any], ...]:
     """Validate the one literal learner grid shared by all schema-v5 families."""
 
-    if not isinstance(value, list) or len(value) < 2:
-        raise ValueError("learner_grid must contain at least two learners")
+    if not isinstance(value, list) or len(value) != len(COMPUTE_AWARE_LEARNER_GRID):
+        raise ValueError("learner_grid must contain exactly the three registered learners")
     grid: list[dict[str, Any]] = []
     learner_ids: set[str] = set()
     learner_signatures: set[tuple[tuple[str, int | float | bool], ...]] = set()
@@ -771,6 +789,16 @@ def normalize_shared_learner_grid(value: object) -> tuple[dict[str, Any], ...]:
         ):
             raise ValueError(f"{field}.learner_id must be a unique portable identifier")
         learner = normalize_learner(raw_candidate["learner"], schema_version=5)
+        expected_learner_id, expected_learning_rate = COMPUTE_AWARE_LEARNER_GRID[index]
+        if learner_id != expected_learner_id:
+            raise ValueError(
+                "learner_grid must preserve the exact registered learner order: "
+                f"expected {expected_learner_id!r} at index {index}, "
+                f"found {learner_id!r}"
+            )
+        expected_learner = _compute_aware_learner(expected_learning_rate)
+        if learner != expected_learner:
+            raise ValueError(f"{field}.learner must equal the registered LR-only configuration")
         learner_signature = tuple(sorted(learner.items()))
         if learner_signature in learner_signatures:
             raise ValueError("learner_grid contains duplicate normalized learner configurations")
@@ -791,6 +819,21 @@ def normalize_shared_learner_grid(value: object) -> tuple[dict[str, Any], ...]:
             "update_epochs, and num_minibatches across every learner"
         )
     return tuple(grid)
+
+
+def _compute_aware_learner(learning_rate: float) -> dict[str, int | float | bool]:
+    """Return one exact learner from the registered compute-aware grid."""
+
+    return {
+        "num_envs": 8,
+        "rollout_steps": 125,
+        "update_epochs": 4,
+        "num_minibatches": 4,
+        "learning_rate": learning_rate,
+        "gae_lambda": 0.95,
+        "entropy_coefficient": 0.01,
+        "anneal_learning_rate": False,
+    }
 
 
 def _normalize_seed_manifest(value: object, *, field: str) -> tuple[int, ...]:
@@ -823,13 +866,10 @@ def validate_compute_aware_tuning_contract(
         raise ValueError("compute-aware tuning requires registration schema version 5")
     if comparison_profile != "arcmind_shared_comparison":
         raise ValueError(
-            "compute-aware tuning requires comparison_profile "
-            "'arcmind_shared_comparison'"
+            "compute-aware tuning requires comparison_profile 'arcmind_shared_comparison'"
         )
     if matrix_kind != "hyperparameter_selection":
-        raise ValueError(
-            "compute-aware tuning requires matrix_kind 'hyperparameter_selection'"
-        )
+        raise ValueError("compute-aware tuning requires matrix_kind 'hyperparameter_selection'")
     if quick:
         raise ValueError("compute-aware tuning cannot use quick execution")
     if not tuned_families:
@@ -874,10 +914,7 @@ def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
         "selections",
     }
     if not isinstance(value, Mapping) or set(value) != expected_fields:
-        raise ValueError(
-            "tuning_selection has wrong fields: "
-            f"expected={sorted(expected_fields)}"
-        )
+        raise ValueError(f"tuning_selection has wrong fields: expected={sorted(expected_fields)}")
     hashes: dict[str, str] = {}
     for name in (
         "aggregate_sha256",
@@ -932,8 +969,7 @@ def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
             or candidate_id in candidate_ids
         ):
             raise ValueError(
-                f"{field}.candidate_id must be unique and equal "
-                "model_family + '.' + learner_id"
+                f"{field}.candidate_id must be unique and equal model_family + '.' + learner_id"
             )
         validate_policy_model_id(
             implementation_model,
@@ -954,13 +990,20 @@ def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
                 f"{field}.implementation_source_sha256 must equal "
                 "tuning_selection.source_implementation_sha256"
             )
+        registered_learners = dict(COMPUTE_AWARE_LEARNER_GRID)
+        expected_learning_rate = registered_learners.get(learner_id)
+        if expected_learning_rate is None:
+            raise ValueError(f"{field}.learner_id must name one registered learner")
+        learner = normalize_learner(raw_selection["learner"], schema_version=6)
+        if learner != _compute_aware_learner(expected_learning_rate):
+            raise ValueError(f"{field}.learner must equal the registered learner configuration")
         selections.append(
             {
                 "model_family": model_family,
                 "implementation_model": implementation_model,
                 "candidate_id": candidate_id,
                 "learner_id": learner_id,
-                "learner": normalize_learner(raw_selection["learner"], schema_version=6),
+                "learner": learner,
                 "implementation_source_sha256": implementation_source_sha256,
             }
         )
@@ -1010,9 +1053,7 @@ def normalize_learner_bindings(
             "mode",
             "source_model_family",
         }:
-            raise ValueError(
-                f"{field} must contain exactly model, mode, and source_model_family"
-            )
+            raise ValueError(f"{field} must contain exactly model, mode, and source_model_family")
         model = raw_binding["model"]
         if model != normalized_models[index]:
             raise ValueError("learner_bindings must preserve the exact models order")
@@ -1020,9 +1061,8 @@ def normalize_learner_bindings(
         if mode not in {"selected", "inherited"}:
             raise ValueError(f"{field}.mode must be 'selected' or 'inherited'")
         source_model_family = raw_binding["source_model_family"]
-        if (
-            not isinstance(source_model_family, str)
-            or not _IDENTIFIER_PATTERN.fullmatch(source_model_family)
+        if not isinstance(source_model_family, str) or not _IDENTIFIER_PATTERN.fullmatch(
+            source_model_family
         ):
             raise ValueError(f"{field}.source_model_family must be a portable identifier")
         bindings.append(
@@ -1048,8 +1088,7 @@ def normalize_task_model_incidence(
     if (
         not environment_ids
         or any(
-            not isinstance(environment, str) or not environment
-            for environment in environment_ids
+            not isinstance(environment, str) or not environment for environment in environment_ids
         )
         or len(set(environment_ids)) != len(environment_ids)
     ):
@@ -1072,22 +1111,17 @@ def normalize_task_model_incidence(
             raise ValueError(f"{field} must contain exactly environment and models")
         environment = raw_entry["environment"]
         if environment != environment_ids[index]:
-            raise ValueError(
-                "task_model_incidence must preserve the exact environments order"
-            )
+            raise ValueError("task_model_incidence must preserve the exact environments order")
         raw_models = raw_entry["models"]
         if not isinstance(raw_models, list) or not raw_models:
             raise ValueError(f"{field}.models must be a non-empty list")
-        if (
-            any(not isinstance(model, str) or model not in model_positions for model in raw_models)
-            or len(set(raw_models)) != len(raw_models)
-        ):
+        if any(
+            not isinstance(model, str) or model not in model_positions for model in raw_models
+        ) or len(set(raw_models)) != len(raw_models):
             raise ValueError(f"{field}.models must be unique members of the global models list")
         positions = [model_positions[model] for model in raw_models]
         if positions != sorted(positions):
-            raise ValueError(
-                f"{field}.models must preserve the exact global models order"
-            )
+            raise ValueError(f"{field}.models must preserve the exact global models order")
         if "arcmind" not in raw_models:
             raise ValueError(f"{field}.models must contain arcmind")
         for model in raw_models:
@@ -1105,9 +1139,7 @@ def normalize_task_model_incidence(
             f"every global model must occur in the incidence matrix: missing={missing_models}"
         )
     if len(common_models) < 2:
-        raise ValueError(
-            "task_model_incidence must retain at least two all-task common models"
-        )
+        raise ValueError("task_model_incidence must retain at least two all-task common models")
     return tuple(normalized)
 
 
@@ -1130,8 +1162,7 @@ def validate_compute_aware_final_contract(
         raise ValueError("compute-aware final requires registration schema version 6")
     if comparison_profile != "arcmind_shared_comparison":
         raise ValueError(
-            "compute-aware final requires comparison_profile "
-            "'arcmind_shared_comparison'"
+            "compute-aware final requires comparison_profile 'arcmind_shared_comparison'"
         )
     if matrix_kind != "primary_comparison":
         raise ValueError("compute-aware final requires matrix_kind 'primary_comparison'")
@@ -1146,20 +1177,12 @@ def validate_compute_aware_final_contract(
     if set(normalized_seeds) & set(COMPUTE_AWARE_TUNING_SEEDS):
         raise ValueError("compute-aware final seeds must be disjoint from tuning seeds")
     actual_budgets = tuple(environments.items())
-    if not actual_budgets:
-        raise ValueError("compute-aware final requires at least one environment")
-    for environment, total_steps in actual_budgets:
-        expected_steps = PUBLISHED_PRIMARY_TRAIN_STEPS.get(environment)
-        if expected_steps is None:
-            raise ValueError(
-                "compute-aware final requires published POBAX primary environments"
-            )
-        if total_steps != expected_steps:
-            raise ValueError(
-                "compute-aware final requires each published task budget: "
-                f"environment={environment!r}, expected={expected_steps}, "
-                f"found={total_steps}"
-            )
+    if actual_budgets != COMPUTE_AWARE_FINAL_PANEL:
+        raise ValueError(
+            "compute-aware final requires the exact ordered four-task panel and "
+            f"published budgets: expected={COMPUTE_AWARE_FINAL_PANEL}, "
+            f"found={actual_budgets}"
+        )
     normalized_bindings = normalize_learner_bindings(
         learner_bindings,
         models=models,
@@ -1178,11 +1201,18 @@ def validate_compute_aware_final_contract(
     for learner_binding in normalized_bindings:
         model = learner_binding["model"]
         source_family = learner_binding["source_model_family"]
+        expected_inherited_source = COMPUTE_AWARE_INHERITED_LEARNER_SOURCES.get(model)
+        if expected_inherited_source is not None:
+            if learner_binding["mode"] != "inherited" or source_family != expected_inherited_source:
+                raise ValueError(
+                    f"learner binding for {model!r} must inherit from {expected_inherited_source!r}"
+                )
+        elif learner_binding["mode"] != "selected":
+            raise ValueError(f"learner binding for {model!r} must be a direct selected lane")
         selection = selections_by_family.get(source_family)
         if selection is None:
             raise ValueError(
-                f"learner binding for {model!r} names unknown source family "
-                f"{source_family!r}"
+                f"learner binding for {model!r} names unknown source family {source_family!r}"
             )
         if learner_binding["mode"] == "selected":
             if model != selection["implementation_model"]:
@@ -1191,9 +1221,7 @@ def validate_compute_aware_final_contract(
                     "source family's implementation model"
                 )
             if source_family in selected_sources:
-                raise ValueError(
-                    f"source family {source_family!r} has duplicate selected bindings"
-                )
+                raise ValueError(f"source family {source_family!r} has duplicate selected bindings")
             selected_sources.add(source_family)
         elif model == selection["implementation_model"]:
             raise ValueError(

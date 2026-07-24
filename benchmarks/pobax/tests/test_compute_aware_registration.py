@@ -7,7 +7,10 @@ from copy import deepcopy
 import pytest
 
 from benchmarks.pobax.registration_protocol import (
+    COMPUTE_AWARE_FINAL_PANEL,
     COMPUTE_AWARE_FINAL_SEEDS,
+    COMPUTE_AWARE_INHERITED_LEARNER_SOURCES,
+    COMPUTE_AWARE_LEARNER_GRID,
     COMPUTE_AWARE_TUNING_PANEL,
     COMPUTE_AWARE_TUNING_SEEDS,
     LEARNER_FIELDS_V2,
@@ -136,9 +139,7 @@ def _validate_tuning(
     matrix_kind: str = "hyperparameter_selection",
     quick: bool = False,
 ) -> None:
-    normalized_families = normalize_tuned_families(
-        _families() if families is None else families
-    )
+    normalized_families = normalize_tuned_families(_families() if families is None else families)
     normalized_grid = normalize_shared_learner_grid(_grid() if grid is None else grid)
     validate_compute_aware_tuning_contract(
         schema_version=5,
@@ -146,11 +147,7 @@ def _validate_tuning(
         matrix_kind=matrix_kind,
         tuned_families=normalized_families,
         learner_grid=normalized_grid,
-        environments=(
-            dict(COMPUTE_AWARE_TUNING_PANEL)
-            if environments is None
-            else environments
-        ),
+        environments=(dict(COMPUTE_AWARE_TUNING_PANEL) if environments is None else environments),
         seeds=seeds,
         quick=quick,
     )
@@ -170,16 +167,10 @@ def _validate_final(
         comparison_profile="arcmind_shared_comparison",
         matrix_kind="primary_comparison",
         models=_models() if models is None else models,
-        learner_bindings=(
-            _learner_bindings() if learner_bindings is None else learner_bindings
-        ),
+        learner_bindings=(_learner_bindings() if learner_bindings is None else learner_bindings),
         task_model_incidence=_incidence() if incidence is None else incidence,
-        tuning_selection=(
-            _selection_binding() if tuning_selection is None else tuning_selection
-        ),
-        environments=(
-            _final_environments() if environments is None else environments
-        ),
+        tuning_selection=(_selection_binding() if tuning_selection is None else tuning_selection),
+        environments=(_final_environments() if environments is None else environments),
         seeds=seeds,
         quick=False,
     )
@@ -192,9 +183,10 @@ def test_registration_field_sets_preserve_v1_to_v4_and_add_v5_v6() -> None:
     assert registration_fields(4) == REGISTRATION_FIELDS_V4
     assert registration_fields(5) == REGISTRATION_FIELDS_V5
     assert registration_fields(6) == REGISTRATION_FIELDS_V6
-    assert REGISTRATION_FIELDS_V5 == (
-        REGISTRATION_FIELDS_V2 - {"models", "learner"}
-    ) | {"tuned_families", "learner_grid"}
+    assert REGISTRATION_FIELDS_V5 == (REGISTRATION_FIELDS_V2 - {"models", "learner"}) | {
+        "tuned_families",
+        "learner_grid",
+    }
     assert REGISTRATION_FIELDS_V6 == (REGISTRATION_FIELDS_V2 - {"learner"}) | {
         "learner_bindings",
         "task_model_incidence",
@@ -206,9 +198,7 @@ def test_registration_field_sets_preserve_v1_to_v4_and_add_v5_v6() -> None:
 def test_compute_aware_schemas_use_the_complete_v2_learner(
     schema_version: int,
 ) -> None:
-    assert set(normalize_learner(_learner(), schema_version=schema_version)) == (
-        LEARNER_FIELDS_V2
-    )
+    assert set(normalize_learner(_learner(), schema_version=schema_version)) == (LEARNER_FIELDS_V2)
 
 
 def test_valid_compute_aware_tuning_contract_normalizes_exact_design() -> None:
@@ -226,6 +216,20 @@ def test_valid_compute_aware_tuning_contract_normalizes_exact_design() -> None:
         "lr_high",
     ]
     _validate_tuning()
+
+
+def test_compute_aware_grid_and_final_panel_are_exactly_frozen() -> None:
+    assert COMPUTE_AWARE_LEARNER_GRID == (
+        ("lr_low", 0.0001),
+        ("lr_mid", 0.00025),
+        ("lr_high", 0.0005),
+    )
+    assert COMPUTE_AWARE_FINAL_PANEL == (
+        ("tmaze_10", 1_000_000),
+        ("rocksample_11_11", 5_000_000),
+        ("battleship_10", 10_000_000),
+        ("Navix-DMLab-Maze-01-v0", 10_000_000),
+    )
 
 
 @pytest.mark.parametrize(
@@ -269,14 +273,21 @@ def _drift_grid_structure(grid: list[dict[str, object]]) -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        (lambda value: value.__setitem__(slice(1, None), []), "at least two"),
+        (
+            lambda value: value.__setitem__(slice(2, None), []),
+            "exactly the three registered learners",
+        ),
         (
             lambda value: value[1].update(learner_id="lr_low"),
             "unique portable identifier",
         ),
-        (_duplicate_grid_learner, "duplicate normalized learner"),
-        (_drift_grid_structure, "identical num_envs"),
+        (_duplicate_grid_learner, "registered LR-only configuration"),
+        (_drift_grid_structure, "registered LR-only configuration"),
         (lambda value: value[0].update(extra=True), "exactly learner_id and learner"),
+        (
+            lambda value: value.reverse(),
+            "exact registered learner order",
+        ),
     ],
 )
 def test_shared_learner_grid_fails_closed(mutation, message: str) -> None:
@@ -284,6 +295,15 @@ def test_shared_learner_grid_fails_closed(mutation, message: str) -> None:
     mutation(grid)
 
     with pytest.raises(ValueError, match=message):
+        normalize_shared_learner_grid(grid)
+
+
+def test_shared_learner_grid_rejects_arbitrary_tuning_fields() -> None:
+    grid = _grid()
+    grid[0]["learner"]["gae_lambda"] = 0.5
+    grid[1]["learner"]["entropy_coefficient"] = 0.2
+
+    with pytest.raises(ValueError, match="registered LR-only configuration"):
         normalize_shared_learner_grid(grid)
 
 
@@ -325,9 +345,7 @@ def test_compute_aware_tuning_contract_fails_closed(
 def test_panel_selection_binding_normalizes_winners_and_paths() -> None:
     binding = normalize_panel_selection_binding(_selection_binding())
 
-    assert binding["raw_matrix_path"] == (
-        "benchmark_results/pobax/tuning-panel-v1"
-    )
+    assert binding["raw_matrix_path"] == ("benchmark_results/pobax/tuning-panel-v1")
     assert [item["candidate_id"] for item in binding["selections"]] == [
         "memoryless_mlp.lr_mid",
         "gru.lr_mid",
@@ -344,15 +362,11 @@ def _duplicate_selection_family(binding: dict[str, object]) -> None:
     ("mutation", "message"),
     [
         (
-            lambda value: value["selections"][0].update(
-                candidate_id="memoryless_mlp.lr_other"
-            ),
+            lambda value: value["selections"][0].update(candidate_id="memoryless_mlp.lr_other"),
             "model_family",
         ),
         (
-            lambda value: value["selections"][0].update(
-                implementation_source_sha256="7" * 64
-            ),
+            lambda value: value["selections"][0].update(implementation_source_sha256="7" * 64),
             "must equal",
         ),
         (
@@ -367,6 +381,18 @@ def _duplicate_selection_family(binding: dict[str, object]) -> None:
         (
             lambda value: value["selections"][0].update(extra=True),
             "must contain exactly",
+        ),
+        (
+            lambda value: value["selections"][0].update(
+                learner_id="invented",
+                candidate_id="memoryless_mlp.invented",
+                learner=_learner(0.123),
+            ),
+            "registered learner",
+        ),
+        (
+            lambda value: value["selections"][0]["learner"].update(gae_lambda=0.5),
+            "registered learner configuration",
         ),
     ],
 )
@@ -453,9 +479,7 @@ def _leave_only_arcmind_common(incidence: list[dict[str, object]]) -> None:
         ),
         (_remove_arcmind_from_one_task, "must contain arcmind"),
         (
-            lambda value: value[1].update(
-                models=["memoryless_mlp", "gru", "arcmind"]
-            ),
+            lambda value: value[1].update(models=["memoryless_mlp", "gru", "arcmind"]),
             "every global model",
         ),
         (_leave_only_arcmind_common, "at least two all-task common models"),
@@ -477,6 +501,18 @@ def test_valid_compute_aware_final_contract_supports_inherited_ablation() -> Non
     _validate_final()
 
 
+def test_registered_inherited_learner_sources_are_exact() -> None:
+    assert COMPUTE_AWARE_INHERITED_LEARNER_SOURCES == {
+        "arcmind_ssm_only": "arcmind",
+        "arcmind_unordered": "arcmind",
+        "arcmind_no_memory": "arcmind",
+        "arcmind_no_ssm": "arcmind",
+        "arcmind_no_gate": "arcmind",
+        "memory_trace_official": "memory_trace_shared",
+        "agalite_source_compat": "agalite_shared",
+    }
+
+
 def _unknown_binding_source(bindings: list[dict[str, str]]) -> None:
     bindings[-1]["source_model_family"] = "unknown"
 
@@ -493,6 +529,14 @@ def _missing_direct_selection(bindings: list[dict[str, str]]) -> None:
     bindings[1].update(mode="inherited", source_model_family="arcmind")
 
 
+def _ablation_inherits_gru(bindings: list[dict[str, str]]) -> None:
+    bindings[-1]["source_model_family"] = "gru"
+
+
+def _ordinary_model_inherits_arcmind(bindings: list[dict[str, str]]) -> None:
+    bindings[0].update(mode="inherited", source_model_family="arcmind")
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -503,7 +547,22 @@ def _missing_direct_selection(bindings: list[dict[str, str]]) -> None:
                     "rocksample_11_11": 1_000_000,
                 }
             },
-            "published task budget",
+            "exact ordered four-task panel",
+        ),
+        (
+            {"environments": {"tmaze_10": 1_000_000}},
+            "exact ordered four-task panel",
+        ),
+        (
+            {
+                "environments": {
+                    "rocksample_11_11": 5_000_000,
+                    "tmaze_10": 1_000_000,
+                    "battleship_10": 10_000_000,
+                    "Navix-DMLab-Maze-01-v0": 10_000_000,
+                }
+            },
+            "exact ordered four-task panel",
         ),
         (
             {"seeds": tuple(range(10_000, 10_009))},
@@ -511,19 +570,37 @@ def _missing_direct_selection(bindings: list[dict[str, str]]) -> None:
         ),
         (
             {"learner_bindings": _unknown_binding_source},
-            "unknown source family",
+            "must inherit from 'arcmind'",
         ),
         (
             {"learner_bindings": _selected_model_drift},
-            "must execute its source family's implementation",
+            "must inherit from 'arcmind'",
         ),
         (
             {"learner_bindings": _inherited_model_matches_source},
-            "must execute a different model",
+            "direct selected lane",
         ),
         (
             {"learner_bindings": _missing_direct_selection},
-            "one direct selected binding",
+            "direct selected lane",
+        ),
+        (
+            {"learner_bindings": _ablation_inherits_gru},
+            "must inherit from 'arcmind'",
+        ),
+        (
+            {"learner_bindings": _ordinary_model_inherits_arcmind},
+            "direct selected lane",
+        ),
+        (
+            {
+                "tuning_selection": lambda value: value["selections"][0].update(
+                    learner_id="invented",
+                    candidate_id="memoryless_mlp.invented",
+                    learner=_learner(0.123),
+                )
+            },
+            "registered learner",
         ),
     ],
 )
@@ -536,6 +613,11 @@ def test_compute_aware_final_contract_fails_closed(
         bindings = _learner_bindings()
         learner_binding_mutation(bindings)
         kwargs["learner_bindings"] = bindings
+    selection_mutation = kwargs.pop("tuning_selection", None)
+    if callable(selection_mutation):
+        selection = _selection_binding()
+        selection_mutation(selection)
+        kwargs["tuning_selection"] = selection
 
     with pytest.raises(ValueError, match=message):
         _validate_final(**kwargs)
