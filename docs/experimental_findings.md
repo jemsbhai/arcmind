@@ -812,15 +812,24 @@ with each actual experiment.
   - commit `3a12cb33b29f8018ef2d87cb2713650c537a6e66` removes the silent default and
     binds the causal Transformer window to `evaluation_max_episode_steps`;
     and
-  - schema-v3 tuning and schema-v4 final configuration, artifact, resume, and
-    aggregation paths now reject a causal Transformer whose serialized
-    window differs from the task horizon. Legacy schema-v1 and schema-v2
-    development artifacts remain readable but are not paper eligible.
+  - schema-v3 tuning and schema-v4 final runtime, configuration, and resume
+    paths reject a causal Transformer whose serialized window differs from
+    the task horizon. Legacy schema-v1 and schema-v2 development artifacts
+    remain readable but are not paper eligible.
 - Validation:
   - the focused horizon, matrix, development aggregation, and registered
     aggregation suite passed 197 of 197 tests;
-  - the full POBAX suite passed 391 of 391 tests in the pinned environment;
-    and
+  - the initial full POBAX suite passed 391 of 391 tests in the pinned
+    environment;
+  - an independent audit found one P2 gap: both aggregators validated the
+    frozen configuration but accepted a conflicting 32-step policy core
+    duplicated at the artifact top level;
+  - commit `702df7bf4697e00a68c666cdee9bf51bb71e8f0d` now independently validates
+    the top-level schema-v3 and schema-v4 artifact horizon and requires exact
+    equality with the frozen configuration, while leaving schema-v1 and
+    schema-v2 behavior unchanged;
+  - the repair passed 7 direct tests, 117 focused aggregation tests, and all
+    438 POBAX tests; and
   - the corrected RockSample build used the 1,000-step task horizon at clean
     commit `03abcf15b992c1591cce4ef0332e350b11e75da2`.
 - Corrected resource result:
