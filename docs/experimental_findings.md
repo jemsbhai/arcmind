@@ -876,6 +876,25 @@ with each actual experiment.
   | Transformer-XL | 151.686930 | 155.476880 | 1.024985 |
   | ArcMind | 203.447793 | 226.309223 | 1.112370 |
 
+- Source-compatible T-Maze timing gate:
+
+  | Model | Parameters | Training seconds for 128,000 steps |
+  |---|---:|---:|
+  | Official Memory Traces lane | 9,797 | 43.291716 |
+  | AGaLiTe source-compatible lane | 1,772,741 | 470.897213 |
+  | ArcMind timing reference | 28,717 | 381.072660 |
+
+- RockSample ablation timing gate:
+
+  | Model | Parameters | Training seconds for 128,000 steps |
+  |---|---:|---:|
+  | SSM only | 30,425 | 663.392761 |
+  | Unordered recall | 30,425 | 857.056704 |
+  | No episodic memory | 30,425 | 212.879527 |
+  | No SSM | 30,425 | 130.856833 |
+  | No gate | 30,425 | 198.080019 |
+  | ArcMind timing reference | 30,425 | 216.140067 |
+
 - Timing integrity:
   - the common timing matrix completed all five planned cells at clean commit
     `03abcf15b992c1591cce4ef0332e350b11e75da2`;
@@ -917,6 +936,35 @@ with each actual experiment.
     `benchmark_results/pobax/compute-calibration-bf79bb5/tmaze-representative-v3`
     and
     `benchmark_results/pobax/compute-calibration-bf79bb5/rocksample-representative-v3`.
+- Final-gate integrity:
+  - the source-compatible and ablation matrices ran from clean commit
+    `79c8a915d59e343c1991b9278f5ce43857528df7` and completed all three and
+    all six planned cells, respectively;
+  - the source-compatible T-Maze source registration, canonical output
+    registration, frozen manifest, internal manifest identity, completion
+    index, and checksum manifest SHA256 values are
+    `ffd287b8660f20c86c0fb872e080564f34299c491abaa2209a30dd1a25f2f37b`,
+    `a6ad552ef59118d807537170b783a55d3bd23a19ef1c1b0208ac337d81566a1b`,
+    `2a9b69d11f319ec46ee20c1c93a180be3c96564273bc41b8f49a03b7326ad9f0`,
+    `acf13691b06dc7498451459af1aefc542387e15490a92918ab906be306a27fcd`,
+    `1c78d2895c53817a9eb4982c7d52b95a7ea50470bff08272b902f38dcfd4178f`,
+    and
+    `4c02072fa7138a0832ee5092b745bd6d01f4380af2969256849e20c267e23eee`;
+  - the RockSample ablation source registration, canonical output
+    registration, frozen manifest, internal manifest identity, completion
+    index, and checksum manifest SHA256 values are
+    `aac5c80ea8398694ba4785bc3250a48a7b20ccc74cd8bbd34305230e378d346f`,
+    `6e0567fc09d0a945c95faaf9adc1ffc3eb792621145f0e4a17645d1513bf3e7e`,
+    `ec13fd0ca2f76f83c45871029ac0e814c3587ac720677e69ba79da9837af006f`,
+    `05b709bb7fdb5aa60404a7ddf331310df2eab5628aecc8893002478e8a43c6e2`,
+    `404cbd7197bbfb4ca9adc5fb6d4879ffdfb3b9dafeb1ca37922b13a47719b80a`,
+    and
+    `6c2389914263e51ab525670fbc08c3d5251b4c3c4ea495aa80051168cabddd53`;
+    and
+  - the raw directories are
+    `benchmark_results/pobax/compute-calibration-79c8a91/tmaze-source-lanes-v4`
+    and
+    `benchmark_results/pobax/compute-calibration-79c8a91/rocksample-ablations-v4`.
 - Unexpected observation: the ArcMind timing was 2.98 times the
   217.655288-second measurement from the earlier T-Maze calibration even
   though the ArcMind execution path, dependency versions, learner, task,
@@ -924,9 +972,13 @@ with each actual experiment.
   not capture accelerator clocks or power state, so these measurements do not
   identify the source of the difference. A third clean T-Maze replicate took
   203.447793 seconds, close to the first measurement, while its paired
-  RockSample cell took 226.309223 seconds. Compute planning must report both
-  the median-rate estimate and a worst-observed sensitivity bound. It must not
-  average the outlier away.
+  RockSample cell took 226.309223 seconds. A fourth clean T-Maze replicate
+  took 381.072660 seconds. The four-run T-Maze median is 299.363974 seconds.
+  Three clean RockSample ArcMind measurements took 272.094813, 226.309223,
+  and 216.140067 seconds, with a median of 226.309223 seconds. Compute
+  planning must report both a median-rate estimate and a sensitivity bound
+  that applies the worst observed ArcMind rate across the complete panel. It
+  must not average the outlier away.
 - Decision:
   - do not silently shorten the causal Transformer context;
   - exclude full-episode causal attention from trainable registered
@@ -937,10 +989,11 @@ with each actual experiment.
   - retain full-episode causal attention only as an explicitly labeled
     resource reference unless a new frozen resource contract makes it
     feasible.
-- Evidence restriction: calibration returns were not inspected for selection
-  and cannot support performance claims. This finding supports only the
-  implementation correction, measured timing conditions, and local resource
-  exclusion.
+- Evidence restriction: the calibration runner generated evaluation fields
+  as part of normal artifact creation. No calibration return is used for
+  model incidence, learner selection, compute planning, stopping, or a
+  performance claim. This finding supports only the implementation
+  correction, measured timing conditions, and local resource exclusion.
 - External cost: zero dollars. All measurements used local hardware.
 
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
