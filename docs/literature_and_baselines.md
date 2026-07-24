@@ -374,9 +374,29 @@ without changing the experimental question:
 - [Memory Traces](https://proceedings.mlr.press/v267/eberhard25a.html) can be
   used as a fixed policy representation in the shared learner, while its
   author-code result remains a separate compatibility reproduction.
+- [Streaming RL with exact
+  RTRL](https://arxiv.org/abs/2605.24709) trains recurrent trace units with
+  single-sample QRC or streaming actor-critic updates. It reports MemoryChain,
+  POPGym, and masked MuJoCo evidence, but changes the optimizer, batching,
+  credit-assignment method, and actor-critic structure relative to the shared
+  PPO protocol. It is a current algorithm-level comparison, not a drop-in
+  policy-backbone baseline.
 - [Memoroids](https://proceedings.neurips.cc/paper_files/paper/2024/hash/19f7f755908372efb25826d61959cdf9-Abstract-Conference.html)
   changes batching and the training formulation for associative recurrences.
   It is a training-method comparison, not a pure backbone.
+- [Adaptive Stacking](https://arxiv.org/abs/2512.19154) learns which
+  observations to retain in a bounded frame stack. The released
+  [author code](https://github.com/geraudnt/adaptive-stacking) makes it a
+  relevant learned-memory-management comparison, but the added memory action
+  and meta-decision process change the policy and learner contract.
+- [Neural Co-state Policies](https://arxiv.org/abs/2605.05373) add a
+  Pontryagin-derived auxiliary loss to recurrent PPO and evaluate masked
+  continuous-control tasks. The auxiliary supervision makes this an
+  algorithm-level robustness comparison rather than a matched recurrent core.
+- [Temporal Range](https://arxiv.org/abs/2512.06204) is a Jacobian-based
+  diagnostic of how far a trained policy uses its input history. It is not a
+  return baseline. It is a candidate post-training analysis only when the
+  necessary policy checkpoints and evaluation sequences are preserved.
 - [Recall to Imagine](https://recall2imagine.github.io/) adds a world model
   and imagined rollouts.
 - [Memo](https://proceedings.neurips.cc/paper_files/paper/2025/hash/96889893231d651898b0de42fdbee3a6-Abstract-Conference.html)

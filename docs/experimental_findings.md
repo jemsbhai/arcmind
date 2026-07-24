@@ -999,7 +999,8 @@ with each actual experiment.
 ### F-ENG-014: The compute-aware evidence chain is closed before performance runs
 
 - Class: `engineering validation`
-- Status: complete, registered performance experiments not started
+- Status: complete; schema 5 registered performance execution started
+  2026-07-24
 - Date: 2026-07-24
 - Question: can tuning, sparse final evaluation, task-specific ablations, and
   privileged references share one fail-closed provenance chain without
@@ -1049,6 +1050,82 @@ with each actual experiment.
 - Evidence restriction: this finding validates registration, integrity,
   analysis, and compatibility behavior only. It contains no registered
   performance result and supports no ArcMind accuracy claim.
+
+### F-REF-006: The July 2026 search adds algorithm and diagnostic context, not a matched baseline
+
+- Class: `reference audit`
+- Status: baseline audit refreshed after a primary-source search through
+  2026-07-24; the frozen schema 5 and schema 6 model rosters are unchanged
+- Date: 2026-07-24
+- Question: do recent partially observable RL papers require a new
+  like-for-like backbone in the frozen study?
+- Primary sources:
+  - streaming RL with exact RTRL:
+    `https://arxiv.org/abs/2605.24709`;
+  - Adaptive Stacking:
+    `https://arxiv.org/abs/2512.19154`, with author code at
+    `https://github.com/geraudnt/adaptive-stacking`;
+  - Neural Co-state Policies:
+    `https://arxiv.org/abs/2605.05373`; and
+  - Temporal Range:
+    `https://arxiv.org/abs/2512.06204`.
+- Classification:
+  - the streaming RTRL work changes batching, optimizer, credit assignment,
+    actor-critic structure, and recurrent gradient computation relative to
+    shared PPO;
+  - Adaptive Stacking adds an explicit memory-retention action and
+    meta-decision process;
+  - Neural Co-state Policies add a Pontryagin-derived auxiliary objective;
+    and
+  - Temporal Range is a post-training Jacobian diagnostic rather than a
+    trainable return baseline.
+- Decision: keep all four as contextual comparisons. Do not add a
+  post-registration model or learner to schema 5 or schema 6.
+- Diagnostic implication: Temporal Range may be reported in future work only
+  if the required checkpoints and evaluation sequences are retained. It
+  cannot be reconstructed from aggregate returns.
+- Evidence restriction: this search supports only baseline classification and
+  related-work coverage. It does not establish comparative performance or
+  state of the art.
+
+### F-ENG-015: The schema 5 tuning matrix entered immutable execution
+
+- Class: `registered execution provenance`
+- Status: active, performance values blinded pending canonical aggregation
+- Date: 2026-07-24
+- Registration:
+  - tracked manifest:
+    `benchmarks/pobax/manifests/compute_aware_tuning_v1.json`;
+  - source-file SHA256:
+    `bcdfdbeec89ecdf65a065bb032385a8880ac89f7f49349bd62775e5c22d0b436`;
+  - clean detached commit:
+    `ec0dde8aa8a42f6e8568c8ead098944bd95a941e`; and
+  - implementation-source SHA256:
+    `93b57c6d3b4dd602741c410515e7cdecb3122e619f632f32c302efd6902dcf9f`
+    over 44 runtime files.
+- Frozen execution identity:
+  - schema 5, status `frozen`, matrix kind `hyperparameter_selection`;
+  - 39 candidates across 13 families and three learning rates;
+  - T-Maze and RockSample, three seeds, and 234 unique cells;
+  - manifest SHA256:
+    `d37cea02ceaf107fb52e85c7b53df1e78acdba430af90c5d5fbbefcfdfc9caf0`;
+    and
+  - mandatory GPU execution on the local RTX 4090 Laptop GPU.
+- Startup validation:
+  - the raw root contains only the immutable registration, frozen manifest,
+    completed cell artifacts, and paired logs;
+  - the first registered cell and paired log completed before the next cell
+    began; and
+  - Git remained clean because all runtime evidence is ignored and stored
+    outside tracked source.
+- Continuity control: a process-scoped Windows execution-state guard prevents
+  system sleep while the matrix PID is alive and releases automatically when
+  the run ends. It does not alter the persistent power plan.
+- External cost: zero dollars. The run uses local hardware.
+- Evidence restriction: no per-cell return has been inspected. Selection and
+  any performance statement remain prohibited until all 234 cells, paired
+  logs, the completion index, checksum inventory, and canonical schema 5
+  aggregate validate.
 
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
