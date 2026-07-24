@@ -149,6 +149,11 @@ def _assert_state_close(actual: AGaLiTeState, expected: AGaLiTeState) -> None:
         np.testing.assert_allclose(actual_leaf, expected_leaf, rtol=2e-6, atol=2e-6)
 
 
+def _assert_state_equal(actual: AGaLiTeState, expected: AGaLiTeState) -> None:
+    for actual_leaf, expected_leaf in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
 def test_differential_fixture_is_immutable_and_names_exact_official_sources() -> None:
     digest = hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest()
     assert digest == AGALITE_DIFFERENTIAL_FIXTURE_SHA256
@@ -275,25 +280,47 @@ def test_reset_discards_only_prior_memory_then_incorporates_current_token() -> N
     assert bool(jnp.any(first_state.normalizer != 0.0))
 
 
-def test_step_sequence_and_chunked_execution_are_equivalent() -> None:
+def test_eager_step_and_scan_are_equivalent_at_highest_precision() -> None:
     core = _tiny_core()
     params = core.initialize(jax.random.PRNGKey(4))
     policy_inputs = jax.random.normal(jax.random.PRNGKey(5), (7, 3, core.input_dim))
     resets = jnp.zeros((7, 3), dtype=jnp.bool_).at[0].set(True)
     resets = resets.at[2, 1].set(True).at[5, 0].set(True)
 
-    loop_state = core.initial_state(3)
-    loop_logits = []
-    loop_values = []
-    for policy_input, reset in zip(policy_inputs, resets, strict=True):
-        loop_state, logits, values = core.step(
+    # Isolate recurrence semantics from CUDA TF32 contraction differences
+    # between a separately compiled eager step and one compiled scan.
+    with jax.default_matmul_precision("highest"):
+        loop_state = core.initial_state(3)
+        loop_logits = []
+        loop_values = []
+        for policy_input, reset in zip(policy_inputs, resets, strict=True):
+            loop_state, logits, values = core.step(
+                params,
+                loop_state,
+                policy_input,
+                reset,
+            )
+            loop_logits.append(logits)
+            loop_values.append(values)
+        scan_state, scan_logits, scan_values = core.apply_sequence(
             params,
-            loop_state,
-            policy_input,
-            reset,
+            core.initial_state(3),
+            policy_inputs,
+            resets,
         )
-        loop_logits.append(logits)
-        loop_values.append(values)
+
+    _assert_state_close(loop_state, scan_state)
+    np.testing.assert_allclose(loop_logits, scan_logits, rtol=2e-6, atol=2e-6)
+    np.testing.assert_allclose(loop_values, scan_values, rtol=2e-6, atol=2e-6)
+
+
+def test_default_precision_chunked_scan_and_full_scan_are_bit_identical() -> None:
+    core = _tiny_core()
+    params = core.initialize(jax.random.PRNGKey(4))
+    policy_inputs = jax.random.normal(jax.random.PRNGKey(5), (7, 3, core.input_dim))
+    resets = jnp.zeros((7, 3), dtype=jnp.bool_).at[0].set(True)
+    resets = resets.at[2, 1].set(True).at[5, 0].set(True)
+
     scan_state, scan_logits, scan_values = core.apply_sequence(
         params,
         core.initial_state(3),
@@ -313,21 +340,14 @@ def test_step_sequence_and_chunked_execution_are_equivalent() -> None:
         resets[3:],
     )
 
-    _assert_state_close(loop_state, scan_state)
-    _assert_state_close(chunk_state, scan_state)
-    np.testing.assert_allclose(loop_logits, scan_logits, rtol=2e-6, atol=2e-6)
-    np.testing.assert_allclose(loop_values, scan_values, rtol=2e-6, atol=2e-6)
-    np.testing.assert_allclose(
+    _assert_state_equal(chunk_state, scan_state)
+    np.testing.assert_array_equal(
         jnp.concatenate([first_logits, second_logits]),
         scan_logits,
-        rtol=2e-6,
-        atol=2e-6,
     )
-    np.testing.assert_allclose(
+    np.testing.assert_array_equal(
         jnp.concatenate([first_values, second_values]),
         scan_values,
-        rtol=2e-6,
-        atol=2e-6,
     )
 
 
