@@ -667,7 +667,7 @@ with each actual experiment.
 
 - Class: `reference audit`
 - Status: baseline set revised after a primary-source search through
-  2026-07-23
+  2026-07-23; implementation complete in F-ENG-012
 - Date: 2026-07-23
 - Finding: AGaLiTe is accepted by TMLR and directly evaluates a constant-state
   approximate gated linear-attention policy in partially observable online
@@ -712,6 +712,86 @@ with each actual experiment.
 - Evidence restriction: baseline relevance does not imply that ArcMind
   matches or exceeds any listed method. Comparative claims require the frozen
   shared protocol and registered results.
+
+### F-ENG-012: AGaLiTe requires executable and shared comparison lanes
+
+- Class: `engineering validation`
+- Status: implementation complete, performance experiments not started
+- Date: 2026-07-23
+- Question: can AGaLiTe enter the POBAX evaluation while preserving the
+  released executable and disclosing its differences from the paper?
+- Source contract:
+  - the official Apache-2.0 repository is pinned at commit
+    `101acbecc121a258ad8f7e58e2f782f546674979`;
+  - ten exact SHA256 hashes bind the license, requirements, T-Maze
+    configuration, recurrence, GTrXL gates, sequence factory, actor-critic,
+    heads, input flattening, and A2C learner sources;
+  - an immutable CPU fixture records transplanted official Flax parameters,
+    recurrent state, policy outputs, JAX `0.6.2`, and Flax `0.11.2`; and
+  - the fixture SHA256 is
+    `3ab4f79c45168cc8ac8e53dfe4cf89a343f9323d58d83aec31256422927797c1`.
+- Executable contract:
+  - the released source uses exactly `R` cosine channels with inclusive
+    `linspace(-pi, pi, R)` frequencies;
+  - every layer starts with phase counter one, so its first token uses phase
+    two, and episode resets never reset phase;
+  - reset clears prior key, value, and normalizer memory before incorporating
+    the current token;
+  - the readout denominator is `2 * R * dot(s, q) + 1e-5`;
+  - feature flattening is eta-major and then head-dimension-major; and
+  - each layer contains two GTrXL residual gates and two pre-normalization
+    LayerNorm operations. The operational LayerNorm epsilon is frozen to
+    `1e-6`, matching Flax `0.11.2`.
+- Comparison lanes:
+  - `agalite_source_compat` preserves the complete released T-Maze vector
+    policy with observation-only input, four layers, model width 128, four
+    heads, head width 64, feedforward width 128, eta four, two cosine
+    channels, and separate width-128 tanh categorical actor and critic heads;
+  - the fixed lane is supplemental and explicitly records that the author
+    T-Maze experiment used A2C while this evaluation uses shared PPO;
+  - `agalite_shared` applies the released recurrence and GTrXL-style block to
+    the full augmented causal input with common heads and shared PPO; and
+  - the shared lane searches positive even widths with `Q = D / 2` and
+    `F = D`, selecting the globally closest 0.9 to 1.1 parameter match.
+- Evidence controls:
+  - the fixed lane is rejected on continuous-action tasks;
+  - configurations, artifacts, resume, schema-v3 tuning, schema-v4 final
+    selection, and both aggregators revalidate the exact source, policy,
+    parameter, and reporting contracts;
+  - source-compatible results are isolated from primary paired comparisons;
+    and
+  - the wheel and source distribution include the third-party notice and
+    exact upstream Apache license. The source distribution also includes the
+    port, exporter, fixture, and fixture checksum.
+- Validation:
+  - the implementation commit is
+    `84b994d3fe41ac1f850063a672d68fab45ed714e`;
+  - the fixed source count is exactly `1,774,277` for observation width 16
+    and four actions;
+  - official Flax parity has maximum state, logit, and value errors below
+    `3e-7`, and independent NumPy replay has the same bound;
+  - the integration pass completed 385 of 385 POBAX tests;
+  - an independent audit verified 213 unique test paths and found no P0 or
+    P1 issue;
+  - the audit found one P2 test-portability issue: default CUDA TF32 caused
+    eager-step and fused-scan state differences up to `3.53e-4`, although
+    chunked and full scans were bit-identical and strict CPU parity passed;
+  - commit `e907911f881de2f1c284a1e4dcf66c64db00eaf0` now tests eager-step
+    equivalence under explicit highest matmul precision at the original
+    `2e-6` tolerance, while retaining default-precision chunking and PPO
+    replay checks; and
+  - the repaired AGaLiTe suite passed 22 of 22 tests on CUDA and 22 of 22 on
+    CPU. The complete CPU POBAX suite passed 386 of 386 tests.
+- Paper mismatch restriction: the paper and executable differ in channel
+  count, frequency grid, phase definition, finite-channel normalization, and
+  reported `r` versus configured `R`. Results must be labeled as the pinned
+  executable contract, not as a unique literal implementation of the printed
+  equations.
+- Interpretation: AGaLiTe now has one fixed source-compatible supplemental
+  lane and one parameter-matched primary adaptation with fail-closed evidence
+  contracts.
+- Evidence restriction: no AGaLiTe return, efficiency, superiority, or
+  equivalence claim is supported until registered experiments are complete.
 
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
