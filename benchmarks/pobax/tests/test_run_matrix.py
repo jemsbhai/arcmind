@@ -16,6 +16,7 @@ from benchmarks.pobax.implementation_provenance import (
     gather_implementation_source,
 )
 from benchmarks.pobax.link_upper_reference import _validate_completion_and_checksums
+from benchmarks.pobax.model_registry import MAMBA1_REFERENCE_IMPLEMENTATION
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
     atomic_write_json,
@@ -412,6 +413,26 @@ def test_registration_accepts_a_complete_paired_matrix(tmp_path):
     path.write_text(json.dumps(_registration()), encoding="utf-8")
 
     assert _load_registration(path) == _registration()
+
+
+def test_registration_rejects_unknown_policy_implementation(tmp_path):
+    registration = _registration()
+    registration["models"] = ["arcmind", "unregistered_core"]
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="registered policy implementations"):
+        _load_registration(path)
+
+
+def test_tuning_registration_rejects_unknown_policy_implementation(tmp_path):
+    registration = _registration_v3()
+    registration["candidate_families"][0]["implementation_model"] = "unregistered_core"
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="registered policy implementations"):
+        _load_registration(path)
 
 
 @pytest.mark.parametrize(
@@ -970,6 +991,70 @@ def test_existing_artifact_must_match_identity_and_provenance(tmp_path):
         )
 
 
+def test_existing_mamba_artifact_must_match_audited_source_contract(tmp_path):
+    path = tmp_path / "mamba-cell.json"
+    provenance = {
+        "git": {"commit": "a" * 40, "dirty": False, "diff_sha256": None},
+        "dependency_lock_sha256": "b" * 64,
+        "pobax_commit": "c" * 40,
+        "navix_commit": "d" * 40,
+        "runtime_contract": {"runtime": "test"},
+    }
+    configuration = {
+        "environment": "tmaze_10",
+        "model": "mamba1",
+        "seed": 1103,
+        "reference_implementation": deepcopy(MAMBA1_REFERENCE_IMPLEMENTATION),
+    }
+    configuration_sha256 = canonical_json_sha256(configuration)
+    artifact = {
+        "schema_version": 4,
+        "status": "registered_final_complete",
+        "environment": "tmaze_10",
+        "model": "mamba1",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "configuration": configuration,
+        "reference_implementation": deepcopy(MAMBA1_REFERENCE_IMPLEMENTATION),
+        "matrix_manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+    }
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    arguments = {
+        "expected_status": "registered_final_complete",
+        "environment": "tmaze_10",
+        "model": "mamba1",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+        "registration_schema_version": 1,
+    }
+
+    assert _load_matching_artifact(path, **arguments) == artifact
+
+    artifact["reference_implementation"]["audited_commit"] = "0" * 40
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="reference implementation"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["reference_implementation"] = deepcopy(MAMBA1_REFERENCE_IMPLEMENTATION)
+    artifact["configuration"]["reference_implementation"]["version"] = "drifted"
+    drifted_configuration_sha256 = canonical_json_sha256(artifact["configuration"])
+    artifact["configuration_sha256"] = drifted_configuration_sha256
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="reference implementation"):
+        _load_matching_artifact(
+            path,
+            **{
+                **arguments,
+                "configuration_sha256": drifted_configuration_sha256,
+            },
+        )
+
+
 def test_existing_tuning_artifact_must_match_candidate_identity(tmp_path):
     path = tmp_path / "cell.json"
     provenance = {
@@ -1128,6 +1213,26 @@ def test_tuning_cell_namespace_separates_family_candidate_and_implementation():
     assert args.model_family == "ordered_memory"
     assert args.candidate_id == "ordered_memory.lr_high"
     assert args.learning_rate == 0.001
+
+
+def test_mamba_cell_namespace_and_command_use_registered_implementation():
+    registration = _registration()
+    registration["models"] = ["arcmind", "mamba1"]
+
+    args = _cell_namespace(
+        registration,
+        environment=registration["environments"][0],
+        model="mamba1",
+        seed=1103,
+        output=None,
+        manifest_sha256=None,
+        cell_id=None,
+        describe_only=True,
+    )
+    command = _command_for_cell(args)
+
+    assert args.model == "mamba1"
+    assert command[command.index("--model") + 1] == "mamba1"
 
 
 def test_schema_v4_cell_namespace_carries_bound_final_selection(

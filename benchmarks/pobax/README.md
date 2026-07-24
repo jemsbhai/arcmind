@@ -81,6 +81,7 @@ cores through that common path:
 - Fast and Forgetful Memory (FFM);
 - Stable Hadamard Memory (SHM);
 - LRU, S5RL, recurrent S4D, MS4, and MS4N;
+- the source-audited Mamba-1 baseline;
 - full-window causal Transformer, Transformer-XL, and GTrXL; and
 - ArcMind.
 
@@ -142,6 +143,25 @@ uses the stable ring initialization and normalized input projection from
 S5RL preserves the authors' HiPPO-LegS initialization, zero-order-hold
 discretization, reset-aware recurrence, and full-GLU residual block while
 using the shared input and actor-critic heads.
+
+The Mamba-1 baseline follows the
+[official Mamba source at commit
+`10b5d6358f27966f6a40e4bf0baa17a460688128`](https://github.com/state-spaces/mamba/tree/10b5d6358f27966f6a40e4bf0baa17a460688128).
+It uses one Mamba-1 block with expansion factor 2, state size 16, convolution
+width 4, automatic time-step rank, and RMSNorm with epsilon `1e-5`.
+ArcMind's common policy input and actor-critic heads replace the language
+model embedding and output head, while the selective recurrence and residual
+normalization structure remain source aligned. Each environment carries
+independent convolution and SSM caches, and reset masks clear only the
+completed environments. Parameter matching searches only the hidden width.
+
+The source contract pins Mamba package version `2.2.6.post3`, the audited
+commit, SHA256 hashes for `mamba_simple.py`, `block.py`,
+`mixer_seq_simple.py`, `config_mamba.py`, and `layer_norm.py`, plus an
+immutable output fixture from the official dependency-light `Mamba.step`
+path. Frozen configurations and result artifacts record this metadata.
+Matrix resume and both aggregators reject missing or changed Mamba source
+metadata.
 
 ```bash
 python -m benchmarks.pobax.run_pilot \

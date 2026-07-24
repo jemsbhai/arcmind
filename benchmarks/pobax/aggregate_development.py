@@ -20,6 +20,11 @@ from typing import Any
 import numpy as np
 
 from benchmarks.pobax.implementation_provenance import normalize_implementation_source
+from benchmarks.pobax.model_registry import (
+    reference_implementation_for_model,
+    validate_policy_model_id,
+    validate_required_reference_implementation,
+)
 from benchmarks.pobax.registered_artifacts import (
     ArtifactChecksumError,
     atomic_write_json,
@@ -385,6 +390,11 @@ def _validate_registration(value: Any) -> dict[str, Any]:
             )
     else:
         models = _unique_strings(registration["models"], field="registration.models")
+        for index, model in enumerate(models):
+            try:
+                validate_policy_model_id(model, field=f"registration.models[{index}]")
+            except ValueError as error:
+                raise DevelopmentAggregationError(str(error)) from error
     if matrix_kind == "primary_comparison" and "arcmind" not in models:
         raise DevelopmentAggregationError("primary_comparison registration must contain arcmind")
     if matrix_kind == "upper_reference" and models != ("memoryless_mlp",):
@@ -726,6 +736,17 @@ def _validate_configuration(
             raise DevelopmentAggregationError(
                 f"{field} candidate identity drifts from registration"
             )
+        implementation_model = candidate["implementation_model"]
+    else:
+        implementation_model = identity[1]
+    try:
+        validate_required_reference_implementation(
+            implementation_model,
+            configuration.get("reference_implementation"),
+            field=f"{field}.reference_implementation",
+        )
+    except ValueError as error:
+        raise DevelopmentAggregationError(str(error)) from error
     environment = identity[0]
     expected_source = expected_environment_source(environment)
     source_frozen = "environment_source" in configuration
@@ -1051,6 +1072,11 @@ def _validate_artifact(
     environment, model, seed = identity
     field = f"artifact[{environment},{model},{seed}]"
     artifact = _mapping(_load_json(path, field=field), field=field)
+    implementation_model = (
+        registration["candidate_specs"][model]["implementation_model"]
+        if registration["schema_version"] == 3
+        else model
+    )
     required = {
         "schema_version",
         "status",
@@ -1079,6 +1105,15 @@ def _validate_artifact(
     missing = sorted(required - set(artifact))
     if missing:
         raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
+    if reference_implementation_for_model(implementation_model) is not None:
+        try:
+            validate_required_reference_implementation(
+                implementation_model,
+                artifact.get("reference_implementation"),
+                field=f"{field}.reference_implementation",
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
     if registration["schema_version"] == 3:
         required.update(
             {
@@ -1309,6 +1344,7 @@ def _validate_artifact(
             if registration["schema_version"] == 3
             else model
         ),
+        "reference_implementation_validated": True,
     }
 
 
@@ -1840,6 +1876,9 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                 record["parameter_match_frozen"] for record in records.values()
             ),
             "artifact_parameter_match_validated": True,
+            "reference_implementation_validated": all(
+                record["reference_implementation_validated"] for record in records.values()
+            ),
         },
         "statistics": {
             "bootstrap_resamples": BOOTSTRAP_RESAMPLES,

@@ -50,6 +50,11 @@ import numpy as np
 
 from benchmarks.pobax.aggregate_development import build_development_aggregate
 from benchmarks.pobax.implementation_provenance import normalize_implementation_source
+from benchmarks.pobax.model_registry import (
+    reference_implementation_for_model,
+    validate_policy_model_id,
+    validate_required_reference_implementation,
+)
 from benchmarks.pobax.registered_artifacts import (
     ArtifactChecksumError,
     atomic_write_json,
@@ -435,6 +440,14 @@ def _validate_frozen_configuration(
     )
     if configured_identity != identity:
         raise RegisteredAggregationError(f"{field} identity does not match its artifact")
+    try:
+        validate_required_reference_implementation(
+            identity[1],
+            configuration.get("reference_implementation"),
+            field=f"{field}.reference_implementation",
+        )
+    except ValueError as error:
+        raise RegisteredAggregationError(str(error)) from error
     if configuration_schema == 4:
         for name in (
             "candidate_id",
@@ -1023,6 +1036,11 @@ def _validate_manifest(
         )
 
     models = _unique_strings(manifest["models"], field="manifest.models")
+    for index, model in enumerate(models):
+        try:
+            validate_policy_model_id(model, field=f"manifest.models[{index}]")
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
     environments = _unique_strings(manifest["environments"], field="manifest.environments")
     seeds = _unique_seeds(manifest["seeds"])
     if len(seeds) != _REGISTERED_FINAL_SEED_COUNT:
@@ -1244,6 +1262,15 @@ def _validate_artifact(
     missing = sorted(required - set(artifact))
     if missing:
         raise RegisteredAggregationError(f"{field} is missing required fields: {missing}")
+    if reference_implementation_for_model(model) is not None:
+        try:
+            validate_required_reference_implementation(
+                model,
+                artifact.get("reference_implementation"),
+                field=f"{field}.reference_implementation",
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
     if manifest_schema_version == 4:
         for name in (
             "candidate_id",
@@ -1942,6 +1969,7 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
             **raw_integrity,
             "completion_index_validated": True,
             "checksum_inventory_validated": True,
+            "reference_implementation_validated": True,
         },
         "matrix_kind": manifest["matrix_kind"],
         "provenance": manifest["provenance"],

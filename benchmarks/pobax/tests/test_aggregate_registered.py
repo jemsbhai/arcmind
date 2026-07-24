@@ -20,6 +20,7 @@ from benchmarks.pobax.aggregate_registered import (
     interquartile_mean,
 )
 from benchmarks.pobax.implementation_provenance import IMPLEMENTATION_SOURCE_ALGORITHM
+from benchmarks.pobax.model_registry import MAMBA1_REFERENCE_IMPLEMENTATION
 from benchmarks.pobax.registered_artifacts import (
     atomic_write_bytes,
     atomic_write_json,
@@ -148,6 +149,10 @@ def _configuration(
             comparison_profile=comparison_profile,
             requested_environment_steps=total_steps,
             realized_environment_steps=realized_steps,
+        )
+    if model == "mamba1":
+        configuration["reference_implementation"] = deepcopy(
+            MAMBA1_REFERENCE_IMPLEMENTATION
         )
     return configuration
 
@@ -530,6 +535,10 @@ def _write_matrix(
                 },
             ],
         }
+        if model == "mamba1":
+            artifact["reference_implementation"] = deepcopy(
+                MAMBA1_REFERENCE_IMPLEMENTATION
+            )
         if schema_version == 2:
             artifact.update(
                 comparison_profile=comparison_profile,
@@ -622,6 +631,37 @@ def test_complete_matrix_aggregates_raw_seeds_pairs_curves_and_canonical_json(
     assert result["raw_integrity"]["checksum_inventory_validated"] is True
     assert output.read_bytes().endswith(b"\n")
     assert json.loads(output.read_text(encoding="utf-8")) == result
+
+
+def test_mamba_registered_artifacts_fail_closed_on_source_drift(
+    tmp_path: Path,
+) -> None:
+    matrix_root = tmp_path / "matrix"
+    manifest_path, _, paths = _write_matrix(
+        matrix_root,
+        models=["arcmind", "mamba1"],
+    )
+
+    result = build_registered_aggregate(manifest_path)
+
+    assert {group["model"] for group in result["groups"]} == {
+        "arcmind",
+        "mamba1",
+    }
+    assert result["raw_integrity"]["reference_implementation_validated"] is True
+    assert len(result["paired_differences_against_arcmind"]) == 1
+
+    mamba_path = paths[("tmaze_10", "mamba1", SEEDS[0])]
+
+    def drift_source(artifact: dict[str, Any]) -> None:
+        artifact["reference_implementation"]["source_hashes"][
+            "mamba_ssm/modules/mamba_simple.py"
+        ] = "0" * 64
+
+    _rewrite_json(mamba_path, drift_source)
+    _refresh_integrity(matrix_root, paths)
+    with pytest.raises(RegisteredAggregationError, match="registered source contract"):
+        build_registered_aggregate(manifest_path)
 
 
 @pytest.mark.parametrize(

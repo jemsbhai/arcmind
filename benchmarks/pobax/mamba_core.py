@@ -26,18 +26,41 @@ from typing import Mapping, NamedTuple
 import jax
 import jax.numpy as jnp
 
+from benchmarks.pobax.model_registry import (
+    MAMBA_AUDITED_COMMIT,
+    MAMBA_BLOCK_SHA256,
+    MAMBA_CONFIG_SHA256,
+    MAMBA_MIXER_MODEL_SHA256,
+    MAMBA_REPOSITORY,
+    MAMBA_RMSNORM_SHA256,
+    MAMBA_SIMPLE_SHA256,
+    MAMBA_SOURCE_PATH,
+    MAMBA_VERSION,
+)
+
+__all__ = [
+    "MAMBA_AUDITED_COMMIT",
+    "MAMBA_BLOCK_SHA256",
+    "MAMBA_CONFIG_SHA256",
+    "MAMBA_D_CONV",
+    "MAMBA_D_STATE",
+    "MAMBA_EXPAND",
+    "MAMBA_MIXER_MODEL_SHA256",
+    "MAMBA_NORM_EPSILON",
+    "MAMBA_REPOSITORY",
+    "MAMBA_RMSNORM_SHA256",
+    "MAMBA_SIMPLE_SHA256",
+    "MAMBA_SOURCE_PATH",
+    "MAMBA_VERSION",
+    "MambaPolicyCore",
+    "MambaState",
+    "mamba_parameter_count",
+    "match_mamba_hidden_size",
+]
+
 Array = jax.Array
 Params = Mapping[str, Array]
 
-MAMBA_REPOSITORY = "https://github.com/state-spaces/mamba"
-MAMBA_VERSION = "2.2.6.post3"
-MAMBA_AUDITED_COMMIT = "10b5d6358f27966f6a40e4bf0baa17a460688128"
-MAMBA_SIMPLE_SHA256 = "a17e4c51b582dc0d4d690a649eba521cd0c1ee3dc8f0473a0967cdc9ec0874e3"
-MAMBA_SOURCE_PATH = "mamba_ssm/modules/mamba_simple.py"
-MAMBA_BLOCK_SHA256 = "b62e755195c277a027c5d9cc8d576a8ae4a1d1317143b91370b2f8ce683b4cc1"
-MAMBA_MIXER_MODEL_SHA256 = "13409d7044e930ea3271e4b8ddceaf8155ec49b8e5ac299fba7bb0df6d80cb21"
-MAMBA_RMSNORM_SHA256 = "006fb18f7098fc244a318c899841ad4c1a6ea0f614dfe7a1feb4e2e38185235f"
-MAMBA_CONFIG_SHA256 = "2a72c1686f775b56547e39ca4406ba10148d12fd7a791c57ce2ba85126010fcd"
 MAMBA_D_STATE = 16
 MAMBA_D_CONV = 4
 MAMBA_EXPAND = 2

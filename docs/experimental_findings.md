@@ -501,6 +501,54 @@ with each actual experiment.
 - Evidence restriction: this correction strengthens provenance and artifact
   integrity only. It introduces no performance result or paper claim.
 
+### F-ENG-010: Mamba-1 requires an immutable source contract
+
+- Class: `engineering validation`
+- Status: implementation complete, performance experiments not started
+- Date: 2026-07-23
+- Question: can Mamba-1 enter the POBAX comparison through the exact shared
+  learner without relying on an unverified reimplementation label?
+- Source audit:
+  - the implementation is based on official Mamba package version
+    `2.2.6.post3` at commit
+    `10b5d6358f27966f6a40e4bf0baa17a460688128`;
+  - the contract records SHA256 hashes for `mamba_simple.py`, `block.py`,
+    `mixer_seq_simple.py`, `config_mamba.py`, and `layer_norm.py`; and
+  - an immutable fixture records outputs and recurrent caches from the
+    official dependency-light `Mamba.step` path.
+- Implementation:
+  - add one Mamba-1 residual block with expansion factor 2, state size 16,
+    convolution width 4, automatic time-step rank, and RMSNorm with epsilon
+    `1e-5`;
+  - preserve independent convolution and SSM caches for every environment,
+    including asynchronous reset behavior;
+  - adapt only the common policy input, actor-critic heads, and hidden width;
+  - select the integer hidden width with the globally closest parameter count
+    to the ArcMind target; and
+  - route Mamba-1 through the same collection, PPO replay, optimizer,
+    evaluation, artifact, and aggregation paths as every other policy core.
+- Evidence controls:
+  - every frozen Mamba configuration and artifact contains the exact audited
+    source metadata;
+  - matrix resume rejects missing or changed metadata; and
+  - development and registered aggregation independently revalidate the same
+    source contract.
+- Validation:
+  - transplanted official weights reproduce the pinned official-step fixture;
+  - equation, causal sequence, asynchronous reset, JIT, gradient, parameter,
+    cache, and width-matching tests pass;
+  - exact shared-PPO replay has zero pre-update KL; and
+  - focused launcher and aggregation tests accept intact Mamba evidence and
+    reject source drift;
+  - the integration-focused slices passed 225 of 225 tests in the pinned
+    Ubuntu environment; and
+  - the complete POBAX suite passed 340 of 340 tests in that environment.
+- Interpretation: Mamba-1 is now an executable, source-audited comparison
+  core. This engineering result establishes implementation identity and
+  learner parity only.
+- Evidence restriction: no Mamba-1 return, efficiency, superiority, or
+  equivalence claim is supported until registered experiments are complete.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`

@@ -58,11 +58,13 @@ The revised exact-recall contract is:
 The age encoding is deliberately ablatable. The paper must compare ordered
 recall against an otherwise identical unordered-memory variant.
 
-The fast path remains a pure-PyTorch, input-dependent selective SSM. It must not
-be described as Mamba or Mamba-2: it does not use the published Mamba block or
-its optimized selective-scan implementation. A stable diagonal SSM
-(S4D/MS4-style) is a mandatory baseline and a candidate future backend, not
-something to add without a controlled comparison.
+The ArcMind fast path remains a pure-PyTorch, input-dependent selective SSM.
+It must not be described as Mamba or Mamba-2 because it does not use the
+published Mamba block or its optimized selective-scan implementation. The
+benchmark harness separately implements a source-audited Mamba-1 policy core
+as a mandatory baseline. Mamba-1 is a comparator, not a description of
+ArcMind. A stable diagonal SSM in the S4D or MS4 family is also mandatory and
+remains a candidate future backend only after controlled comparison.
 
 ## 3. Evaluation tracks
 
@@ -116,7 +118,7 @@ Mandatory controls and baselines:
 - Elman RNN, GRU, and LSTM;
 - TCN;
 - Fast and Forgetful Memory, Stable Hadamard Memory, memory traces, LRU, S4D,
-  S5/S5RL, and a modern stable diagonal SSM;
+  S5/S5RL, a modern stable diagonal SSM, and source-audited Mamba-1;
 - the repository's selective SSM without exact recall;
 - a full-window causal Transformer and the published POBAX Transformer-XL
   configuration at matched parameter count;
@@ -217,6 +219,19 @@ has an
 It accepts recurrent state and episode-done flags. The implemented policy core
 uses that recurrence without changing PPO and has parameter, reset, sequence,
 equation, JIT, and gradient tests.
+
+[Mamba-1](https://openreview.net/pdf?id=tEYskw1VY2) is implemented from the
+[official source pinned at commit
+`10b5d6358f27966f6a40e4bf0baa17a460688128`](https://github.com/state-spaces/mamba/tree/10b5d6358f27966f6a40e4bf0baa17a460688128).
+The shared-policy adaptation uses one Mamba-1 block with expansion factor 2,
+state size 16, convolution width 4, automatic time-step rank, and RMSNorm.
+It preserves independent convolution and SSM caches for every environment and
+applies asynchronous reset masks. Only the policy input projection,
+actor-critic heads, and hidden width are adapted for the controlled
+comparison. Parameter matching searches the hidden width without changing the
+Mamba recurrence. Official source file hashes and an immutable official-step
+parity fixture are frozen into every Mamba configuration and artifact. Resume
+and aggregation reject any drift from that source contract.
 
 [Stable Hadamard Memory](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf)
 has [official PyTorch code at release `v1.1`, commit
@@ -490,7 +505,8 @@ Until the registered results exist, do not claim:
 - smoother or more physically plausible controls than Transformers;
 - precise landmark, obstacle, or temporal recall;
 - deployment suitability for a named MCU, NPU, or robot computer;
-- Mamba or Mamba-2 compatibility/performance;
+- Mamba-1 performance before registered evidence, or Mamba-2 compatibility
+  or performance;
 - superiority to VLA systems, which solve a materially different problem; or
 - parameter counts copied from an earlier checkpoint after the architecture
   changes.

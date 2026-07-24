@@ -16,6 +16,7 @@ from benchmarks.pobax.aggregate_development import (
     build_development_aggregate,
 )
 from benchmarks.pobax.implementation_provenance import IMPLEMENTATION_SOURCE_ALGORITHM
+from benchmarks.pobax.model_registry import MAMBA1_REFERENCE_IMPLEMENTATION
 from benchmarks.pobax.registered_artifacts import (
     atomic_write_bytes,
     atomic_write_json,
@@ -130,6 +131,10 @@ def _configuration(
             model_family=model_family,
             implementation_model=implementation_model,
             implementation_source=deepcopy(IMPLEMENTATION_SOURCE),
+        )
+    if (implementation_model or model) == "mamba1":
+        configuration["reference_implementation"] = deepcopy(
+            MAMBA1_REFERENCE_IMPLEMENTATION
         )
     return configuration
 
@@ -353,6 +358,14 @@ def _write_matrix(
                 },
             ],
         }
+        if (
+            candidate_index[model]["implementation_model"]
+            if schema_version == 3
+            else model
+        ) == "mamba1":
+            artifact["reference_implementation"] = deepcopy(
+                MAMBA1_REFERENCE_IMPLEMENTATION
+            )
         if schema_version == 3:
             artifact.update(
                 candidate_id=model,
@@ -506,6 +519,7 @@ def test_complete_matrix_is_deterministic_and_explicitly_not_for_paper(
         "environment_source_in_every_configuration": True,
         "parameter_match_in_every_configuration": True,
         "artifact_parameter_match_validated": True,
+        "reference_implementation_validated": True,
     }
     assert len(first["groups"]) == 4
     assert len(first["paired_differences_against_arcmind"]) == 2
@@ -524,6 +538,34 @@ def test_complete_matrix_is_deterministic_and_explicitly_not_for_paper(
     ]
     assert set(group["final_seed_mean_return"]) == {"mean", "median", "iqm"}
     assert json.loads(output.read_text(encoding="utf-8")) == first
+
+
+def test_mamba_development_artifacts_fail_closed_on_source_drift(
+    tmp_path: Path,
+) -> None:
+    matrix_root = tmp_path / "matrix"
+    _, paths = _write_matrix(
+        matrix_root,
+        models=["arcmind", "mamba1"],
+        environments={"short": 8_192},
+        seeds=[7, 19],
+    )
+
+    result = build_development_aggregate(matrix_root)
+
+    assert {group["model"] for group in result["groups"]} == {
+        "arcmind",
+        "mamba1",
+    }
+    assert result["frozen_semantic_contract"]["reference_implementation_validated"] is True
+    assert len(result["paired_differences_against_arcmind"]) == 1
+
+    def drift_source(artifact: dict[str, Any]) -> None:
+        artifact["reference_implementation"]["audited_commit"] = "0" * 40
+
+    _rewrite(paths[("short", "mamba1", 7)], drift_source)
+    with pytest.raises(DevelopmentAggregationError, match="registered source contract"):
+        build_development_aggregate(matrix_root)
 
 
 @pytest.mark.parametrize(

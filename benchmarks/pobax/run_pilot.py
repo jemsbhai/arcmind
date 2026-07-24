@@ -37,6 +37,12 @@ from benchmarks.pobax.ffm_core import (
     match_ffm_hidden_size,
 )
 from benchmarks.pobax.implementation_provenance import gather_implementation_source
+from benchmarks.pobax.mamba_core import MambaPolicyCore, match_mamba_hidden_size
+from benchmarks.pobax.model_registry import (
+    MAMBA1_REFERENCE_IMPLEMENTATION,
+    POLICY_MODEL_IDS,
+    validate_policy_model_id,
+)
 from benchmarks.pobax.policy_core import ArcMindPolicyCore
 from benchmarks.pobax.positional_mlp_core import (
     POPGYM_POSITIONAL_MLP_REFERENCE,
@@ -82,6 +88,7 @@ from benchmarks.pobax.upper_reference_envs import (
 from benchmarks.pobax.upper_reference_registry import UPPER_REFERENCE_SPECS
 
 REFERENCE_IMPLEMENTATIONS = {
+    "mamba1": MAMBA1_REFERENCE_IMPLEMENTATION,
     "ffm": {
         "repository": "https://github.com/proroklab/ffm",
         "audited_commit": "b3f94d2a0f35ba05089faf19ab1df846057cf8b6",
@@ -287,6 +294,12 @@ def build_policy_core(
             input_dim=input_dim,
             action_dim=action_dim,
         )
+    elif model_name == "mamba1":
+        width = match_mamba_hidden_size(
+            target_parameters=target_count,
+            input_dim=input_dim,
+            action_dim=action_dim,
+        )
     elif model_name in {
         "s4d",
         "ms4",
@@ -360,6 +373,8 @@ def build_policy_core(
         core = LRUPolicyCore(input_dim, action_dim, width)
     elif model_name == "s5rl":
         core = S5RLPolicyCore(input_dim, action_dim, width)
+    elif model_name == "mamba1":
+        core = MambaPolicyCore(input_dim, action_dim, width)
     elif model_name in {"transformer_xl", "gtrxl"}:
         core = TransformerXLPolicyCore(
             input_dim,
@@ -514,6 +529,7 @@ def validate_upper_reference_task_contract(
 
 def run(args: argparse.Namespace) -> dict[str, object]:
     """Train and evaluate one model/environment/seed cell."""
+    validate_policy_model_id(args.model, field="model")
     if jax.default_backend() != "gpu" and args.require_gpu:
         raise RuntimeError(f"Expected GPU, found {jax.default_backend()!r}")
     commit = source_commit("pobax")
@@ -972,33 +988,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default="arcmind",
-        choices=(
-            "memoryless_mlp",
-            "frame_stack_mlp",
-            "memory_trace_mlp",
-            "positional_mlp",
-            "shm",
-            "shm_v1_1_popgym_compat",
-            "elman_rnn",
-            "gru",
-            "lstm",
-            "tcn",
-            "ffm",
-            "s4d",
-            "ms4",
-            "ms4n",
-            "lru",
-            "s5rl",
-            "causal_transformer",
-            "transformer_xl",
-            "gtrxl",
-            "arcmind_unordered",
-            "arcmind_no_memory",
-            "arcmind_no_ssm",
-            "arcmind_no_gate",
-            "arcmind_ssm_only",
-            "arcmind",
-        ),
+        choices=POLICY_MODEL_IDS,
     )
     parser.add_argument("--seed", type=int, default=1103)
     parser.add_argument("--total-steps", type=int, default=131_072)

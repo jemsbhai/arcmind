@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from benchmarks.pobax.implementation_provenance import normalize_implementation_source
+from benchmarks.pobax.model_registry import validate_policy_model_id
 
 REGISTRATION_FIELDS_V1 = {
     "schema_version",
@@ -248,6 +249,10 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
             or not candidate_id.startswith(f"{model_family}.")
         ):
             raise ValueError(f"{field} contains an invalid candidate identity")
+        validate_policy_model_id(
+            implementation_model,
+            field=f"{field}.implementation_model",
+        )
         identity = (environment, model_family)
         implementation_identity = (environment, implementation_model)
         if identity in identities:
@@ -561,6 +566,10 @@ def normalize_candidate_families(value: object) -> tuple[dict[str, Any], ...]:
             raise ValueError(
                 f"{field}.implementation_model must be a unique portable model identifier"
             )
+        validate_policy_model_id(
+            implementation_model,
+            field=f"{field}.implementation_model",
+        )
         raw_candidates = raw_family["candidates"]
         if not isinstance(raw_candidates, list) or len(raw_candidates) < 2:
             raise ValueError(f"{field}.candidates must contain at least two candidates")

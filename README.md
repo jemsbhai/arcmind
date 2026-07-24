@@ -186,6 +186,7 @@ seed manifests, immutable dataset identifiers, and machine-readable raw output.
 - [x] Commit-pinned JAX/POBAX environment and streaming inference parity
 - [x] Shared discrete/continuous JAX PPO learner
 - [x] Parameter-matched recurrent, convolutional, SSM, and attention controls
+- [x] Source-audited, parameter-matched Mamba-1 policy baseline
 - [x] Registered ArcMind ablation adapters with effective parameter counts
 - [x] S5RL reset-aware structured-SSM policy adapter
 - [x] Privileged-observation reference adapters and evidence-link gates

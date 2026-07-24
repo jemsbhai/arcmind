@@ -24,6 +24,7 @@ from benchmarks.pobax.mamba_core import (
     MAMBA_NORM_EPSILON,
     MAMBA_RMSNORM_SHA256,
     MAMBA_SIMPLE_SHA256,
+    MAMBA_SOURCE_PATH,
     MAMBA_VERSION,
     MambaPolicyCore,
     MambaState,
@@ -31,6 +32,13 @@ from benchmarks.pobax.mamba_core import (
     match_mamba_hidden_size,
 )
 from benchmarks.pobax.policy_core import ArcMindPolicyCore
+from benchmarks.pobax.run_pilot import REFERENCE_IMPLEMENTATIONS, build_policy_core
+from benchmarks.pobax.shared_ppo import (
+    PPOConfig,
+    Rollout,
+    SharedPPO,
+    categorical_log_probability,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "mamba1_official_step_v1.json"
 FIXTURE_SHA256 = "8bfa948c8c1fd28bcde3e7dd7eebff8bb5e54406dd1fd11f7d69317f1c6e3015"
@@ -85,6 +93,23 @@ def test_wrapper_sources_are_pinned_to_the_audited_official_files() -> None:
         "2a72c1686f775b56547e39ca4406ba10148d12fd7a791c57ce2ba85126010fcd"
     )
     assert MAMBA_NORM_EPSILON == 1e-5
+
+
+def test_pilot_builder_parameter_matches_and_freezes_source_metadata() -> None:
+    core, parameter_count, target_count = build_policy_core(
+        "mamba1",
+        input_dim=13,
+        action_dim=6,
+        seed=17,
+    )
+
+    assert isinstance(core, MambaPolicyCore)
+    assert parameter_count == core.expected_parameter_count()
+    assert 0.9 <= parameter_count / target_count <= 1.1
+    reference = REFERENCE_IMPLEMENTATIONS["mamba1"]
+    assert reference["audited_commit"] == MAMBA_AUDITED_COMMIT
+    assert reference["source_hashes"][MAMBA_SOURCE_PATH] == MAMBA_SIMPLE_SHA256
+    assert reference["parity_fixture"]["sha256"] == FIXTURE_SHA256
 
 
 def test_block_step_matches_official_pytorch_outputs_with_transplanted_weights() -> None:
@@ -432,6 +457,74 @@ def test_jitted_outputs_and_gradients_are_finite() -> None:
         "norm_f.weight",
     ):
         assert float(jnp.linalg.norm(gradients[name])) > 0.0
+
+
+def test_shared_ppo_exactly_replays_mamba_with_asynchronous_resets() -> None:
+    time_steps = 5
+    batch_size = 3
+    action_dim = 4
+    core = MambaPolicyCore(
+        input_dim=7,
+        action_dim=action_dim,
+        hidden_size=5,
+    )
+    params = core.initialize(jax.random.PRNGKey(101))
+    initial_state = core.initial_state(batch_size)
+    policy_inputs = jax.random.normal(
+        jax.random.PRNGKey(102),
+        (time_steps, batch_size, core.input_dim),
+    )
+    resets = jnp.asarray(
+        [
+            [True, True, True],
+            [False, False, False],
+            [False, True, False],
+            [True, False, False],
+            [False, False, True],
+        ],
+        dtype=jnp.bool_,
+    )
+    _, logits, values = core.apply_sequence(
+        params,
+        initial_state,
+        policy_inputs,
+        resets,
+    )
+    actions = jnp.argmax(logits, axis=-1).astype(jnp.int32)
+    rollout = Rollout(
+        policy_input=policy_inputs,
+        reset=resets,
+        action=actions,
+        old_log_probability=categorical_log_probability(logits, actions),
+        old_value=values,
+        reward=jnp.zeros_like(values),
+        done=jnp.zeros_like(resets),
+        episode_return=jnp.zeros_like(values),
+        episode_complete=jnp.zeros_like(resets),
+    )
+    learner = SharedPPO(
+        policy_core=core,
+        environment=None,
+        environment_params=None,
+        action_dim=action_dim,
+        config=PPOConfig(
+            total_steps=6,
+            num_envs=batch_size,
+            rollout_steps=2,
+            num_minibatches=1,
+        ),
+    )
+
+    loss, (_, _, _, approximate_kl) = learner._loss(
+        params,
+        initial_state,
+        rollout,
+        jnp.ones_like(values),
+        values,
+    )
+
+    assert bool(jnp.isfinite(loss))
+    np.testing.assert_allclose(approximate_kl, 0.0, atol=1e-7)
 
 
 def test_parameter_and_cache_counts_are_exact() -> None:

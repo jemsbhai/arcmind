@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.pobax.aggregate_development import build_development_aggregate
+from benchmarks.pobax.model_registry import (
+    reference_implementation_for_model,
+    validate_policy_model_id,
+    validate_required_reference_implementation,
+)
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
     atomic_write_bytes,
@@ -154,6 +159,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
             raise ValueError("models must be a non-empty list of names")
         if len(set(models)) != len(models):
             raise ValueError("models must not contain duplicates")
+        for index, model in enumerate(models):
+            validate_policy_model_id(model, field=f"models[{index}]")
     if matrix_kind == "primary_comparison" and "arcmind" not in models:
         raise ValueError("primary_comparison matrices must contain arcmind")
     if matrix_kind == "upper_reference" and models != ["memoryless_mlp"]:
@@ -466,6 +473,27 @@ def _load_matching_artifact(
         raise ExistingArtifactMismatchError(
             f"existing cell configuration content does not match its hash: {path}"
         )
+    implementation_model = (
+        configuration.get("implementation_model")
+        if registration_schema_version in {3, 4}
+        else model
+    )
+    if reference_implementation_for_model(implementation_model) is not None:
+        try:
+            validate_required_reference_implementation(
+                implementation_model,
+                configuration.get("reference_implementation"),
+                field="configuration.reference_implementation",
+            )
+            validate_required_reference_implementation(
+                implementation_model,
+                artifact.get("reference_implementation"),
+                field="artifact.reference_implementation",
+            )
+        except ValueError as error:
+            raise ExistingArtifactMismatchError(
+                f"existing cell reference implementation does not match registry: {path}"
+            ) from error
     if registration_schema_version == 3:
         candidate_identity = {
             "candidate_id": model,
