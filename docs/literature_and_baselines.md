@@ -76,9 +76,9 @@ environment
   useful later stress suite, but its visual input and counterfactual analysis
   change the question relative to the primary low-dimensional POBAX
   comparison. The reproducible package release is pinned by its PyPI
-  attestation to
+  0.0.7 attestation to
   [source commit
-  `462d18a050e4710e45c0bdd07a4e71e981ee5445`](https://github.com/bolt-research/popgym-arcade/tree/462d18a050e4710e45c0bdd07a4e71e981ee5445).
+  `d061b611718ae55d095791b4ea7046b5266cafd4`](https://github.com/bolt-research/popgym-arcade/tree/d061b611718ae55d095791b4ea7046b5266cafd4).
 - The 2026 [memory-rewriting benchmark](https://arxiv.org/abs/2601.15086)
   tests whether a memory can replace stale information rather than merely
   retain it. It is a useful stress test, but remains a preprint and should not
@@ -104,13 +104,75 @@ seeds, and evaluation path. Width is chosen by exact scalar parameter count.
 | RL-specific fading memory | Fast and Forgetful Memory | required | [FFM, NeurIPS 2023](https://proceedings.neurips.cc/paper_files/paper/2023/hash/e3bf2f0f10774c474de22a12cb060e2c-Abstract-Conference.html) is a direct drop-in RL memory baseline evaluated on POPGym. |
 | learned matrix memory | Stable Hadamard Memory | required | [SHM, ICLR 2025](https://proceedings.iclr.cc/paper_files/paper/2025/file/b6446566965fa38e183650728ab70318-Paper-Conference.pdf) is a direct learned write, calibration, and read baseline evaluated against GRU and FFM on POPGym. |
 | finite convolution | causal dilated TCN | implemented | Separates finite receptive field from indefinite recurrence. |
-| fixed fading memory | memory traces | implemented | The [ICML 2025 method](https://proceedings.mlr.press/v267/eberhard25a.html) uses compact exponential moving averages and reports improved sample efficiency in some partially observable tasks. The official T-Maze example uses decays 0 and 0.985 and a 20M-step budget; ArcMind must not compare against an undertrained trace model. |
-| stable linear recurrence | LRU | implemented | [ICML 2024](https://proceedings.mlr.press/v235/lu24h.html) identifies the Deep Linear Recurrent Unit as a strong alternative to Transformers in POMDPs; its stable parameterization comes from the [LRU paper](https://proceedings.mlr.press/v202/orvieto23a.html). |
-| structured SSM | S4D, MS4, MS4N | implemented | Tests stable input-invariant diagonal dynamics. S4D follows the [paper](https://arxiv.org/abs/2206.11893) and [official implementation](https://github.com/state-spaces/s4); MS4/MS4N are causal policy adaptations of the [2026 preprint](https://arxiv.org/abs/2605.27406). |
-| RL-specific structured SSM | S5RL | implemented | S5 is a multi-input/multi-output SSM with an [official JAX implementation](https://github.com/lindermanlab/S5); [S5RL](https://proceedings.neurips.cc/paper_files/paper/2023/hash/92d3d2a9801211ca3693ccb2faa1316f-Abstract-Conference.html) specifically adapts it to reset-aware RL. |
+| fixed fading memory | memory traces, official and shared lanes | shared adaptation implemented; official lane required | The [ICML 2025 method](https://proceedings.mlr.press/v267/eberhard25a.html) uses compact exponential moving averages. The official source is pinned at [`fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd`](https://github.com/onnoeberhard/memory-traces/tree/fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd). The existing core preserves the recurrence but traces the shared augmented policy input and uses a shared parameter-matched trunk. It must be labeled `memory_trace_shared`. A separate observation-only, separate-head source lane is required. |
+| stable linear recurrence | LRU | implemented | [ICML 2024](https://proceedings.mlr.press/v235/lu24h.html) identifies the Deep Linear Recurrent Unit as a strong alternative to Transformers in POMDPs; its stable parameterization comes from the [LRU paper](https://proceedings.mlr.press/v202/orvieto23a.html). The official POMDP implementation is pinned at [`e74ac70d17fde88b0f005f2aba7ac780a5b1b143`](https://github.com/CTP314/TFPORL/tree/e74ac70d17fde88b0f005f2aba7ac780a5b1b143). |
+| structured SSM | S4D | implemented | Tests stable input-invariant diagonal dynamics. S4D follows the [paper](https://arxiv.org/abs/2206.11893) and [official implementation](https://github.com/state-spaces/s4). |
+| RL-specific structured SSM | S5RL | implemented | S5 is a multi-input/multi-output SSM with an [official JAX implementation](https://github.com/lindermanlab/S5); [S5RL](https://proceedings.neurips.cc/paper_files/paper/2023/hash/92d3d2a9801211ca3693ccb2faa1316f-Abstract-Conference.html) specifically adapts it to reset-aware RL. Its current official repository is pinned at [`12e5d42be3a6bde81cce4234f8be4e119e4318b6`](https://github.com/luchris429/popjaxrl/tree/12e5d42be3a6bde81cce4234f8be4e119e4318b6). |
+| input-selective state-space model | Mamba1 | source-audited core implemented | [Mamba](https://openreview.net/forum?id=tEYskw1VY2) provides the modern input-selective state-space control. The implemented source contract is pinned at [`10b5d6358f27966f6a40e4bf0baa17a460688128`](https://github.com/state-spaces/mamba/tree/10b5d6358f27966f6a40e4bf0baa17a460688128). Mamba-2 and Mamba-3 remain contextual until they have matched online-PPO evidence. |
+| constant-state gated linear attention | AGaLiTe | required | [AGaLiTe](https://openreview.net/forum?id=lh6vOAHuvo) is an accepted TMLR method for partially observable online RL with PureJaxRL PPO and a constant-state approximate gated linear-attention core. Its official JAX/Flax implementation is pinned at [`101acbecc121a258ad8f7e58e2f782f546674979`](https://github.com/subho406/agalite/tree/101acbecc121a258ad8f7e58e2f782f546674979). It is a mandatory modern executable baseline. |
 | exact attention | full-window causal Transformer | implemented | Provides the high-cost exact-context reference. |
 | recurrent attention | Transformer-XL, GTrXL | implemented | Tests segment recurrence and the GRU-gated, identity-map architecture introduced by [GTrXL](https://proceedings.mlr.press/v119/parisotto20a.html). |
 | proposed hybrid | ArcMind plus five registered ablations | implemented | Isolates the fast path, exact memory, temporal ordering, fusion gate, and full hybrid. |
+
+### Memory Traces source contract
+
+The source audit uses the official
+[ICML 2025 proceedings paper](https://proceedings.mlr.press/v267/eberhard25a.html)
+and the MIT-licensed
+[repository at commit
+`fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd`](https://github.com/onnoeberhard/memory-traces/tree/fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd).
+The executable trace and license bytes at that revision match the conference
+snapshot `a565a2e3cf8710439e58e4051dffc452ef2896cb`.
+
+For fixed decay \(\lambda_j\), the PPO implementation updates
+\(z_t^{(j)}=\lambda_j z_{t-1}^{(j)}+(1-\lambda_j)y_t\), then concatenates
+the trace states in trace-major order. The trace has no learned parameters,
+gate, bias, activation, or normalization. The official T-Maze policy traces
+observations only. It resets each trace at an episode boundary and immediately
+incorporates the new initial observation. Its actor and critic are separate
+two-layer, width-64 tanh networks with orthogonal initialization. This is the
+contract for `memory_trace_official`.
+
+The existing ArcMind core instead traces the complete shared causal input,
+including previous action, previous reward, and reset metadata. It uses a
+shared parameter-matched trunk and Xavier initialization. The recurrence is
+correct, but the complete policy is an adaptation. Registered results must
+call it `memory_trace_shared`, not an official reproduction.
+
+The paper defines the T-Maze decay as \((k-1)/k\). Its public corridor-64
+example rounds this value to `0.985`, while the exact value is `0.984375`.
+The paper reports 1,024,000,000 training steps for its main T-Maze study,
+whereas the public example uses 20,480,000 steps. No official POBAX decays or
+parameter-matching rule exist. POBAX decay values therefore require a frozen
+tuning registration and cannot be described as author-selected settings.
+
+### AGaLiTe source contract
+
+The source audit uses the
+[TMLR OpenReview paper](https://openreview.net/forum?id=lh6vOAHuvo), its
+[final author manuscript](https://arxiv.org/abs/2310.15719), and the
+Apache-2.0
+[repository at commit
+`101acbecc121a258ad8f7e58e2f782f546674979`](https://github.com/subho406/agalite/tree/101acbecc121a258ad8f7e58e2f782f546674979).
+The paper and executable use different finite-channel algorithms, so they
+cannot share one unqualified implementation label.
+
+The released recurrence stores exactly `R` cosine channels with frequencies
+`linspace(-pi, pi, R)`. Its phase counter starts at one, so the first token
+uses phase two, and an episode reset clears prior memory without resetting the
+phase. The released readout divides by
+`2 * R * dot(s, q) + 1e-5`. The surrounding block uses pre-attention
+LayerNorm, the AGaLiTe attention update, two GTrXL-style GRU residual gates,
+and a two-layer feedforward block.
+
+The paper instead defines `r + 1` channels at frequencies
+`2 * pi * i / r`. Its operational readout and one appendix derivation differ
+by a factor of four. Published experiments report `r = 1`, while released
+configurations use `R = 2`. Registered code must therefore use separate names:
+`agalite_source_compat` for the pinned executable, `agalite_shared` for the
+parameter-matched shared-PPO port, and an optional paper-equation audit
+ablation. A close source port must retain Apache-2.0 attribution and identify
+all modifications.
 
 ### Positional MLP source contract
 
@@ -297,12 +359,30 @@ without changing the experimental question:
   and imagined rollouts.
 - [Memo](https://proceedings.neurips.cc/paper_files/paper/2025/hash/96889893231d651898b0de42fdbee3a6-Abstract-Conference.html)
   targets learned memory management for embodied agents at a different system
-  scale.
+  scale. Its official source is
+  [pinned at `6ec28e0b35ebc01749753371629e8842caaae816`](https://github.com/gunshi/memo/tree/6ec28e0b35ebc01749753371629e8842caaae816).
 - [RATE](https://openreview.net/forum?id=kByN4v0M3e) evaluates recurrent
   attention in offline RL over stored trajectories, not the shared online PPO
   regime.
-- [When Sensors Fail](https://arxiv.org/abs/2603.04648), accepted at an ICLR
-  2026 workshop, studies persistent sensor dropout rather than POBAX. Its
+- [ELMUR](https://arxiv.org/abs/2510.07151) is an offline,
+  Decision-Transformer-style ICLR 2026 poster, not an online PPO backbone.
+- [GPO](https://arxiv.org/abs/2505.15418) uses privileged full-state guidance
+  during training. It is an algorithm-level contextual comparison.
+- [Mamba-2](https://proceedings.mlr.press/v235/dao24a.html) and
+  [Mamba-3](https://openreview.net/forum?id=HwCvaJOiCj) are current sequence
+  models, but neither is an established matched online-PPO baseline.
+- [LinOSS](https://openreview.net/forum?id=GRMfXcAAFh) is an ICLR 2025 oral
+  supervised sequence model. Its RL evidence comes through a different sensor
+  dropout study, so it is an optional linear-memory control.
+- The [Kalman state-space layer](https://openreview.net/forum?id=rfPns0WJyg)
+  is a TMLR 2025 probabilistic recurrent layer evaluated with off-policy
+  actor-critic methods. No official source was located. It becomes mandatory
+  only if ArcMind makes sensor-noise or uncertainty claims.
+- [MS4 and MS4N](https://arxiv.org/abs/2605.27406) are supervised
+  multivariate time-series models. Their current ArcMind cores are causal
+  policy adaptations, not established RL baselines.
+- [When Sensors Fail](https://arxiv.org/abs/2603.04648), an ICLR 2026 CAO
+  workshop poster, studies persistent sensor dropout rather than POBAX. Its
   Transformer, GTrXL, GRU, LRU, and LinOSS comparison reinforces the need for
   exact-attention and stable-recurrence controls, but its published returns are
   not directly comparable to the primary task suite.

@@ -549,6 +549,97 @@ with each actual experiment.
 - Evidence restriction: no Mamba-1 return, efficiency, superiority, or
   equivalence claim is supported until registered experiments are complete.
 
+### F-REF-004: The existing Memory Traces core is an adaptation, not an official policy
+
+- Class: `reference audit`
+- Status: primary paper and official source verified, implementation revision
+  required before registered use
+- Date: 2026-07-23
+- Primary sources:
+  - ICML 2025 proceedings:
+    `https://proceedings.mlr.press/v267/eberhard25a.html`;
+  - official MIT repository:
+    `https://github.com/onnoeberhard/memory-traces`; and
+  - audited source revision:
+    `fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd`.
+- Verified mechanism: each fixed trace updates as
+  `z_t = lambda * z_(t-1) + (1 - lambda) * y_t`, with no learned trace
+  parameter, gate, bias, activation, or normalization. The PPO implementation
+  concatenates traces in trace-major order.
+- Official T-Maze policy:
+  - traces observations only by default;
+  - resets state at episode boundaries and incorporates the new initial
+    observation on the reset step;
+  - uses separate two-layer, width-64 tanh actor and critic networks; and
+  - uses orthogonal initialization, actor output gain `0.01`, critic output
+    gain `1.0`, and zero biases.
+- Current ArcMind difference: `memory_trace_mlp` applies the correct recurrence
+  to the complete shared causal input, including previous action, previous
+  reward, and reset metadata. It uses a shared parameter-matched trunk and
+  Xavier initialization. It is recurrence-faithful but not a complete
+  source-faithful policy.
+- Decision:
+  - rename the registered shared comparison to `memory_trace_shared`;
+  - add `memory_trace_official` with observation-only traces and the official
+    separate actor and critic architecture; and
+  - retain the old name only as a development compatibility alias.
+- Configuration caveat: the paper defines the corridor decay as `(k - 1) / k`.
+  The public corridor-64 example rounds it to `0.985` instead of the exact
+  `0.984375`. No official POBAX decay or parameter-matching rule exists, so
+  POBAX decays must be frozen as tuning choices.
+- Evidence restriction: the existing core cannot be called an official
+  reproduction. No performance claim is supported by this audit.
+
+### F-REF-005: AGaLiTe is a missing matched online-PPO baseline
+
+- Class: `reference audit`
+- Status: baseline set revised after a primary-source search through
+  2026-07-23
+- Date: 2026-07-23
+- Finding: AGaLiTe is accepted by TMLR and directly evaluates a constant-state
+  approximate gated linear-attention policy in partially observable online
+  RL with PureJaxRL PPO.
+- Primary sources:
+  - TMLR OpenReview record: `https://openreview.net/forum?id=lh6vOAHuvo`; and
+  - official JAX and Flax source:
+    `https://github.com/subho406/agalite` at
+    `101acbecc121a258ad8f7e58e2f782f546674979`.
+- Decision: add AGaLiTe to the mandatory executable matched-PPO set.
+- Source incompatibility:
+  - the paper defines `r + 1` cosine channels with frequencies
+    `2 * pi * i / r`, while the released code stores exactly `R` channels with
+    `linspace(-pi, pi, R)`;
+  - the released phase counter starts at one, the first token uses phase two,
+    and episode resets do not reset phase;
+  - the released readout divides by
+    `2 * R * dot(s, q) + 1e-5`, while two finite-r expressions in the paper
+    differ by a factor of four; and
+  - published experiments report `r = 1`, while released configurations use
+    `R = 2`.
+- Implementation decision:
+  - `agalite_source_compat` will preserve the pinned executable recurrence,
+    phase, frequency, denominator, and GTrXL-style block;
+  - `agalite_shared` will attach that source-compatible block to the shared
+    input, PPO, and parameter-matching contract; and
+  - a literal paper-equation implementation may be retained only as an audit
+    ablation.
+- License: the official source is Apache-2.0. A close port requires preserved
+  attribution, the license text, and a third-party notice identifying the
+  audited revision.
+- Other classification changes:
+  - Memory Traces, Mamba-1, S5RL, LRU, FFM, SHM, recurrent attention, GRU,
+    LSTM, memory-free controls, and ArcMind ablations remain mandatory;
+  - Mamba-2, Mamba-3, RATE, ELMUR, GPO, Memo, LinOSS, the Kalman state-space
+    layer, and MS4/MS4N remain contextual because their published evidence
+    changes the task, learner, supervision, privilege, scale, or application;
+    and
+  - POPGym Arcade remains an ICLR 2026 submission. Its current release is
+    0.0.7 at source commit
+    `d061b611718ae55d095791b4ea7046b5266cafd4`.
+- Evidence restriction: baseline relevance does not imply that ArcMind
+  matches or exceeds any listed method. Comparative claims require the frozen
+  shared protocol and registered results.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`
