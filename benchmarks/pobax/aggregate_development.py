@@ -19,11 +19,15 @@ from typing import Any
 
 import numpy as np
 
+from benchmarks.pobax.implementation_provenance import normalize_implementation_source
 from benchmarks.pobax.registered_artifacts import (
+    ArtifactChecksumError,
     atomic_write_json,
+    canonical_json_bytes,
     canonical_json_sha256,
     registered_cell_id,
     sha256_file,
+    validate_checksum_manifest,
 )
 from benchmarks.pobax.registration_protocol import (
     normalize_candidate_families,
@@ -73,7 +77,11 @@ _CELL_KEYS = {
     "configuration_sha256",
     "artifact_path",
 }
-_CELL_KEYS_V3 = _CELL_KEYS | {"model_family", "implementation_model"}
+_CELL_KEYS_V3 = _CELL_KEYS | {
+    "model_family",
+    "implementation_model",
+    "implementation_source_sha256",
+}
 _PROVENANCE_KEYS = {
     "git",
     "dependency_lock_sha256",
@@ -81,6 +89,7 @@ _PROVENANCE_KEYS = {
     "navix_commit",
     "runtime_contract",
 }
+_PROVENANCE_KEYS_WITH_IMPLEMENTATION = _PROVENANCE_KEYS | {"implementation_source"}
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _REPORTED_RETURN_TOLERANCE = 1e-6
@@ -283,14 +292,22 @@ def _validate_runtime(value: Any, *, field: str) -> dict[str, Any]:
     }
 
 
-def _validate_provenance(value: Any, *, field: str) -> dict[str, Any]:
+def _validate_provenance(
+    value: Any,
+    *,
+    field: str,
+    require_implementation_source: bool,
+) -> dict[str, Any]:
     provenance = _mapping(value, field=field)
-    _exact_keys(provenance, _PROVENANCE_KEYS, field=field)
+    expected_keys = (
+        _PROVENANCE_KEYS_WITH_IMPLEMENTATION if require_implementation_source else _PROVENANCE_KEYS
+    )
+    _exact_keys(provenance, expected_keys, field=field)
     git = _mapping(provenance["git"], field=f"{field}.git")
     _exact_keys(git, {"commit", "dirty", "diff_sha256"}, field=f"{field}.git")
     if git["dirty"] is not False or git["diff_sha256"] is not None:
         raise DevelopmentAggregationError(f"{field}.git must describe a clean worktree")
-    return {
+    normalized = {
         "git": {
             "commit": _commit(git["commit"], field=f"{field}.git.commit"),
             "dirty": False,
@@ -306,6 +323,14 @@ def _validate_provenance(value: Any, *, field: str) -> dict[str, Any]:
             provenance["runtime_contract"], field=f"{field}.runtime_contract"
         ),
     }
+    if require_implementation_source:
+        try:
+            normalized["implementation_source"] = normalize_implementation_source(
+                provenance["implementation_source"]
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
+    return normalized
 
 
 def _validate_registration(value: Any) -> dict[str, Any]:
@@ -540,7 +565,11 @@ def _validate_manifest(
             raise DevelopmentAggregationError(str(error)) from error
         if manifest_families != registration["candidate_families"]:
             raise DevelopmentAggregationError("manifest candidate families drift from registration")
-    provenance = _validate_provenance(manifest["provenance"], field="manifest.provenance")
+    provenance = _validate_provenance(
+        manifest["provenance"],
+        field="manifest.provenance",
+        require_implementation_source=registration["schema_version"] == 3,
+    )
     raw_cells = manifest["cells"]
     if not isinstance(raw_cells, list) or not raw_cells:
         raise DevelopmentAggregationError("manifest.cells must be a non-empty JSON list")
@@ -592,9 +621,14 @@ def _validate_manifest(
                 cell["implementation_model"],
                 field=f"{field}.implementation_model",
             )
+            implementation_source_sha256 = _sha256(
+                cell["implementation_source_sha256"],
+                field=f"{field}.implementation_source_sha256",
+            )
             if (
                 model_family != expected_candidate["model_family"]
                 or implementation_model != expected_candidate["implementation_model"]
+                or implementation_source_sha256 != provenance["implementation_source"]["sha256"]
             ):
                 raise DevelopmentAggregationError(
                     f"{field} candidate identity drifts from registration"
@@ -602,6 +636,7 @@ def _validate_manifest(
             candidate_metadata = {
                 "model_family": model_family,
                 "implementation_model": implementation_model,
+                "implementation_source_sha256": implementation_source_sha256,
             }
         cells[identity] = {
             "cell_id": cell_id,
@@ -649,7 +684,14 @@ def _validate_configuration(
     if configuration["schema_version"] != registration["schema_version"]:
         raise DevelopmentAggregationError(f"{field}.schema_version must match the registration")
     if registration["schema_version"] == 3:
-        required.update({"candidate_id", "model_family", "implementation_model"})
+        required.update(
+            {
+                "candidate_id",
+                "model_family",
+                "implementation_model",
+                "implementation_source",
+            }
+        )
         missing = sorted(required - set(configuration))
         if missing:
             raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
@@ -801,15 +843,22 @@ def _validate_configuration(
             configuration["runtime_contract"], field=f"{field}.runtime_contract"
         ),
     }
-    if configured_provenance != {
-        key: provenance[key]
-        for key in (
-            "dependency_lock_sha256",
-            "pobax_commit",
-            "navix_commit",
-            "runtime_contract",
-        )
-    }:
+    if registration["schema_version"] == 3:
+        try:
+            configured_provenance["implementation_source"] = normalize_implementation_source(
+                configuration["implementation_source"]
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
+    provenance_fields = [
+        "dependency_lock_sha256",
+        "pobax_commit",
+        "navix_commit",
+        "runtime_contract",
+    ]
+    if registration["schema_version"] == 3:
+        provenance_fields.append("implementation_source")
+    if configured_provenance != {key: provenance[key] for key in provenance_fields}:
         raise DevelopmentAggregationError(f"{field} provenance drifts from manifest")
     return (
         configuration,
@@ -1031,7 +1080,14 @@ def _validate_artifact(
     if missing:
         raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
     if registration["schema_version"] == 3:
-        required.update({"candidate_id", "model_family", "implementation_model"})
+        required.update(
+            {
+                "candidate_id",
+                "model_family",
+                "implementation_model",
+                "implementation_source_sha256",
+            }
+        )
         missing = sorted(required - set(artifact))
         if missing:
             raise DevelopmentAggregationError(f"{field} is missing required fields: {missing}")
@@ -1086,11 +1142,17 @@ def _validate_artifact(
             or artifact["candidate_id"] != configuration["candidate_id"]
             or artifact["model_family"] != configuration["model_family"]
             or artifact["implementation_model"] != configuration["implementation_model"]
+            or artifact["implementation_source_sha256"]
+            != configuration["implementation_source"]["sha256"]
         ):
             raise DevelopmentAggregationError(
                 f"{field} candidate identity drifts from frozen configuration"
             )
-    artifact_provenance = _validate_provenance(artifact["provenance"], field=f"{field}.provenance")
+    artifact_provenance = _validate_provenance(
+        artifact["provenance"],
+        field=f"{field}.provenance",
+        require_implementation_source=manifest["schema_version"] == 3,
+    )
     if artifact_provenance != manifest["provenance"]:
         raise DevelopmentAggregationError(f"{field}.provenance drifted from manifest")
     (
@@ -1352,6 +1414,8 @@ def _validate_completion_index(
     )
     if index["schema_version"] != 1 or index["status"] != "complete":
         raise DevelopmentAggregationError("completion_index is not complete schema version 1")
+    if manifest_schema_version == 3 and path.read_bytes() != canonical_json_bytes(index) + b"\n":
+        raise DevelopmentAggregationError("completion_index is not canonical JSON")
     if index["manifest_sha256"] != manifest_sha256:
         raise DevelopmentAggregationError("completion_index belongs to another manifest")
     expected_count = len(cells)
@@ -1399,6 +1463,7 @@ def _validate_completion_index(
         if manifest_schema_version == 3 and (
             item["model_family"] != expected["model_family"]
             or item["implementation_model"] != expected["implementation_model"]
+            or item["implementation_source_sha256"] != expected["implementation_source_sha256"]
         ):
             raise DevelopmentAggregationError(
                 f"{field} candidate identity drifts from frozen manifest"
@@ -1427,30 +1492,27 @@ def _validate_checksums(
     root: Path,
     *,
     required_paths: Sequence[Path],
+    require_exact_inventory: bool = False,
 ) -> bool:
     checksum_path = root / "checksums.sha256"
     if not checksum_path.exists():
         return False
     try:
-        lines = checksum_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as error:
-        raise DevelopmentAggregationError(f"cannot read checksum manifest: {error}") from error
-    if not lines:
-        raise DevelopmentAggregationError("checksum manifest must not be empty")
-    indexed: dict[Path, str] = {}
-    for index, line in enumerate(lines):
-        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
-        if match is None:
-            raise DevelopmentAggregationError(f"invalid checksum line {index + 1}")
-        path = _artifact_path(root, match.group(2), field=f"checksums[{index}].path")
-        if path == checksum_path.resolve() or path in indexed:
-            raise DevelopmentAggregationError("checksum manifest has duplicate or self entries")
-        indexed[path] = match.group(1)
-        if sha256_file(path) != match.group(1):
-            raise DevelopmentAggregationError(f"checksum mismatch for {path}")
-    missing = [path for path in required_paths if path.resolve() not in indexed]
+        entries = validate_checksum_manifest(root)
+    except ArtifactChecksumError as error:
+        raise DevelopmentAggregationError(str(error)) from error
+    indexed = {root.joinpath(*PurePosixPath(relative).parts).resolve() for relative, _ in entries}
+    required = {path.resolve() for path in required_paths}
+    missing = sorted(required - indexed)
     if missing:
         raise DevelopmentAggregationError(f"checksum manifest omits required inputs: {missing}")
+    if require_exact_inventory:
+        extra = sorted(indexed - required)
+        if extra:
+            raise DevelopmentAggregationError(
+                "checksum inventory contains noncanonical raw inputs: "
+                f"{[path.relative_to(root).as_posix() for path in extra]}"
+            )
     return True
 
 
@@ -1467,6 +1529,13 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
     registration_sha256 = canonical_json_sha256(raw_registration)
     raw_manifest = _load_json(manifest_path, field="frozen manifest")
     manifest, cells = _validate_manifest(raw_manifest, root=root, registration=registration)
+    if (
+        registration["require_gpu"]
+        and manifest["provenance"]["runtime_contract"]["jax_backend"] != "gpu"
+    ):
+        raise DevelopmentAggregationError(
+            "registration requires GPU but validated artifacts used another backend"
+        )
     records: dict[tuple[str, str, int], dict[str, Any]] = {}
     step_grids: dict[str, tuple[int, ...]] = {}
     for environment in registration["environments"]:
@@ -1502,7 +1571,11 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
     if completion_validated:
         required_checksum_paths.append((root / "completion_index.json").resolve())
         required_checksum_paths.extend(tuning_log_paths)
-    checksums_validated = _validate_checksums(root, required_paths=required_checksum_paths)
+    checksums_validated = _validate_checksums(
+        root,
+        required_paths=required_checksum_paths,
+        require_exact_inventory=manifest["schema_version"] == 3,
+    )
     if registration["tier"] == "development_tuning":
         if not completion_validated or not checksums_validated:
             raise DevelopmentAggregationError(
@@ -1608,6 +1681,9 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                         "model_family": candidate["model_family"],
                         "implementation_model": candidate["implementation_model"],
                         "learner": candidate["learner"],
+                        "implementation_source_sha256": manifest["provenance"][
+                            "implementation_source"
+                        ]["sha256"],
                     }
                 )
                 curve_start_index = curve_start_by_environment[environment]
@@ -1781,6 +1857,8 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
     if registration["tier"] == "development_tuning":
         result.update(
             {
+                "completion_index_sha256": sha256_file(root / "completion_index.json"),
+                "checksum_manifest_sha256": sha256_file(root / "checksums.sha256"),
                 "candidate_families": [
                     {
                         "family_id": family["family_id"],

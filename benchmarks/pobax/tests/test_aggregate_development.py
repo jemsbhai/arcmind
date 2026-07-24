@@ -15,6 +15,7 @@ from benchmarks.pobax.aggregate_development import (
     aggregate_development,
     build_development_aggregate,
 )
+from benchmarks.pobax.implementation_provenance import IMPLEMENTATION_SOURCE_ALGORITHM
 from benchmarks.pobax.registered_artifacts import (
     atomic_write_bytes,
     atomic_write_json,
@@ -51,6 +52,15 @@ OPTIMIZER_METRICS = {
     "entropy": 0.2,
     "approximate_kl": 0.01,
 }
+_IMPLEMENTATION_SOURCE_UNSIGNED = {
+    "schema_version": 1,
+    "algorithm": IMPLEMENTATION_SOURCE_ALGORITHM,
+    "files": [{"path": "arcmind/__init__.py", "sha256": "a" * 64}],
+}
+IMPLEMENTATION_SOURCE = {
+    **_IMPLEMENTATION_SOURCE_UNSIGNED,
+    "sha256": canonical_json_sha256(_IMPLEMENTATION_SOURCE_UNSIGNED),
+}
 
 
 def _configuration(
@@ -65,8 +75,10 @@ def _configuration(
     learner: dict[str, Any] | None = None,
     model_family: str | None = None,
     implementation_model: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     budget = ENVIRONMENTS[environment] if total_steps is None else total_steps
+    selected_provenance = provenance or PROVENANCE
     selected_learner = learner or {
         "num_envs": 2,
         "rollout_steps": 2,
@@ -91,10 +103,10 @@ def _configuration(
         },
         "evaluation_episodes_per_environment": 2,
         "evaluation_max_episode_steps": 5,
-        "dependency_lock_sha256": PROVENANCE["dependency_lock_sha256"],
-        "pobax_commit": PROVENANCE["pobax_commit"],
-        "navix_commit": PROVENANCE["navix_commit"],
-        "runtime_contract": deepcopy(PROVENANCE["runtime_contract"]),
+        "dependency_lock_sha256": selected_provenance["dependency_lock_sha256"],
+        "pobax_commit": selected_provenance["pobax_commit"],
+        "navix_commit": selected_provenance["navix_commit"],
+        "runtime_contract": deepcopy(selected_provenance["runtime_contract"]),
     }
     if schema_version in {2, 3}:
         configuration["ppo"]["step_budget_mode"] = (
@@ -117,6 +129,7 @@ def _configuration(
             candidate_id=model,
             model_family=model_family,
             implementation_model=implementation_model,
+            implementation_source=deepcopy(IMPLEMENTATION_SOURCE),
         )
     return configuration
 
@@ -145,7 +158,9 @@ def _write_matrix(
     schema_version: int = 1,
     comparison_profile: str | None = None,
     candidate_families: list[dict[str, Any]] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], Path]]:
+    selected_provenance = provenance or PROVENANCE
     candidate_index = {
         candidate["candidate_id"]: {
             **candidate,
@@ -221,6 +236,7 @@ def _write_matrix(
                         if schema_version == 3
                         else None
                     ),
+                    provenance=selected_provenance,
                 )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 relative = f"cells/{environment}-{model}-{seed}.json"
@@ -236,9 +252,13 @@ def _write_matrix(
                     cell.update(
                         model_family=candidate_index[model]["model_family"],
                         implementation_model=candidate_index[model]["implementation_model"],
+                        implementation_source_sha256=IMPLEMENTATION_SOURCE["sha256"],
                     )
                 cells.append(cell)
                 paths[identity] = root / relative
+    manifest_provenance = deepcopy(selected_provenance)
+    if schema_version == 3:
+        manifest_provenance["implementation_source"] = deepcopy(IMPLEMENTATION_SOURCE)
     manifest: dict[str, Any] = {
         "schema_version": schema_version,
         "status": "frozen",
@@ -248,7 +268,7 @@ def _write_matrix(
         "models": selected_models,
         "environments": list(selected_environments),
         "seeds": selected_seeds,
-        "provenance": deepcopy(PROVENANCE),
+        "provenance": manifest_provenance,
         "cells": cells,
     }
     if schema_version == 3:
@@ -274,6 +294,7 @@ def _write_matrix(
             implementation_model=(
                 candidate_index[model]["implementation_model"] if schema_version == 3 else None
             ),
+            provenance=selected_provenance,
         )
         configuration_sha256 = canonical_json_sha256(configuration)
         value = float(
@@ -287,6 +308,9 @@ def _write_matrix(
                 else 0
             )
         )
+        artifact_provenance = deepcopy(selected_provenance)
+        if schema_version == 3:
+            artifact_provenance["implementation_source"] = deepcopy(IMPLEMENTATION_SOURCE)
         artifact = {
             "schema_version": 6 if schema_version == 3 else 5 if schema_version == 2 else 4,
             "status": (
@@ -307,7 +331,7 @@ def _write_matrix(
             "effective_parameter_count": configuration["effective_parameter_count"],
             "arcmind_target_parameter_count": configuration["arcmind_target_parameter_count"],
             "parameter_ratio": configuration["parameter_ratio"],
-            "provenance": deepcopy(PROVENANCE),
+            "provenance": artifact_provenance,
             "actual_environment_steps": selected_environments[environment],
             "ppo": deepcopy(configuration["ppo"]),
             "evaluation_episodes_per_environment": 2,
@@ -334,6 +358,7 @@ def _write_matrix(
                 candidate_id=model,
                 model_family=candidate_index[model]["model_family"],
                 implementation_model=candidate_index[model]["implementation_model"],
+                implementation_source_sha256=IMPLEMENTATION_SOURCE["sha256"],
             )
         if schema_version in {2, 3}:
             artifact.update(
@@ -348,7 +373,10 @@ def _write_matrix(
 def _rewrite(path: Path, mutation: Callable[[dict[str, Any]], None]) -> None:
     value = json.loads(path.read_text(encoding="utf-8"))
     mutation(value)
-    path.write_text(json.dumps(value, allow_nan=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_integrity_indexes(
@@ -386,6 +414,8 @@ def _write_integrity_indexes(
 
 def _write_tuning_matrix(
     root: Path,
+    *,
+    provenance: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, int], Path]]:
     base_learner = {
         "num_envs": 2,
@@ -424,6 +454,7 @@ def _write_tuning_matrix(
         schema_version=3,
         comparison_profile="arcmind_shared_comparison",
         candidate_families=candidate_families,
+        provenance=provenance,
     )
     for path in paths.values():
         artifact = json.loads(path.read_text(encoding="utf-8"))
@@ -1047,8 +1078,36 @@ def test_development_tuning_checksum_inventory_must_cover_logs(
 
     with pytest.raises(
         DevelopmentAggregationError,
-        match="checksum manifest omits required inputs",
+        match="checksum inventory differs",
     ):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_rejects_checksummed_attempt_inside_raw_root(
+    tmp_path: Path,
+) -> None:
+    _write_tuning_matrix(tmp_path)
+    attempt_path = tmp_path / "cells" / f"orphan.attempt-{'a' * 32}.failed.log"
+    attempt_path.write_bytes(b"failed attempt evidence\n")
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(
+        DevelopmentAggregationError,
+        match="noncanonical raw inputs",
+    ):
+        build_development_aggregate(tmp_path)
+
+
+def test_development_tuning_gpu_requirement_matches_runtime_provenance(
+    tmp_path: Path,
+) -> None:
+    cpu_provenance = deepcopy(PROVENANCE)
+    cpu_provenance["runtime_contract"]["jax_backend"] = "cpu"
+    cpu_provenance["runtime_contract"]["devices"] = [{"platform": "cpu", "device_kind": "Test CPU"}]
+    _write_tuning_matrix(tmp_path, provenance=cpu_provenance)
+
+    with pytest.raises(DevelopmentAggregationError, match="requires GPU"):
         build_development_aggregate(tmp_path)
 
 

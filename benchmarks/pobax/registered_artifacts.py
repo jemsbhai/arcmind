@@ -14,7 +14,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -410,6 +410,68 @@ def write_checksum_manifest(
     return _atomic_create(output_path, content)
 
 
+def validate_checksum_manifest(
+    directory: str | os.PathLike[str],
+    *,
+    filename: str = "checksums.sha256",
+) -> tuple[tuple[str, str], ...]:
+    """Validate a checksum manifest against the exact regular-file inventory."""
+
+    root = Path(directory).resolve()
+    manifest_path = (root / filename).resolve()
+    if not manifest_path.is_file():
+        raise ArtifactChecksumError(f"checksum manifest does not exist: {manifest_path}")
+    try:
+        content = manifest_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ArtifactChecksumError(f"cannot read checksum manifest: {error}") from error
+    lines = content.splitlines()
+    if not lines:
+        raise ArtifactChecksumError("checksum manifest must not be empty")
+
+    actual_files = []
+    for path in root.rglob("*"):
+        resolved = path.resolve()
+        if path.is_file() and resolved != manifest_path:
+            if not resolved.is_relative_to(root):
+                raise ArtifactChecksumError(f"artifact file escapes checksum root: {path}")
+            actual_files.append(path.relative_to(root).as_posix())
+    actual_files.sort(key=lambda item: item.encode("utf-8"))
+
+    parsed: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if match is None:
+            raise ArtifactChecksumError(f"invalid checksum line {index + 1}")
+        relative = match.group(2)
+        pure = PurePosixPath(relative)
+        if (
+            "\\" in relative
+            or pure.is_absolute()
+            or relative != pure.as_posix()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            raise ArtifactChecksumError(f"unsafe checksum path: {relative!r}")
+        if relative == filename:
+            raise ArtifactChecksumError("checksum manifest must not contain itself")
+        if parsed and relative.encode("utf-8") <= parsed[-1][0].encode("utf-8"):
+            raise ArtifactChecksumError("checksum paths must be uniquely sorted")
+        parsed.append((relative, match.group(1)))
+
+    parsed_paths = [relative for relative, _ in parsed]
+    if parsed_paths != actual_files:
+        missing = sorted(set(actual_files) - set(parsed_paths))
+        extra = sorted(set(parsed_paths) - set(actual_files))
+        raise ArtifactChecksumError(
+            f"checksum inventory differs from regular files: missing={missing}, extra={extra}"
+        )
+    for relative, expected_sha256 in parsed:
+        path = root.joinpath(*PurePosixPath(relative).parts)
+        if sha256_file(path) != expected_sha256:
+            raise ArtifactChecksumError(f"checksum mismatch for {relative}")
+    return tuple(parsed)
+
+
 __all__ = [
     "ArtifactChecksumError",
     "ArtifactWriteResult",
@@ -427,5 +489,6 @@ __all__ = [
     "validate_paired_seed_manifests",
     "validate_unique_cell_ids",
     "verify_artifact_checksum",
+    "validate_checksum_manifest",
     "write_checksum_manifest",
 ]

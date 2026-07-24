@@ -412,6 +412,95 @@ with each actual experiment.
   execution identity only. It introduces no performance result or paper
   claim.
 
+### F-ENG-009: Final selection requires source-complete and raw-complete evidence
+
+- Class: `engineering validation`
+- Status: twelve protocol gaps found by four independent audit passes and corrected before
+  registered tuning
+- Date: 2026-07-23
+- Gaps:
+  - schema-v4 final selection bound a tuning aggregate and its registration
+    and manifest, but did not prove that tuning and final execution used the
+    same implementation source;
+  - the selection binding did not freeze the tuning completion-index or
+    checksum-inventory file hashes;
+  - failed-attempt evidence remained inside the immutable raw root even though
+    strict linking treated that root as a closed inventory; and
+  - standalone registered aggregation could validate cell artifacts without
+    independently requiring the registration, completion index, canonical
+    logs, and exact checksum inventory;
+  - a schema-v4 manifest compared only selected registration semantics, so a
+    different but rechecksummed final registration could remain admissible;
+  - a special-case filename allowance still admitted checksummed
+    failed-attempt evidence inside the immutable raw root; and
+  - completion-index content was structurally validated but its exact
+    canonical bytes were not required;
+  - schema-v3 tuning aggregation required canonical files to be checksummed
+    but did not reject additional checksummed files inside the raw root; and
+  - schema-v2 registered upper references did not bind the frozen learner and
+    other executable registration semantics back to validated cell artifacts;
+  - a legacy schema-v2 primary matrix could still be labeled registered-final
+    and linked as paper-eligible without the mandatory tuning selection;
+  - schema-v3 tuning did not enforce a declared GPU requirement against
+    validated runtime provenance; and
+  - schema-v1 registered aggregation did not bind the frozen evaluation
+    episode count back to validated artifacts.
+- Correction:
+  - define a versioned canonical implementation-source manifest over every
+    tracked Python file under `arcmind/` and every tracked non-test Python file
+    under `benchmarks/pobax/`, recording each path and file SHA256;
+  - require tuning and final execution to have the exact same implementation
+    manifest, dependency-lock hash, POBAX commit, Navix commit, and non-device
+    runtime contract, while allowing the repository commit to differ;
+  - bind the tuning completion-index, checksum-inventory, and
+    implementation-source hashes in the schema-v4 registration, final
+    manifest, every selected family, and every final cell;
+  - bind the complete canonical schema-v4 final registration bytes into the
+    frozen manifest with a file SHA256;
+  - preserve failed logs and partial artifacts only in the sibling
+    `<raw-matrix>.attempts` tree, never inside the immutable raw root; and
+  - make registered aggregation require canonical registration bytes, an
+    exact canonical completion index, every canonical cell log, and a checksum manifest
+    whose paths exactly equal all regular files below the raw root. The
+    aggregate records the validated registration, completion-index, and
+    checksum-inventory hashes;
+  - require schema-v3 tuning checksum paths to equal the exact canonical
+    registration, manifest, completion, artifact, and log inventory; and
+  - require schema-v2 registered artifacts to match the frozen learner,
+    environment budget, evaluation episode count, comparison profile, and
+    quick-run contract. A GPU requirement must agree with validated runtime
+    provenance;
+  - reject every registered-final primary link unless its primary matrix uses
+    schema v4 and a frozen tuning selection;
+  - enforce tuning GPU requirements against the frozen manifest runtime; and
+  - apply evaluation episode binding to schema-v1 registered artifacts too.
+- Interpretation: a final result can no longer inherit a tuning choice after
+  implementation, dependency, external-source, or runtime drift. Binding the
+  two raw index files prevents later reindexing from preserving a stale
+  selection claim. Attempt evidence remains auditable without weakening the
+  immutable successful-run inventory. The frozen manifest also binds every
+  final-registration byte, including fields that are not part of matrix
+  identity. Current schema-v2 upper references can no longer acquire a
+  different learner or execution contract through registration-only edits.
+  Legacy primary matrices cannot enter the paper-eligible linking path.
+  Registered and tuning aggregation now fail closed when any independent raw
+  evidence layer is absent, stale, noncanonical, extra, or unindexed.
+- Validation:
+  - the focused schema, aggregation, matrix, and linking suite passed 197 of
+    197 tests in the pinned Ubuntu environment;
+  - targeted adversarial regressions passed 5 of 5 tests for registration
+    mutation, checksummed in-root attempt evidence, and noncanonical
+    completion bytes;
+  - the final independent adversarial audit passed 15 of 15 focused
+    reproductions and found no remaining P0, P1, or P2 integrity bypass;
+  - the complete POBAX suite passed 332 of 332 tests in the same environment;
+    and
+  - rebuilding the legacy SHM repair aggregate produced 7,420 bytes identical
+    to the existing artifact, with SHA256
+    `c5b926b38e32b52eba45d9eaacd7b0bc9478b00c03aeb1218ae2424bb79b7a8f`.
+- Evidence restriction: this correction strengthens provenance and artifact
+  integrity only. It introduces no performance result or paper claim.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`

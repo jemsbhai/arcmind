@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
+from benchmarks.pobax.implementation_provenance import normalize_implementation_source
+
 REGISTRATION_FIELDS_V1 = {
     "schema_version",
     "status",
@@ -48,6 +50,7 @@ _FINAL_SELECTION_FIELDS = {
     "implementation_model",
     "candidate_id",
     "learner",
+    "implementation_source_sha256",
 }
 PUBLISHED_PRIMARY_TRAIN_STEPS = {
     "tmaze_10": 1_000_000,
@@ -195,6 +198,9 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
         "aggregate_sha256",
         "source_registration_sha256",
         "source_manifest_sha256",
+        "source_completion_index_sha256",
+        "source_checksum_manifest_sha256",
+        "source_implementation_sha256",
         "selections",
     }
     if not isinstance(value, Mapping) or set(value) != expected_fields:
@@ -204,6 +210,9 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
         "aggregate_sha256",
         "source_registration_sha256",
         "source_manifest_sha256",
+        "source_completion_index_sha256",
+        "source_checksum_manifest_sha256",
+        "source_implementation_sha256",
     ):
         hash_value = value[name]
         if not isinstance(hash_value, str) or not _SHA256_PATTERN.fullmatch(hash_value):
@@ -220,7 +229,8 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
         if not isinstance(raw_selection, Mapping) or set(raw_selection) != _FINAL_SELECTION_FIELDS:
             raise ValueError(
                 f"{field} must contain exactly environment, model_family, "
-                "implementation_model, candidate_id, and learner"
+                "implementation_model, candidate_id, learner, and "
+                "implementation_source_sha256"
             )
         environment = raw_selection["environment"]
         if not isinstance(environment, str) or not environment:
@@ -246,6 +256,11 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
             raise ValueError(f"{field} duplicates an implementation-model selection")
         identities.add(identity)
         implementations.add(implementation_identity)
+        implementation_source_sha256 = raw_selection["implementation_source_sha256"]
+        if not isinstance(implementation_source_sha256, str) or not _SHA256_PATTERN.fullmatch(
+            implementation_source_sha256
+        ):
+            raise ValueError(f"{field}.implementation_source_sha256 must be a lowercase SHA256")
         selections.append(
             {
                 "environment": environment,
@@ -253,6 +268,7 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
                 "implementation_model": implementation_model,
                 "candidate_id": candidate_id,
                 "learner": normalize_learner(raw_selection["learner"], schema_version=4),
+                "implementation_source_sha256": implementation_source_sha256,
             }
         )
     return {
@@ -311,6 +327,29 @@ def validate_final_selection_against_aggregate(
         or eligibility.get("selection_scope") != "candidate_within_model_family_and_environment"
     ):
         raise ValueError("tuning selection aggregate has an invalid eligibility contract")
+    for binding_field, aggregate_field in (
+        ("source_registration_sha256", "registration_sha256"),
+        ("source_manifest_sha256", "matrix_manifest_sha256"),
+        ("source_completion_index_sha256", "completion_index_sha256"),
+        ("source_checksum_manifest_sha256", "checksum_manifest_sha256"),
+    ):
+        if aggregate.get(aggregate_field) != binding[binding_field]:
+            raise ValueError(
+                f"tuning selection {binding_field} drifts from aggregate {aggregate_field}"
+            )
+    tuning_provenance = aggregate.get("provenance")
+    if not isinstance(tuning_provenance, Mapping):
+        raise ValueError("tuning selection aggregate is missing provenance")
+    try:
+        implementation_source = normalize_implementation_source(
+            tuning_provenance.get("implementation_source")
+        )
+    except ValueError as error:
+        raise ValueError(
+            "tuning selection aggregate has invalid implementation provenance"
+        ) from error
+    if implementation_source["sha256"] != binding["source_implementation_sha256"]:
+        raise ValueError("tuning selection implementation source hash drifts from aggregate")
     if aggregate.get("environments") != list(environments) or len(environments) != 1:
         raise ValueError(
             "schema-v4 registered final requires the exact single environment "
@@ -404,6 +443,48 @@ def validate_final_selection_against_aggregate(
             or aggregate_learner != selection["learner"]
         ):
             raise ValueError("registered-final learner drifts from the tuning aggregate winner")
+        if (
+            winner_group.get("implementation_source_sha256")
+            != selection["implementation_source_sha256"]
+            or selection["implementation_source_sha256"] != binding["source_implementation_sha256"]
+        ):
+            raise ValueError(
+                "registered-final implementation source drifts from the tuning aggregate winner"
+            )
+
+
+def validate_final_provenance_against_tuning(
+    *,
+    binding: Mapping[str, Any],
+    tuning_provenance: object,
+    final_provenance: object,
+) -> None:
+    """Require runtime and implementation equivalence without equal Git commits."""
+
+    if not isinstance(tuning_provenance, Mapping) or not isinstance(final_provenance, Mapping):
+        raise ValueError("tuning and final provenance must be objects")
+    try:
+        tuning_source = normalize_implementation_source(
+            tuning_provenance.get("implementation_source")
+        )
+        final_source = normalize_implementation_source(
+            final_provenance.get("implementation_source")
+        )
+    except ValueError as error:
+        raise ValueError("tuning or final implementation provenance is invalid") from error
+    if (
+        tuning_source != final_source
+        or tuning_source["sha256"] != binding["source_implementation_sha256"]
+    ):
+        raise ValueError("final implementation source drifts from tuning selection source")
+    for field in (
+        "dependency_lock_sha256",
+        "pobax_commit",
+        "navix_commit",
+        "runtime_contract",
+    ):
+        if tuning_provenance.get(field) != final_provenance.get(field):
+            raise ValueError(f"final provenance drifts from tuning provenance: {field}")
 
 
 def realized_environment_steps(

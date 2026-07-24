@@ -285,6 +285,25 @@ before comparison. The linker validates the complete raw checksum inventories,
 requires the same ordered seed list and exact alias-to-primary mapping, and
 checks learner, evaluation, source, dependency, and registered-budget
 contracts. A shared seed count without this link is insufficient evidence.
+Each registered aggregate independently requires the canonical registration,
+completion index, per-cell logs, and checksum inventory beside the raw
+manifest. The checksum inventory must equal the complete set of regular files
+under the raw root and every entry must verify. The aggregate records the
+validated registration, completion-index, and checksum-inventory file hashes.
+For schema-v4 primary matrices, the frozen manifest also records the SHA256 of
+the complete canonical registration file. Any registration change therefore
+invalidates the frozen manifest even when the checksum inventory is rebuilt.
+Completion indexes must have exact canonical JSON bytes. No failed-attempt or
+other noncanonical file is allowed inside a completed raw root, even when it
+is listed in the checksum inventory.
+For schema-v2 upper references, registered aggregation also requires every
+validated cell to match the frozen learner, environment budget, evaluation
+episode count, comparison profile, and quick-run contract. A declared GPU
+requirement must agree with validated runtime provenance.
+Schema-v1 registered artifacts retain legacy aggregation support, but their
+frozen evaluation episode count must also match every validated cell.
+Only a schema-v4 primary matrix with a frozen tuning selection can enter a
+registered-final, paper-eligible primary-to-upper link.
 
 The published POBAX budgets are 1 million steps for T-Maze-10, 5 million for
 RockSample11, 10 million for Battleship-10, 50 million each for Walker-V and
@@ -318,21 +337,39 @@ common interval width yields `auc_mean_return`, and candidates are ranked by
 its seed mean only within their model family. The selected configurations must
 be frozen in a new manifest and rerun on disjoint registered-final seeds.
 Every tuning completion row must identify its immutable cell log and SHA256,
-and the matrix checksum inventory must cover all of those logs.
+and the matrix checksum inventory must equal the exact canonical set of
+registration, manifest, completion index, cell artifacts, and cell logs.
+Additional files inside the raw tuning root are prohibited even when they are
+checksummed. When tuning declares a GPU requirement, its frozen manifest and
+validated artifacts must record a GPU runtime.
 
 Schema v4 closes the selection-to-final boundary. Its registration names the
 raw tuning matrix and canonical tuning aggregate by repository-relative path,
-binds both source hashes and the aggregate file SHA256, and copies only the
-winning candidate identity and complete learner for each model family. The
-loader rebuilds the tuning aggregate, requires exact canonical bytes, checks
-every declared winner and learner, and rejects any overlap between tuning and
-final seeds. The same binding is frozen in the final matrix manifest and
-revalidated during registered aggregation.
+binds the tuning registration, manifest, completion-index,
+checksum-inventory, implementation-source, and aggregate file hashes, and
+copies only the winning candidate identity, complete learner, and
+implementation-source hash for each model family. The schema-v4 manifest
+separately binds the SHA256 of the complete canonical final registration file,
+including fields outside the selected learner identity. The loader validates the
+exact tuning file inventory, rebuilds the tuning aggregate, requires exact
+canonical bytes, checks every declared winner and learner, and rejects any
+overlap between tuning and final seeds. The same binding is frozen in the
+final matrix manifest and revalidated during registered aggregation.
+
+Tuning and final execution must have identical versioned
+implementation-source manifests. The manifest covers every tracked Python
+file under `arcmind/` and every tracked non-test Python file under
+`benchmarks/pobax/`, with canonical repository-relative paths and per-file
+SHA256 values. Tuning and final execution must also have identical dependency
+lock hashes, pinned POBAX and Navix commits, and non-device runtime contracts.
+The repository commit may differ so that the final registration can contain
+the audited tuning decision without falsely requiring the pre-decision commit.
 
 Canonical cell logs identify successful executions only. Output from a
-failed child is retained under a unique failed-attempt path, together with any
-partial artifact, and cannot be reused by a later successful completion or
-resume.
+failed child is retained under a sibling `<raw-matrix>.attempts` tree with a
+unique attempt identity, together with any partial artifact. Failed evidence
+never enters the immutable raw root, completion index, or checksum inventory
+and cannot be reused by a later successful completion or resume.
 
 ### Track B: state-based robot imitation (primary application)
 

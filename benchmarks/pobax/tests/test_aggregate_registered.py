@@ -19,11 +19,14 @@ from benchmarks.pobax.aggregate_registered import (
     build_registered_aggregate,
     interquartile_mean,
 )
+from benchmarks.pobax.implementation_provenance import IMPLEMENTATION_SOURCE_ALGORITHM
 from benchmarks.pobax.registered_artifacts import (
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_sha256,
     registered_cell_id,
     sha256_file,
+    write_checksum_manifest,
 )
 from benchmarks.pobax.upper_reference_registry import (
     expected_environment_reference,
@@ -75,6 +78,15 @@ OPTIMIZER_METRICS = {
     "entropy": 0.2,
     "approximate_kl": 0.01,
 }
+_IMPLEMENTATION_SOURCE_UNSIGNED = {
+    "schema_version": 1,
+    "algorithm": IMPLEMENTATION_SOURCE_ALGORITHM,
+    "files": [{"path": "arcmind/__init__.py", "sha256": "a" * 64}],
+}
+IMPLEMENTATION_SOURCE = {
+    **_IMPLEMENTATION_SOURCE_UNSIGNED,
+    "sha256": canonical_json_sha256(_IMPLEMENTATION_SOURCE_UNSIGNED),
+}
 
 
 def _configuration(
@@ -84,8 +96,14 @@ def _configuration(
     *,
     schema_version: int = 1,
     comparison_profile: str | None = None,
+    evaluation_episodes_per_env: int | None = None,
 ) -> dict[str, Any]:
     total_steps = TRAIN_STEPS[environment]
+    evaluation_episodes = (
+        EVALUATION_EPISODES[environment]
+        if evaluation_episodes_per_env is None
+        else evaluation_episodes_per_env
+    )
     configuration = {
         "schema_version": schema_version,
         "evidence_tier": "registered_final",
@@ -98,8 +116,14 @@ def _configuration(
         "effective_parameter_count": 1_000,
         "arcmind_target_parameter_count": 1_000,
         "parameter_ratio": 1.0,
-        "ppo": {"total_steps": total_steps, "num_envs": 2},
-        "evaluation_episodes_per_environment": EVALUATION_EPISODES[environment],
+        "ppo": {
+            "total_steps": total_steps,
+            "num_envs": 2,
+            "rollout_steps": 2,
+            "update_epochs": 1,
+            "learning_rate": 0.001,
+        },
+        "evaluation_episodes_per_environment": evaluation_episodes,
         "evaluation_max_episode_steps": EVALUATION_HORIZON,
         "dependency_lock_sha256": PROVENANCE["dependency_lock_sha256"],
         "pobax_commit": PROVENANCE["pobax_commit"],
@@ -170,6 +194,12 @@ def test_registered_aggregation_revalidates_schema_v4_tuning_binding(
         "not_for_paper": True,
         "registration_sha256": "1" * 64,
         "matrix_manifest_sha256": "2" * 64,
+        "completion_index_sha256": "3" * 64,
+        "checksum_manifest_sha256": "4" * 64,
+        "provenance": {
+            **deepcopy(PROVENANCE),
+            "implementation_source": deepcopy(IMPLEMENTATION_SOURCE),
+        },
         "environments": ["tmaze_10"],
         "seeds": [1103, 2207, 3301, 4409, 5519],
         "integrity_indexes": {
@@ -205,11 +235,18 @@ def test_registered_aggregation_revalidates_schema_v4_tuning_binding(
                 "model_family": "ordered_memory",
                 "implementation_model": "arcmind",
                 "learner": learner,
+                "implementation_source_sha256": IMPLEMENTATION_SOURCE["sha256"],
             }
         ],
     }
     raw_matrix_path = tmp_path / "raw-tuning"
     raw_matrix_path.mkdir()
+    (raw_matrix_path / "completion_index.json").write_bytes(b"tuning completion\n")
+    (raw_matrix_path / "checksums.sha256").write_bytes(b"tuning checksums\n")
+    tuning_aggregate["completion_index_sha256"] = sha256_file(
+        raw_matrix_path / "completion_index.json"
+    )
+    tuning_aggregate["checksum_manifest_sha256"] = sha256_file(raw_matrix_path / "checksums.sha256")
     aggregate_path = tmp_path / "tuning-selection.json"
     atomic_write_json(aggregate_path, tuning_aggregate)
     binding = {
@@ -218,6 +255,9 @@ def test_registered_aggregation_revalidates_schema_v4_tuning_binding(
         "aggregate_sha256": sha256_file(aggregate_path),
         "source_registration_sha256": tuning_aggregate["registration_sha256"],
         "source_manifest_sha256": tuning_aggregate["matrix_manifest_sha256"],
+        "source_completion_index_sha256": tuning_aggregate["completion_index_sha256"],
+        "source_checksum_manifest_sha256": tuning_aggregate["checksum_manifest_sha256"],
+        "source_implementation_sha256": IMPLEMENTATION_SOURCE["sha256"],
         "selections": [
             {
                 "environment": "tmaze_10",
@@ -225,6 +265,7 @@ def test_registered_aggregation_revalidates_schema_v4_tuning_binding(
                 "implementation_model": "arcmind",
                 "candidate_id": "ordered_memory.lr_high",
                 "learner": learner,
+                "implementation_source_sha256": IMPLEMENTATION_SOURCE["sha256"],
             }
         ],
     }
@@ -244,6 +285,7 @@ def test_registered_aggregation_revalidates_schema_v4_tuning_binding(
         models=("arcmind",),
         environments=("tmaze_10",),
         final_seeds=tuple(range(10_000, 10_030)),
+        final_provenance=tuning_aggregate["provenance"],
     )
 
     assert normalized["aggregate_sha256"] == sha256_file(aggregate_path)
@@ -264,6 +306,10 @@ def test_schema_v4_configuration_must_match_selected_winner_learner():
         model_family="ordered_memory",
         implementation_model="arcmind",
         tuning_aggregate_sha256="5" * 64,
+        tuning_completion_index_sha256="6" * 64,
+        tuning_checksum_manifest_sha256="7" * 64,
+        tuning_implementation_source_sha256=IMPLEMENTATION_SOURCE["sha256"],
+        implementation_source=deepcopy(IMPLEMENTATION_SOURCE),
     )
     learner = {
         name: configuration["ppo"][name]
@@ -283,13 +329,21 @@ def test_schema_v4_configuration_must_match_selected_winner_learner():
         "model_family": "ordered_memory",
         "implementation_model": "arcmind",
         "tuning_aggregate_sha256": "5" * 64,
+        "tuning_completion_index_sha256": "6" * 64,
+        "tuning_checksum_manifest_sha256": "7" * 64,
+        "tuning_implementation_source_sha256": IMPLEMENTATION_SOURCE["sha256"],
+        "implementation_source_sha256": IMPLEMENTATION_SOURCE["sha256"],
         "learner": learner,
+    }
+    provenance = {
+        **deepcopy(PROVENANCE),
+        "implementation_source": deepcopy(IMPLEMENTATION_SOURCE),
     }
 
     assert _validate_frozen_configuration(
         configuration,
         identity=("tmaze_10", "arcmind", 11),
-        provenance=PROVENANCE,
+        provenance=provenance,
         field="configuration",
         selection=selection,
     ) == (1_000_000, 2, EVALUATION_HORIZON)
@@ -299,7 +353,7 @@ def test_schema_v4_configuration_must_match_selected_winner_learner():
         _validate_frozen_configuration(
             configuration,
             identity=("tmaze_10", "arcmind", 11),
-            provenance=PROVENANCE,
+            provenance=provenance,
             field="configuration",
             selection=selection,
         )
@@ -314,6 +368,7 @@ def _write_matrix(
     matrix_kind: str = "primary_comparison",
     schema_version: int = 1,
     comparison_profile: str | None = None,
+    evaluation_episodes_per_env: int | None = None,
 ) -> tuple[Path, dict[str, Any], dict[tuple[str, str, int], Path]]:
     selected_models = models or MODELS
     selected_environments = environments or ENVIRONMENTS
@@ -329,6 +384,7 @@ def _write_matrix(
                     seed,
                     schema_version=schema_version,
                     comparison_profile=comparison_profile,
+                    evaluation_episodes_per_env=evaluation_episodes_per_env,
                 )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 identity = (environment, model, seed)
@@ -363,6 +419,43 @@ def _write_matrix(
     manifest["manifest_sha256"] = manifest_sha256
     manifest_path = tmp_path / "matrix.json"
     atomic_write_json(manifest_path, manifest)
+    registration = {
+        "schema_version": schema_version,
+        "status": "frozen",
+        "evidence_tier": "registered_final",
+        "matrix_kind": matrix_kind,
+        "models": selected_models,
+        "environments": [
+            {"id": environment, "total_steps": TRAIN_STEPS[environment]}
+            for environment in selected_environments
+        ],
+        "seeds": selected_seeds,
+        "learner": {
+            "num_envs": 2,
+            "rollout_steps": 2,
+            "update_epochs": 1,
+            "learning_rate": 0.001,
+        },
+        "evaluation_episodes_per_env": (
+            EVALUATION_EPISODES[selected_environments[0]]
+            if evaluation_episodes_per_env is None
+            else evaluation_episodes_per_env
+        ),
+        "require_gpu": True,
+        "quick": False,
+    }
+    if schema_version == 2:
+        registration.update(
+            comparison_profile=comparison_profile,
+            learner={
+                **registration["learner"],
+                "num_minibatches": 1,
+                "gae_lambda": 0.95,
+                "entropy_coefficient": 0.01,
+                "anneal_learning_rate": True,
+            },
+        )
+    atomic_write_json(tmp_path / "registration.json", registration)
 
     values = {
         ("tmaze_10", "arcmind", 11): 1.0,
@@ -382,6 +475,7 @@ def _write_matrix(
             seed,
             schema_version=schema_version,
             comparison_profile=comparison_profile,
+            evaluation_episodes_per_env=evaluation_episodes_per_env,
         )
         total_steps = configuration.get(
             "realized_environment_steps",
@@ -443,6 +537,32 @@ def _write_matrix(
                 realized_environment_steps=configuration["realized_environment_steps"],
             )
         atomic_write_json(path, artifact)
+    completed_cells = []
+    for cell in cells:
+        identity = (cell["environment"], cell["model"], cell["seed"])
+        artifact_path = paths[identity]
+        log_path = artifact_path.with_suffix(".log")
+        atomic_write_bytes(log_path, b"registered test log\n")
+        completed_cells.append(
+            {
+                **cell,
+                "artifact_sha256": sha256_file(artifact_path),
+                "log_path": log_path.relative_to(tmp_path).as_posix(),
+                "log_sha256": sha256_file(log_path),
+            }
+        )
+    atomic_write_json(
+        tmp_path / "completion_index.json",
+        {
+            "schema_version": 1,
+            "status": "complete",
+            "manifest_sha256": manifest_sha256,
+            "planned_cells": len(cells),
+            "completed_cells": len(cells),
+            "cells": completed_cells,
+        },
+    )
+    write_checksum_manifest(tmp_path)
     return manifest_path, manifest, paths
 
 
@@ -459,6 +579,21 @@ def _rewrite_manifest(path: Path, mutate: Callable[[dict[str, Any]], None]) -> N
     value_without_hash.pop("manifest_sha256", None)
     value["manifest_sha256"] = canonical_json_sha256(value_without_hash)
     path.write_text(json.dumps(value, allow_nan=False), encoding="utf-8")
+
+
+def _refresh_integrity(root: Path, paths: dict[tuple[str, str, int], Path]) -> None:
+    completion_path = root / "completion_index.json"
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    for cell in completion["cells"]:
+        identity = (cell["environment"], cell["model"], cell["seed"])
+        cell["artifact_sha256"] = sha256_file(paths[identity])
+    completion_path.write_text(
+        json.dumps(completion, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    checksum_path = root / "checksums.sha256"
+    checksum_path.unlink()
+    write_checksum_manifest(root)
 
 
 def test_iqm_fractional_boundaries() -> None:
@@ -483,8 +618,163 @@ def test_complete_matrix_aggregates_raw_seeds_pairs_curves_and_canonical_json(
     assert result["matrix_manifest_sha256"] == manifest["manifest_sha256"]
     assert result["statistics"]["bootstrap_resamples"] == BOOTSTRAP_RESAMPLES
     assert result["statistical_unit"] == "seed"
+    assert result["raw_integrity"]["completion_index_validated"] is True
+    assert result["raw_integrity"]["checksum_inventory_validated"] is True
     assert output.read_bytes().endswith(b"\n")
     assert json.loads(output.read_text(encoding="utf-8")) == result
+
+
+@pytest.mark.parametrize(
+    ("missing_path", "message"),
+    [
+        ("registration.json", "frozen registration"),
+        ("completion_index.json", "completion index"),
+        ("checksums.sha256", "checksum manifest"),
+    ],
+)
+def test_registered_aggregate_requires_every_raw_integrity_index(
+    tmp_path: Path,
+    missing_path: str,
+    message: str,
+) -> None:
+    manifest_path, _, _ = _write_matrix(tmp_path)
+    (tmp_path / missing_path).unlink()
+
+    with pytest.raises(RegisteredAggregationError, match=message):
+        build_registered_aggregate(manifest_path)
+
+
+def test_registered_aggregate_rejects_missing_or_stale_logs_and_hidden_files(
+    tmp_path: Path,
+) -> None:
+    missing_root = tmp_path / "missing-log"
+    manifest_path, _, paths = _write_matrix(missing_root)
+    next(iter(paths.values())).with_suffix(".log").unlink()
+    with pytest.raises(RegisteredAggregationError, match="log"):
+        build_registered_aggregate(manifest_path)
+
+    stale_root = tmp_path / "stale-log"
+    manifest_path, _, paths = _write_matrix(stale_root)
+    next(iter(paths.values())).with_suffix(".log").write_bytes(b"drifted log\n")
+    with pytest.raises(RegisteredAggregationError, match="log_sha256"):
+        build_registered_aggregate(manifest_path)
+
+    hidden_root = tmp_path / "hidden"
+    manifest_path, _, _ = _write_matrix(hidden_root)
+    (hidden_root / "unchecksummed.bin").write_bytes(b"hidden")
+    with pytest.raises(RegisteredAggregationError, match="checksum inventory differs"):
+        build_registered_aggregate(manifest_path)
+
+
+def test_registered_aggregate_rejects_checksummed_attempt_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest_path, _, _ = _write_matrix(tmp_path)
+    atomic_write_bytes(
+        tmp_path / "cells" / ("orphan.attempt-" + "a" * 32 + ".failed.log"),
+        b"failed child evidence\n",
+    )
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(RegisteredAggregationError, match="canonical matrix evidence"):
+        build_registered_aggregate(manifest_path)
+
+
+def test_registered_aggregate_rejects_noncanonical_completion_bytes(
+    tmp_path: Path,
+) -> None:
+    manifest_path, _, _ = _write_matrix(tmp_path)
+    completion_path = tmp_path / "completion_index.json"
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    completion_path.write_text(
+        json.dumps(completion, allow_nan=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(RegisteredAggregationError, match="completion_index is not canonical JSON"):
+        build_registered_aggregate(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["learner"].update(learning_rate=0.123),
+            "learner drifts",
+        ),
+        (
+            lambda value: value.update(evaluation_episodes_per_env=3),
+            "evaluation episodes drift",
+        ),
+        (
+            lambda value: value["environments"][0].update(total_steps=999_999),
+            "total_steps drifts",
+        ),
+        (
+            lambda value: value.update(comparison_profile="pobax_author_semantics"),
+            "comparison_profile drifts",
+        ),
+        (
+            lambda value: value.update(quick=True),
+            "registration.quick must be false",
+        ),
+    ],
+)
+def test_schema_v2_registration_semantics_are_bound_to_artifacts(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    manifest_path, _, _ = _write_matrix(
+        tmp_path,
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+    )
+    registration_path = tmp_path / "registration.json"
+    registration = json.loads(registration_path.read_text(encoding="utf-8"))
+    mutation(registration)
+    registration_path.write_text(
+        json.dumps(
+            registration,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(RegisteredAggregationError, match=message):
+        build_registered_aggregate(manifest_path)
+
+
+def test_schema_v1_evaluation_registration_is_bound_to_artifacts(
+    tmp_path: Path,
+) -> None:
+    manifest_path, _, _ = _write_matrix(tmp_path)
+    registration_path = tmp_path / "registration.json"
+    registration = json.loads(registration_path.read_text(encoding="utf-8"))
+    registration["evaluation_episodes_per_env"] = 999
+    registration_path.write_text(
+        json.dumps(
+            registration,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "checksums.sha256").unlink()
+    write_checksum_manifest(tmp_path)
+
+    with pytest.raises(RegisteredAggregationError, match="evaluation episodes drift"):
+        build_registered_aggregate(manifest_path)
 
 
 def test_schema_v2_registered_matrix_validates_explicit_step_accounting(
@@ -755,7 +1045,7 @@ def test_manifest_hash_status_schema_and_unknown_fields_fail(tmp_path: Path) -> 
 
     manifest_path, _, _ = _write_matrix(tmp_path / "schema")
     _rewrite_manifest(manifest_path, lambda value: value.__setitem__("schema_version", 2))
-    with pytest.raises(RegisteredAggregationError, match="schema_version"):
+    with pytest.raises(RegisteredAggregationError, match="registration identity"):
         build_registered_aggregate(manifest_path)
 
     manifest_path, _, _ = _write_matrix(tmp_path / "extra")
@@ -914,6 +1204,7 @@ def test_valid_null_prefix_uses_shared_complete_case_suffix(tmp_path: Path) -> N
             path,
             lambda value: value["training_history"][0].__setitem__("mean_recent_return", None),
         )
+    _refresh_integrity(tmp_path, paths)
 
     result = build_registered_aggregate(manifest_path)
 
@@ -943,6 +1234,7 @@ def test_differing_null_prefix_lengths_use_latest_first_available_step(
         paths[("tmaze_10", "arcmind", 11)],
         lambda value: value["training_history"][0].__setitem__("mean_recent_return", None),
     )
+    _refresh_integrity(tmp_path, paths)
 
     result = build_registered_aggregate(manifest_path)
 
@@ -959,6 +1251,7 @@ def test_all_null_curve_fails_without_shared_finite_suffix(tmp_path: Path) -> No
             point["mean_recent_return"] = None
 
     _rewrite_json(paths[("tmaze_10", "gru", 22)], all_null)
+    _refresh_integrity(tmp_path, paths)
     with pytest.raises(RegisteredAggregationError, match="no shared finite"):
         build_registered_aggregate(manifest_path)
 
@@ -987,7 +1280,11 @@ def test_environments_may_have_different_complete_grids_and_budgets(
     tmp_path: Path,
 ) -> None:
     environments = ["tmaze_10", "rocksample_11_11"]
-    manifest_path, _, _ = _write_matrix(tmp_path, environments=environments)
+    manifest_path, _, _ = _write_matrix(
+        tmp_path,
+        environments=environments,
+        evaluation_episodes_per_env=2,
+    )
 
     result = build_registered_aggregate(manifest_path)
 
@@ -1001,7 +1298,7 @@ def test_environments_may_have_different_complete_grids_and_budgets(
         5_000_000,
     ]
     assert contracts["tmaze_10"]["evaluation"]["episodes_per_environment"] == 2
-    assert contracts["rocksample_11_11"]["evaluation"]["episodes_per_environment"] == 1
+    assert contracts["rocksample_11_11"]["evaluation"]["episodes_per_environment"] == 2
     rocksample_groups = [
         group for group in result["groups"] if group["environment"] == "rocksample_11_11"
     ]

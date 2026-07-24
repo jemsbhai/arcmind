@@ -36,6 +36,7 @@ from benchmarks.pobax.ffm_core import (
     FFMPolicyCore,
     match_ffm_hidden_size,
 )
+from benchmarks.pobax.implementation_provenance import gather_implementation_source
 from benchmarks.pobax.policy_core import ArcMindPolicyCore
 from benchmarks.pobax.positional_mlp_core import (
     POPGYM_POSITIONAL_MLP_REFERENCE,
@@ -536,6 +537,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     candidate_id = getattr(args, "candidate_id", None)
     model_family = getattr(args, "model_family", None)
     tuning_aggregate_sha256 = getattr(args, "tuning_aggregate_sha256", None)
+    tuning_completion_index_sha256 = getattr(
+        args,
+        "tuning_completion_index_sha256",
+        None,
+    )
+    tuning_checksum_manifest_sha256 = getattr(
+        args,
+        "tuning_checksum_manifest_sha256",
+        None,
+    )
+    tuning_implementation_source_sha256 = getattr(
+        args,
+        "tuning_implementation_source_sha256",
+        None,
+    )
     if args.registration_schema_version not in {1, 2, 3, 4}:
         raise ValueError("registration_schema_version must be 1, 2, 3, or 4")
     if args.registration_schema_version == 1:
@@ -561,14 +577,26 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if args.registration_schema_version == 4 and args.evidence_tier != "registered_final":
         raise ValueError("schema v4 is reserved for registered_final")
     if args.registration_schema_version == 4:
-        if (
-            not isinstance(tuning_aggregate_sha256, str)
-            or re.fullmatch(r"[0-9a-f]{64}", tuning_aggregate_sha256) is None
-        ):
-            raise ValueError("schema v4 requires a tuning aggregate SHA256")
+        tuning_hashes = {
+            "aggregate": tuning_aggregate_sha256,
+            "completion index": tuning_completion_index_sha256,
+            "checksum manifest": tuning_checksum_manifest_sha256,
+            "implementation source": tuning_implementation_source_sha256,
+        }
+        for label, value in tuning_hashes.items():
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"schema v4 requires a tuning {label} SHA256")
         if args.comparison_profile != "arcmind_shared_comparison":
             raise ValueError("schema v4 requires comparison_profile 'arcmind_shared_comparison'")
-    elif tuning_aggregate_sha256 is not None:
+    elif any(
+        value is not None
+        for value in (
+            tuning_aggregate_sha256,
+            tuning_completion_index_sha256,
+            tuning_checksum_manifest_sha256,
+            tuning_implementation_source_sha256,
+        )
+    ):
         raise ValueError("tuning aggregate identity is supported only by schema v4")
     if args.quick and args.evidence_tier != "smoke":
         raise ValueError("--quick requires --evidence-tier smoke")
@@ -620,6 +648,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             raise ValueError("registered_final requires a frozen matrix manifest SHA256")
         if args.cell_id is None and not args.describe_only:
             raise ValueError("registered_final requires a frozen cell ID")
+    implementation_source = (
+        gather_implementation_source(repository_root)
+        if args.registration_schema_version in {3, 4}
+        else None
+    )
     environment_key = random.PRNGKey(args.seed + 10)
     environment, environment_params = make_environment(
         args.environment,
@@ -752,10 +785,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "candidate_id": candidate_id,
                 "model_family": model_family,
                 "implementation_model": args.model,
+                "implementation_source": implementation_source,
             }
         )
     if args.registration_schema_version == 4:
-        frozen_configuration["tuning_aggregate_sha256"] = tuning_aggregate_sha256
+        frozen_configuration.update(
+            {
+                "tuning_aggregate_sha256": tuning_aggregate_sha256,
+                "tuning_completion_index_sha256": tuning_completion_index_sha256,
+                "tuning_checksum_manifest_sha256": tuning_checksum_manifest_sha256,
+                "tuning_implementation_source_sha256": (tuning_implementation_source_sha256),
+            }
+        )
     if args.registration_schema_version in {2, 3, 4}:
         frozen_configuration.update(
             {
@@ -816,7 +857,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     record: dict[str, object] = {
         "schema_version": (
-            7
+            8
             if args.registration_schema_version == 4
             else 6
             if args.registration_schema_version == 3
@@ -836,6 +877,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "pobax_commit": commit,
             "navix_commit": navix_commit,
             "runtime_contract": installed_runtime,
+            **(
+                {"implementation_source": implementation_source}
+                if implementation_source is not None
+                else {}
+            ),
         },
         "environment": args.environment,
         "model": candidate_id if args.registration_schema_version == 3 else args.model,
@@ -891,10 +937,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "candidate_id": candidate_id,
                 "model_family": model_family,
                 "implementation_model": args.model,
+                "implementation_source_sha256": implementation_source["sha256"],
             }
         )
     if args.registration_schema_version == 4:
-        record["tuning_aggregate_sha256"] = tuning_aggregate_sha256
+        record.update(
+            {
+                "tuning_aggregate_sha256": tuning_aggregate_sha256,
+                "tuning_completion_index_sha256": tuning_completion_index_sha256,
+                "tuning_checksum_manifest_sha256": tuning_checksum_manifest_sha256,
+                "tuning_implementation_source_sha256": (tuning_implementation_source_sha256),
+            }
+        )
     if args.registration_schema_version in {2, 3, 4}:
         record.update(
             {
@@ -965,6 +1019,9 @@ def main() -> None:
     parser.add_argument("--candidate-id")
     parser.add_argument("--model-family")
     parser.add_argument("--tuning-aggregate-sha256")
+    parser.add_argument("--tuning-completion-index-sha256")
+    parser.add_argument("--tuning-checksum-manifest-sha256")
+    parser.add_argument("--tuning-implementation-source-sha256")
     parser.add_argument(
         "--comparison-profile",
         choices=tuple(COMPARISON_PROFILES),

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import benchmarks.pobax.link_upper_reference as linker
+from benchmarks.pobax.implementation_provenance import IMPLEMENTATION_SOURCE_ALGORITHM
 from benchmarks.pobax.link_upper_reference import (
     REGISTERED_TRAIN_STEPS,
     UpperReferenceLinkError,
@@ -65,6 +66,15 @@ OPTIMIZER_METRICS = {
     "value_loss": 0.8,
     "entropy": 0.2,
     "approximate_kl": 0.01,
+}
+_IMPLEMENTATION_SOURCE_UNSIGNED = {
+    "schema_version": 1,
+    "algorithm": IMPLEMENTATION_SOURCE_ALGORITHM,
+    "files": [{"path": "arcmind/__init__.py", "sha256": "a" * 64}],
+}
+IMPLEMENTATION_SOURCE = {
+    **_IMPLEMENTATION_SOURCE_UNSIGNED,
+    "sha256": canonical_json_sha256(_IMPLEMENTATION_SOURCE_UNSIGNED),
 }
 
 
@@ -154,6 +164,8 @@ def _write_matrix(
         ["arcmind"] if matrix_kind == "primary_comparison" else ["memoryless_mlp"]
     )
     selected_provenance = deepcopy(provenance or BASE_PROVENANCE)
+    if schema_version == 4:
+        selected_provenance["implementation_source"] = deepcopy(IMPLEMENTATION_SOURCE)
     default_learner = {
         "num_envs": 2,
         "rollout_steps": 2,
@@ -210,6 +222,29 @@ def _write_matrix(
                     comparison_profile=comparison_profile,
                     total_steps=selected_budgets[environment],
                 )
+                if schema_version == 4:
+                    selection = next(
+                        item
+                        for item in tuning_selection["selections"]
+                        if item["environment"] == environment
+                        and item["implementation_model"] == model
+                    )
+                    configuration.update(
+                        candidate_id=selection["candidate_id"],
+                        model_family=selection["model_family"],
+                        implementation_model=model,
+                        implementation_source=deepcopy(IMPLEMENTATION_SOURCE),
+                        tuning_aggregate_sha256=tuning_selection["aggregate_sha256"],
+                        tuning_completion_index_sha256=tuning_selection[
+                            "source_completion_index_sha256"
+                        ],
+                        tuning_checksum_manifest_sha256=tuning_selection[
+                            "source_checksum_manifest_sha256"
+                        ],
+                        tuning_implementation_source_sha256=tuning_selection[
+                            "source_implementation_sha256"
+                        ],
+                    )
                 configuration_sha256 = canonical_json_sha256(configuration)
                 identity = (environment, model, seed)
                 relative_path = f"cells/{environment}-{model}-{seed}.json"
@@ -240,6 +275,16 @@ def _write_matrix(
                         model_family=selection["model_family"],
                         implementation_model=model,
                         tuning_aggregate_sha256=tuning_selection["aggregate_sha256"],
+                        tuning_completion_index_sha256=tuning_selection[
+                            "source_completion_index_sha256"
+                        ],
+                        tuning_checksum_manifest_sha256=tuning_selection[
+                            "source_checksum_manifest_sha256"
+                        ],
+                        tuning_implementation_source_sha256=tuning_selection[
+                            "source_implementation_sha256"
+                        ],
+                        implementation_source_sha256=IMPLEMENTATION_SOURCE["sha256"],
                     )
                 artifacts[identity] = (root / relative_path, configuration)
     manifest: dict[str, Any] = {
@@ -254,6 +299,7 @@ def _write_matrix(
     }
     if schema_version == 4:
         manifest["tuning_selection"] = tuning_selection
+        manifest["registration_sha256"] = sha256_file(root / "registration.json")
     manifest["manifest_sha256"] = canonical_json_sha256(manifest)
     atomic_write_json(root / "frozen_manifest.json", manifest)
 
@@ -264,8 +310,12 @@ def _write_matrix(
         value = float(seed % 100)
         rows = [[value] * evaluation_episodes for _ in range(2)]
         artifact = {
-            "schema_version": 7 if schema_version == 4 else 5 if schema_version == 2 else 4,
-            "status": f"development_{tier}_not_for_paper",
+            "schema_version": 8 if schema_version == 4 else 5 if schema_version == 2 else 4,
+            "status": (
+                "registered_final_complete"
+                if tier == "registered_final"
+                else f"development_{tier}_not_for_paper"
+            ),
             "matrix_manifest_sha256": manifest["manifest_sha256"],
             "cell_id": registered_cell_id(
                 environment,
@@ -326,6 +376,12 @@ def _write_matrix(
                 model_family=selection["model_family"],
                 implementation_model=model,
                 tuning_aggregate_sha256=tuning_selection["aggregate_sha256"],
+                tuning_completion_index_sha256=tuning_selection["source_completion_index_sha256"],
+                tuning_checksum_manifest_sha256=tuning_selection["source_checksum_manifest_sha256"],
+                tuning_implementation_source_sha256=tuning_selection[
+                    "source_implementation_sha256"
+                ],
+                implementation_source_sha256=IMPLEMENTATION_SOURCE["sha256"],
             )
         atomic_write_json(path, artifact)
 
@@ -404,6 +460,9 @@ def _schema_v4_registered_pair(tmp_path: Path) -> tuple[Path, Path]:
         "aggregate_sha256": "5" * 64,
         "source_registration_sha256": "6" * 64,
         "source_manifest_sha256": "7" * 64,
+        "source_completion_index_sha256": "8" * 64,
+        "source_checksum_manifest_sha256": "9" * 64,
+        "source_implementation_sha256": IMPLEMENTATION_SOURCE["sha256"],
         "selections": [
             {
                 "environment": primary_environment,
@@ -411,6 +470,7 @@ def _schema_v4_registered_pair(tmp_path: Path) -> tuple[Path, Path]:
                 "implementation_model": "arcmind",
                 "candidate_id": "ordered_memory.lr_selected",
                 "learner": arcmind_learner,
+                "implementation_source_sha256": IMPLEMENTATION_SOURCE["sha256"],
             },
             {
                 "environment": primary_environment,
@@ -418,6 +478,7 @@ def _schema_v4_registered_pair(tmp_path: Path) -> tuple[Path, Path]:
                 "implementation_model": "gru",
                 "candidate_id": "recurrent.lr_selected",
                 "learner": gru_learner,
+                "implementation_source_sha256": IMPLEMENTATION_SOURCE["sha256"],
             },
         ],
     }
@@ -476,7 +537,10 @@ def _stub_registered_aggregation(monkeypatch) -> list[Path]:
 def _rewrite_json(path: Path, mutation: Any) -> None:
     value = json.loads(path.read_text(encoding="utf-8"))
     mutation(value)
-    path.write_text(json.dumps(value, allow_nan=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _refresh_checksums(root: Path) -> None:
@@ -570,6 +634,44 @@ def test_registered_schema_v4_primary_links_to_schema_v2_author_upper_reference(
     ] == [("tmaze_10", "arcmind"), ("tmaze_10", "gru")]
 
 
+def test_registered_final_legacy_primary_cannot_bypass_tuning_binding(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "legacy-primary"
+    upper = tmp_path / "legacy-upper"
+    seeds = list(range(10_000, 10_030))
+    budgets = {
+        "tmaze_10": REGISTERED_TRAIN_STEPS["tmaze_10"],
+        "tmaze_10-perfect-memory": REGISTERED_TRAIN_STEPS["tmaze_10-perfect-memory"],
+    }
+    _write_matrix(
+        primary,
+        matrix_kind="primary_comparison",
+        tier="registered_final",
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+        seeds=seeds,
+        environments=["tmaze_10"],
+        models=["arcmind"],
+        evaluation_episodes=128,
+        budgets=budgets,
+    )
+    _write_matrix(
+        upper,
+        matrix_kind="upper_reference",
+        tier="registered_final",
+        schema_version=2,
+        comparison_profile="arcmind_shared_comparison",
+        seeds=seeds,
+        environments=["tmaze_10-perfect-memory"],
+        evaluation_episodes=128,
+        budgets=budgets,
+    )
+
+    with pytest.raises(UpperReferenceLinkError, match="require schema version 4"):
+        build_upper_reference_link(primary, upper)
+
+
 def test_registered_schema_v4_completion_requires_exact_selection_metadata(
     tmp_path: Path,
     monkeypatch,
@@ -599,6 +701,52 @@ def test_registered_schema_v4_pair_requires_equal_evaluation_counts(
     _refresh_checksums(upper)
 
     with pytest.raises(UpperReferenceLinkError, match="evaluation registrations"):
+        build_upper_reference_link(primary, upper)
+
+
+def test_registered_schema_v4_registration_bytes_are_bound_to_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    primary, upper = _schema_v4_registered_pair(tmp_path)
+    _stub_registered_aggregation(monkeypatch)
+    _rewrite_json(
+        primary / "registration.json",
+        lambda value: value.update(evaluation_episodes_per_env=64),
+    )
+    _refresh_checksums(primary)
+
+    with pytest.raises(UpperReferenceLinkError, match="registration SHA256"):
+        build_upper_reference_link(primary, upper)
+
+
+def test_checksums_cannot_authorize_attempt_evidence_inside_raw_root(
+    tmp_path: Path,
+) -> None:
+    primary, upper = _paired_roots(tmp_path)
+    atomic_write_bytes(
+        upper / "cells" / ("orphan.attempt-" + "a" * 32 + ".failed.log"),
+        b"failed child evidence\n",
+    )
+    _refresh_checksums(upper)
+
+    with pytest.raises(UpperReferenceLinkError, match="exactly cover canonical evidence"):
+        build_upper_reference_link(primary, upper)
+
+
+def test_checksums_cannot_authorize_noncanonical_completion_bytes(
+    tmp_path: Path,
+) -> None:
+    primary, upper = _paired_roots(tmp_path)
+    completion_path = upper / "completion_index.json"
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    completion_path.write_text(
+        json.dumps(completion, allow_nan=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _refresh_checksums(upper)
+
+    with pytest.raises(UpperReferenceLinkError, match="completion_index is not canonical JSON"):
         build_upper_reference_link(primary, upper)
 
 
@@ -719,7 +867,7 @@ def test_canonical_manifest_completion_and_checksum_tampering_fail(
         "\n".join(lines[1:]) + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(UpperReferenceLinkError, match="exactly cover"):
+    with pytest.raises(UpperReferenceLinkError, match="checksum inventory differs"):
         build_upper_reference_link(primary, upper)
 
 

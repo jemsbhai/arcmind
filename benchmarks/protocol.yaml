@@ -1,4 +1,4 @@
-protocol_version: 8
+protocol_version: 9
 status: development
 target_venue: ICLR
 cloud_budget_usd: 10
@@ -171,6 +171,7 @@ stages:
       immutable_cell_logs:
         completion_index_path_and_sha256: required
         checksum_inventory_coverage: required
+        checksum_inventory_equality: exact_canonical_files_only
       controlled_structural_learner_fields:
         - num_envs
         - rollout_steps
@@ -198,9 +199,22 @@ stages:
       aggregate_sha256: required
       source_registration_sha256: required
       source_manifest_sha256: required
+      source_completion_index_sha256: required
+      source_checksum_manifest_sha256: required
+      source_implementation_sha256: required
       winner_candidate_identity: exact
       winner_learner: exact
+      winner_implementation_source_sha256: exact
+      final_equivalence:
+        implementation_source_manifest: exact
+        dependency_lock_sha256: exact
+        pobax_commit: exact
+        navix_commit: exact
+        non_device_runtime_contract: exact
+        git_commit: may_differ
       final_seed_overlap_with_tuning: prohibited
+      final_manifest_registration_sha256: required_exact_canonical_file_hash
+      paper_eligible_primary_schema: 4_only
       author_semantics_upper_reference_binding: not_required
     artifact_requirements:
       aggregate_output_location: outside_immutable_raw_matrix
@@ -219,8 +233,30 @@ stages:
       validate_final_training_metrics: true
       fail_training_before_evaluation: true
       canonical_cell_log: successful_child_only
-      failed_attempt_logs: unique_noncanonical_paths
-      failed_partial_artifacts: unique_noncanonical_paths
+      failed_attempt_root: sibling_raw_matrix_dot_attempts
+      failed_attempt_logs: unique_attempt_paths_outside_raw_matrix
+      failed_partial_artifacts: unique_attempt_paths_outside_raw_matrix
+      raw_checksum_inventory: exact_regular_file_inventory
+      raw_root_noncanonical_extras: prohibited_even_when_checksummed
+      registered_aggregate_inputs:
+        registration_json: required_and_canonical
+        completion_index_json: required_validated_and_canonical
+        canonical_cell_logs: required_and_hashed
+        checksums_sha256: required_and_exact
+      schema_v2_registration_to_artifact_binding:
+        learner: exact
+        environment_budget: exact
+        evaluation_episodes: exact
+        comparison_profile: exact
+        quick: must_be_false
+        required_gpu: validated_against_runtime_provenance
+      schema_v1_legacy_registration_to_artifact_binding:
+        evaluation_episodes: exact
+      tuning_required_gpu: validated_against_runtime_provenance
+      registered_aggregate_integrity_hashes:
+        - registration_file_sha256
+        - completion_index_sha256
+        - checksum_manifest_sha256
       parameter_ratio_bounds: [0.9, 1.1]
       upper_reference_link:
         required: true

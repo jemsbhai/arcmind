@@ -11,11 +11,19 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.pobax import run_matrix, run_pilot
+from benchmarks.pobax.implementation_provenance import (
+    IMPLEMENTATION_SOURCE_ALGORITHM,
+    gather_implementation_source,
+)
+from benchmarks.pobax.link_upper_reference import _validate_completion_and_checksums
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
     atomic_write_json,
     canonical_json_sha256,
     sha256_file,
+)
+from benchmarks.pobax.registration_protocol import (
+    validate_final_provenance_against_tuning,
 )
 from benchmarks.pobax.run_matrix import (
     _cell_namespace,
@@ -29,6 +37,15 @@ from benchmarks.pobax.run_pilot import (
     make_environment,
     validate_upper_reference_task_contract,
 )
+
+
+def _implementation_source() -> dict[str, object]:
+    unsigned = {
+        "schema_version": 1,
+        "algorithm": IMPLEMENTATION_SOURCE_ALGORITHM,
+        "files": [{"path": "arcmind/__init__.py", "sha256": "a" * 64}],
+    }
+    return {**unsigned, "sha256": canonical_json_sha256(unsigned)}
 
 
 def _registration() -> dict[str, object]:
@@ -50,6 +67,22 @@ def _registration() -> dict[str, object]:
         "require_gpu": True,
         "quick": False,
     }
+
+
+def test_implementation_source_inventory_covers_shared_and_model_runtime():
+    repository_root = Path(__file__).resolve().parents[3]
+    source = gather_implementation_source(repository_root)
+    paths = {item["path"] for item in source["files"]}
+
+    assert {
+        "arcmind/models/arcmind_model.py",
+        "benchmarks/pobax/run_pilot.py",
+        "benchmarks/pobax/shared_ppo.py",
+        "benchmarks/pobax/policy_core.py",
+        "benchmarks/pobax/mamba_core.py",
+        "benchmarks/pobax/upper_reference_envs.py",
+    }.issubset(paths)
+    assert not any(path.startswith("benchmarks/pobax/tests/") for path in paths)
 
 
 def _registration_v2(
@@ -111,6 +144,7 @@ def _registration_v3() -> dict[str, object]:
 
 
 def _tuning_aggregate() -> dict[str, object]:
+    implementation_source = _implementation_source()
     learners = {
         "ordered_memory": {
             "num_envs": 8,
@@ -141,6 +175,16 @@ def _tuning_aggregate() -> dict[str, object]:
         "not_for_paper": True,
         "registration_sha256": "1" * 64,
         "matrix_manifest_sha256": "2" * 64,
+        "completion_index_sha256": "3" * 64,
+        "checksum_manifest_sha256": "4" * 64,
+        "provenance": {
+            "git": {"commit": "a" * 40, "dirty": False, "diff_sha256": None},
+            "dependency_lock_sha256": "b" * 64,
+            "pobax_commit": "c" * 40,
+            "navix_commit": "d" * 40,
+            "runtime_contract": {"runtime": "test"},
+            "implementation_source": implementation_source,
+        },
         "environments": ["tmaze_10"],
         "seeds": [1103, 2207, 3301, 4409, 5519],
         "integrity_indexes": {
@@ -183,6 +227,7 @@ def _tuning_aggregate() -> dict[str, object]:
                 "model_family": family,
                 "implementation_model": implementation,
                 "learner": learners[family],
+                "implementation_source_sha256": implementation_source["sha256"],
             }
             for family, implementation in (
                 ("ordered_memory", "arcmind"),
@@ -196,6 +241,10 @@ def _registration_v4(tmp_path: Path, monkeypatch) -> tuple[dict[str, object], Pa
     aggregate = _tuning_aggregate()
     raw_matrix = tmp_path / "raw-tuning"
     raw_matrix.mkdir()
+    (raw_matrix / "completion_index.json").write_bytes(b"tuning completion\n")
+    (raw_matrix / "checksums.sha256").write_bytes(b"tuning checksums\n")
+    aggregate["completion_index_sha256"] = sha256_file(raw_matrix / "completion_index.json")
+    aggregate["checksum_manifest_sha256"] = sha256_file(raw_matrix / "checksums.sha256")
     aggregate_path = tmp_path / "tuning-selection.json"
     atomic_write_json(aggregate_path, aggregate)
     monkeypatch.setattr(run_matrix, "_REPOSITORY_ROOT", tmp_path)
@@ -211,6 +260,7 @@ def _registration_v4(tmp_path: Path, monkeypatch) -> tuple[dict[str, object], Pa
             "implementation_model": group["implementation_model"],
             "candidate_id": group["candidate_id"],
             "learner": deepcopy(group["learner"]),
+            "implementation_source_sha256": group["implementation_source_sha256"],
         }
         for group in aggregate["groups"]
     ]
@@ -229,6 +279,11 @@ def _registration_v4(tmp_path: Path, monkeypatch) -> tuple[dict[str, object], Pa
             "aggregate_sha256": sha256_file(aggregate_path),
             "source_registration_sha256": aggregate["registration_sha256"],
             "source_manifest_sha256": aggregate["matrix_manifest_sha256"],
+            "source_completion_index_sha256": sha256_file(raw_matrix / "completion_index.json"),
+            "source_checksum_manifest_sha256": sha256_file(raw_matrix / "checksums.sha256"),
+            "source_implementation_sha256": aggregate["provenance"]["implementation_source"][
+                "sha256"
+            ],
             "selections": selections,
         },
         "evaluation_episodes_per_env": 128,
@@ -573,6 +628,13 @@ def _drift_selected_learner(registration):
     registration["tuning_selection"]["selections"][0]["learner"]["learning_rate"] = 0.0005
 
 
+def _refresh_mutated_tuning_log(registration, tmp_path):
+    raw_root = tmp_path / registration["tuning_selection"]["raw_matrix_path"]
+    (raw_root / "mutated.log").write_bytes(b"mutated tuning log\n")
+    (raw_root / "completion_index.json").write_bytes(b"refreshed completion\n")
+    (raw_root / "checksums.sha256").write_bytes(b"refreshed checksums\n")
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -606,6 +668,91 @@ def test_schema_v4_registered_final_binding_fails_closed(
 
     with pytest.raises(ValueError, match=message):
         _load_registration(path)
+
+
+def test_schema_v4_binding_rejects_refreshed_indexes_after_log_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    registration, path = _registration_v4(tmp_path, monkeypatch)
+    _refresh_mutated_tuning_log(registration, tmp_path)
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_completion_index_sha256"):
+        _load_registration(path)
+
+
+@pytest.mark.parametrize(
+    ("filename", "message"),
+    [
+        ("completion_index.json", "source_completion_index_sha256"),
+        ("checksums.sha256", "source_checksum_manifest_sha256"),
+    ],
+)
+def test_schema_v4_binding_freezes_tuning_integrity_file_bytes(
+    tmp_path,
+    monkeypatch,
+    filename,
+    message,
+):
+    registration, path = _registration_v4(tmp_path, monkeypatch)
+    source = tmp_path / registration["tuning_selection"]["raw_matrix_path"] / filename
+    source.write_bytes(source.read_bytes() + b"drift")
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _load_registration(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dependency_lock_sha256", "0" * 64),
+        ("pobax_commit", "0" * 40),
+        ("navix_commit", "0" * 40),
+        ("runtime_contract", {"runtime": "drifted"}),
+    ],
+)
+def test_final_provenance_must_match_tuning_provenance(field, value):
+    tuning = _tuning_aggregate()["provenance"]
+    final = deepcopy(tuning)
+    final["git"]["commit"] = "f" * 40
+    final[field] = value
+    binding = {"source_implementation_sha256": tuning["implementation_source"]["sha256"]}
+
+    with pytest.raises(ValueError, match="final provenance drifts"):
+        validate_final_provenance_against_tuning(
+            binding=binding,
+            tuning_provenance=tuning,
+            final_provenance=final,
+        )
+
+
+def test_final_provenance_allows_git_only_drift_but_rejects_implementation_drift():
+    tuning = _tuning_aggregate()["provenance"]
+    final = deepcopy(tuning)
+    final["git"]["commit"] = "f" * 40
+    binding = {"source_implementation_sha256": tuning["implementation_source"]["sha256"]}
+
+    validate_final_provenance_against_tuning(
+        binding=binding,
+        tuning_provenance=tuning,
+        final_provenance=final,
+    )
+
+    unsigned = deepcopy(final["implementation_source"])
+    unsigned["files"][0]["sha256"] = "0" * 64
+    unsigned.pop("sha256")
+    final["implementation_source"] = {
+        **unsigned,
+        "sha256": canonical_json_sha256(unsigned),
+    }
+    with pytest.raises(ValueError, match="implementation source drifts"):
+        validate_final_provenance_against_tuning(
+            binding=binding,
+            tuning_provenance=tuning,
+            final_provenance=final,
+        )
 
 
 def test_development_tuning_registration_requires_published_selection_contract(
@@ -1095,8 +1242,9 @@ def test_failed_attempt_log_is_never_certified_by_later_success(
         output_root / manifest["cells"][0]["artifact_path"]
     ).with_suffix(".log")
     assert not canonical_log_before_success.exists()
-    failed_logs = list(output_root.rglob("*.failed.log"))
-    failed_artifacts = list(output_root.rglob("*.failed.json"))
+    attempt_root = output_root.with_name(f"{output_root.name}.attempts")
+    failed_logs = list(attempt_root.rglob("*.failed.log"))
+    failed_artifacts = list(attempt_root.rglob("*.failed.json"))
     assert len(failed_logs) == 1
     assert failed_logs[0].read_bytes() == b"failed attempt\n"
     assert len(failed_artifacts) == 1
@@ -1105,8 +1253,8 @@ def test_failed_attempt_log_is_never_certified_by_later_success(
         execute_matrix(registration_path, output_root)
 
     assert not canonical_log_before_success.exists()
-    failed_logs = sorted(output_root.rglob("*.failed.log"))
-    failed_artifacts = sorted(output_root.rglob("*.failed.json"))
+    failed_logs = sorted(attempt_root.rglob("*.failed.log"))
+    failed_artifacts = sorted(attempt_root.rglob("*.failed.json"))
     assert len(failed_logs) == 2
     assert {path.read_bytes() for path in failed_logs} == {
         b"failed attempt\n",
@@ -1124,6 +1272,15 @@ def test_failed_attempt_log_is_never_certified_by_later_success(
     assert resumed == completion
     assert len(attempts) == 3
     assert canonical_log.read_bytes() == b"successful attempt\n"
+    assert not list(output_root.rglob("*.attempt-*"))
+    link_cells = {
+        (cell["environment"], cell["model"], cell["seed"]): {
+            **cell,
+            "resolved_artifact_path": output_root / cell["artifact_path"],
+        }
+        for cell in manifest["cells"]
+    }
+    _validate_completion_and_checksums(output_root, manifest, link_cells)
 
 
 def test_environment_horizon_and_gamma_uses_source_contract():

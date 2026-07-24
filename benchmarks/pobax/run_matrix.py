@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from benchmarks.pobax.registration_protocol import (
     registration_fields,
     validate_comparison_profile,
     validate_development_tuning_contract,
+    validate_final_provenance_against_tuning,
     validate_final_selection_against_aggregate,
 )
 from benchmarks.pobax.run_pilot import (
@@ -64,7 +66,7 @@ def _bound_repository_path(relative_path: str, *, field: str) -> Path:
 
 def _validate_final_tuning_selection(
     registration: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     binding = normalize_final_selection_binding(registration["tuning_selection"])
     aggregate_path = _bound_repository_path(
         binding["aggregate_path"],
@@ -80,6 +82,17 @@ def _validate_final_tuning_selection(
         binding["raw_matrix_path"],
         field="tuning_selection.raw_matrix_path",
     )
+    for filename, binding_field in (
+        ("completion_index.json", "source_completion_index_sha256"),
+        ("checksums.sha256", "source_checksum_manifest_sha256"),
+    ):
+        source_path = raw_matrix_path / filename
+        try:
+            source_hash = sha256_file(source_path)
+        except OSError as error:
+            raise ValueError(f"cannot read tuning selection source: {source_path}") from error
+        if source_hash != binding[binding_field]:
+            raise ValueError(f"tuning_selection.{binding_field} does not match source bytes")
     rebuilt = build_development_aggregate(raw_matrix_path)
     aggregate_bytes = aggregate_path.read_bytes()
     if aggregate_bytes != canonical_json_bytes(rebuilt) + b"\n":
@@ -98,7 +111,7 @@ def _validate_final_tuning_selection(
         environments=[item["id"] for item in registration["environments"]],
         final_seeds=registration["seeds"],
     )
-    return binding
+    return binding, rebuilt
 
 
 def _load_registration(path: Path) -> dict[str, Any]:
@@ -185,7 +198,7 @@ def _load_registration(path: Path) -> dict[str, Any]:
             )
 
     final_selection = (
-        _validate_final_tuning_selection(registration) if schema_version == 4 else None
+        _validate_final_tuning_selection(registration)[0] if schema_version == 4 else None
     )
     learners = (
         [
@@ -266,6 +279,9 @@ def _cell_namespace(
     candidate_id: str | None = None
     model_family: str | None = None
     tuning_aggregate_sha256: str | None = None
+    tuning_completion_index_sha256: str | None = None
+    tuning_checksum_manifest_sha256: str | None = None
+    tuning_implementation_source_sha256: str | None = None
     implementation_model = model
     if registration["schema_version"] == 3:
         candidate = next(
@@ -302,6 +318,9 @@ def _cell_namespace(
         model_family = selection["model_family"]
         learner = selection["learner"]
         tuning_aggregate_sha256 = binding["aggregate_sha256"]
+        tuning_completion_index_sha256 = binding["source_completion_index_sha256"]
+        tuning_checksum_manifest_sha256 = binding["source_checksum_manifest_sha256"]
+        tuning_implementation_source_sha256 = binding["source_implementation_sha256"]
     else:
         learner = registration["learner"]
     return Namespace(
@@ -310,6 +329,9 @@ def _cell_namespace(
         candidate_id=candidate_id,
         model_family=model_family,
         tuning_aggregate_sha256=tuning_aggregate_sha256,
+        tuning_completion_index_sha256=tuning_completion_index_sha256,
+        tuning_checksum_manifest_sha256=tuning_checksum_manifest_sha256,
+        tuning_implementation_source_sha256=tuning_implementation_source_sha256,
         seed=seed,
         total_steps=environment["total_steps"],
         num_envs=learner["num_envs"],
@@ -384,6 +406,16 @@ def _command_for_cell(args: Namespace) -> list[str]:
         command.extend(["--model-family", args.model_family])
     if getattr(args, "tuning_aggregate_sha256", None) is not None:
         command.extend(["--tuning-aggregate-sha256", args.tuning_aggregate_sha256])
+        command.extend(
+            [
+                "--tuning-completion-index-sha256",
+                args.tuning_completion_index_sha256,
+                "--tuning-checksum-manifest-sha256",
+                args.tuning_checksum_manifest_sha256,
+                "--tuning-implementation-source-sha256",
+                args.tuning_implementation_source_sha256,
+            ]
+        )
     if args.require_gpu:
         command.append("--require-gpu")
     if args.quick:
@@ -407,7 +439,7 @@ def _load_matching_artifact(
     if not path.exists():
         return None
     artifact = json.loads(path.read_text(encoding="utf-8"))
-    expected_artifact_schema = {1: 4, 2: 5, 3: 6, 4: 7}.get(registration_schema_version)
+    expected_artifact_schema = {1: 4, 2: 5, 3: 6, 4: 8}.get(registration_schema_version)
     if artifact.get("schema_version") != expected_artifact_schema:
         raise ExistingArtifactMismatchError(f"existing cell has the wrong schema: {path}")
     expected = {
@@ -444,6 +476,8 @@ def _load_matching_artifact(
             configuration.get("model") != model
             or configuration.get("candidate_id") != model
             or {field: artifact.get(field) for field in candidate_identity} != candidate_identity
+            or artifact.get("implementation_source_sha256")
+            != configuration.get("implementation_source", {}).get("sha256")
         ):
             raise ExistingArtifactMismatchError(
                 f"existing cell candidate identity does not match its configuration: {path}"
@@ -457,6 +491,14 @@ def _load_matching_artifact(
             or artifact.get("implementation_model") != model
             or artifact.get("tuning_aggregate_sha256")
             != configuration.get("tuning_aggregate_sha256")
+            or artifact.get("tuning_completion_index_sha256")
+            != configuration.get("tuning_completion_index_sha256")
+            or artifact.get("tuning_checksum_manifest_sha256")
+            != configuration.get("tuning_checksum_manifest_sha256")
+            or artifact.get("tuning_implementation_source_sha256")
+            != configuration.get("tuning_implementation_source_sha256")
+            or artifact.get("implementation_source_sha256")
+            != configuration.get("implementation_source", {}).get("sha256")
         ):
             raise ExistingArtifactMismatchError(
                 f"existing cell final-selection identity does not match its configuration: {path}"
@@ -466,21 +508,44 @@ def _load_matching_artifact(
 
 def _preserve_failed_attempt(
     artifact_path: Path,
+    output_root: Path,
     stdout: bytes,
     *,
     label: str,
 ) -> Path:
     attempt_id = uuid.uuid4().hex
-    failed_log_path = artifact_path.with_name(
+    relative_artifact = artifact_path.relative_to(output_root)
+    attempt_directory = output_root.with_name(f"{output_root.name}.attempts")
+    attempt_artifact = attempt_directory / relative_artifact
+    failed_log_path = attempt_artifact.with_name(
         f"{artifact_path.stem}.attempt-{attempt_id}.{label}.log"
     )
     atomic_write_bytes(failed_log_path, stdout)
     if artifact_path.exists():
-        failed_artifact_path = artifact_path.with_name(
+        failed_artifact_path = attempt_artifact.with_name(
             f"{artifact_path.stem}.attempt-{attempt_id}.{label}.json"
         )
+        failed_artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.replace(failed_artifact_path)
     return failed_log_path
+
+
+def _preserve_orphaned_file(
+    path: Path,
+    *,
+    artifact_path: Path,
+    output_root: Path,
+) -> Path:
+    attempt_id = uuid.uuid4().hex
+    relative_artifact = artifact_path.relative_to(output_root)
+    attempt_directory = output_root.with_name(f"{output_root.name}.attempts")
+    attempt_artifact = attempt_directory / relative_artifact
+    destination = attempt_artifact.with_name(
+        f"{artifact_path.stem}.attempt-{attempt_id}.orphaned{path.suffix}"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    path.replace(destination)
+    return destination
 
 
 def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]:
@@ -523,6 +588,13 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 "model_family": selection["model_family"],
                 "implementation_model": selection["implementation_model"],
                 "tuning_aggregate_sha256": final_selection["aggregate_sha256"],
+                "tuning_completion_index_sha256": final_selection["source_completion_index_sha256"],
+                "tuning_checksum_manifest_sha256": final_selection[
+                    "source_checksum_manifest_sha256"
+                ],
+                "tuning_implementation_source_sha256": final_selection[
+                    "source_implementation_sha256"
+                ],
             }
             for selection in final_selection["selections"]
         }
@@ -551,6 +623,11 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                         "pobax_commit": configuration["pobax_commit"],
                         "navix_commit": configuration["navix_commit"],
                         "runtime_contract": configuration["runtime_contract"],
+                        **(
+                            {"implementation_source": configuration["implementation_source"]}
+                            if registration["schema_version"] in {3, 4}
+                            else {}
+                        ),
                     }
                 else:
                     current_provenance = {
@@ -561,6 +638,15 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                         "pobax_commit": description["configuration"]["pobax_commit"],
                         "navix_commit": description["configuration"]["navix_commit"],
                         "runtime_contract": description["configuration"]["runtime_contract"],
+                        **(
+                            {
+                                "implementation_source": description["configuration"][
+                                    "implementation_source"
+                                ]
+                            }
+                            if registration["schema_version"] in {3, 4}
+                            else {}
+                        ),
                     }
                     if current_provenance != provenance:
                         raise RuntimeError("source provenance changed while describing the matrix")
@@ -586,11 +672,21 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 }
                 if registration["schema_version"] in {3, 4}:
                     cell.update(candidate_index[model])
+                    cell["implementation_source_sha256"] = description["configuration"][
+                        "implementation_source"
+                    ]["sha256"]
                 cells.append(cell)
 
     validate_unique_cell_ids(cell["cell_id"] for cell in cells)
     if provenance is None:
         raise AssertionError("matrix description produced no provenance")
+    if registration["schema_version"] == 4:
+        validated_binding, tuning_aggregate = _validate_final_tuning_selection(registration)
+        validate_final_provenance_against_tuning(
+            binding=validated_binding,
+            tuning_provenance=tuning_aggregate["provenance"],
+            final_provenance=provenance,
+        )
     manifest_without_hash = {
         "schema_version": registration["schema_version"],
         "status": "frozen",
@@ -605,6 +701,9 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         manifest_without_hash["candidate_families"] = registration["candidate_families"]
     if registration["schema_version"] == 4:
         manifest_without_hash["tuning_selection"] = registration["tuning_selection"]
+        manifest_without_hash["registration_sha256"] = hashlib.sha256(
+            canonical_json_bytes(registration) + b"\n"
+        ).hexdigest()
     manifest_sha256 = canonical_json_sha256(manifest_without_hash)
     manifest = {
         **manifest_without_hash,
@@ -629,17 +728,17 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 artifact_path = output_root / cell["artifact_path"]
                 log_path = artifact_path.with_suffix(".log")
                 if artifact_path.exists() and not log_path.exists():
-                    attempt_id = uuid.uuid4().hex
-                    orphaned_artifact_path = artifact_path.with_name(
-                        f"{artifact_path.stem}.attempt-{attempt_id}.orphaned.json"
+                    _preserve_orphaned_file(
+                        artifact_path,
+                        artifact_path=artifact_path,
+                        output_root=output_root,
                     )
-                    artifact_path.replace(orphaned_artifact_path)
                 if log_path.exists() and not artifact_path.exists():
-                    attempt_id = uuid.uuid4().hex
-                    orphaned_log_path = artifact_path.with_name(
-                        f"{artifact_path.stem}.attempt-{attempt_id}.orphaned.log"
+                    _preserve_orphaned_file(
+                        log_path,
+                        artifact_path=artifact_path,
+                        output_root=output_root,
                     )
-                    log_path.replace(orphaned_log_path)
                 artifact = _load_matching_artifact(
                     artifact_path,
                     expected_status=expected_status,
@@ -672,6 +771,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     if process.returncode != 0:
                         failed_log_path = _preserve_failed_attempt(
                             artifact_path,
+                            output_root,
                             process.stdout,
                             label="failed",
                         )
@@ -701,6 +801,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     ) as error:
                         failed_log_path = _preserve_failed_attempt(
                             artifact_path,
+                            output_root,
                             process.stdout,
                             label="failed",
                         )
@@ -711,6 +812,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     if artifact is None:
                         failed_log_path = _preserve_failed_attempt(
                             artifact_path,
+                            output_root,
                             process.stdout,
                             label="failed",
                         )

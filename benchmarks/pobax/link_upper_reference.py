@@ -17,10 +17,13 @@ from typing import Any
 from benchmarks.pobax.aggregate_development import build_development_aggregate
 from benchmarks.pobax.aggregate_registered import build_registered_aggregate
 from benchmarks.pobax.registered_artifacts import (
+    ArtifactChecksumError,
     atomic_write_json,
+    canonical_json_bytes,
     canonical_json_sha256,
     registered_cell_id,
     sha256_file,
+    validate_checksum_manifest,
 )
 from benchmarks.pobax.registration_protocol import (
     normalize_final_selection_binding,
@@ -47,7 +50,6 @@ REGISTERED_TRAIN_STEPS = {
 }
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-_CHECKSUM_LINE_PATTERN = re.compile(r"([0-9a-f]{64})  (.+)")
 _MANIFEST_KEYS = {
     "schema_version",
     "status",
@@ -59,7 +61,7 @@ _MANIFEST_KEYS = {
     "provenance",
     "cells",
 }
-_MANIFEST_KEYS_V4 = _MANIFEST_KEYS | {"tuning_selection"}
+_MANIFEST_KEYS_V4 = _MANIFEST_KEYS | {"registration_sha256", "tuning_selection"}
 _CELL_KEYS = {
     "cell_id",
     "environment",
@@ -73,6 +75,10 @@ _CELL_KEYS_V4 = _CELL_KEYS | {
     "model_family",
     "implementation_model",
     "tuning_aggregate_sha256",
+    "tuning_completion_index_sha256",
+    "tuning_checksum_manifest_sha256",
+    "tuning_implementation_source_sha256",
+    "implementation_source_sha256",
 }
 _COMPLETION_KEYS = {
     "schema_version",
@@ -253,6 +259,11 @@ def _validate_registration(root: Path) -> tuple[dict[str, Any], str]:
         raise UpperReferenceLinkError("registration.seeds must be unique non-negative integers")
     if tier == "registered_final" and len(seeds) != 30:
         raise UpperReferenceLinkError("registered_final requires exactly 30 paired seeds")
+    if tier == "registered_final" and matrix_kind == "primary_comparison" and schema_version != 4:
+        raise UpperReferenceLinkError(
+            "registered-final primary comparisons require schema version 4 "
+            "and a frozen tuning selection"
+        )
     try:
         if schema_version == 4:
             if (
@@ -367,6 +378,15 @@ def _validate_manifest(
         raise UpperReferenceLinkError("frozen_manifest identity drifts from registration")
     if schema_version == 4 and raw["tuning_selection"] != registration["tuning_selection"]:
         raise UpperReferenceLinkError("frozen_manifest tuning_selection drifts from registration")
+    if schema_version == 4:
+        registration_sha256 = _sha256(
+            raw["registration_sha256"],
+            field="frozen_manifest.registration_sha256",
+        )
+        if registration_sha256 != sha256_file(root / "registration.json"):
+            raise UpperReferenceLinkError(
+                "frozen_manifest registration SHA256 drifts from registration bytes"
+            )
 
     models = registration["models"]
     environments = expected_identity["environments"]
@@ -423,6 +443,14 @@ def _validate_manifest(
                 or cell["implementation_model"] != identity[1]
                 or cell["tuning_aggregate_sha256"]
                 != registration["tuning_selection"]["aggregate_sha256"]
+                or cell["tuning_completion_index_sha256"]
+                != registration["tuning_selection"]["source_completion_index_sha256"]
+                or cell["tuning_checksum_manifest_sha256"]
+                != registration["tuning_selection"]["source_checksum_manifest_sha256"]
+                or cell["tuning_implementation_source_sha256"]
+                != registration["tuning_selection"]["source_implementation_sha256"]
+                or cell["implementation_source_sha256"]
+                != registration["tuning_selection"]["source_implementation_sha256"]
             ):
                 raise UpperReferenceLinkError(
                     f"{field} tuning-selection identity drifts from registration"
@@ -458,6 +486,9 @@ def _validate_completion_and_checksums(
         or len(raw_index["cells"]) != expected_count
     ):
         raise UpperReferenceLinkError("completion_index is incomplete or belongs to another matrix")
+    completion_path = root / "completion_index.json"
+    if completion_path.read_bytes() != canonical_json_bytes(raw_index) + b"\n":
+        raise UpperReferenceLinkError("completion_index is not canonical JSON")
 
     indexed: set[tuple[str, str, int]] = set()
     expected_checksum_paths = {
@@ -503,30 +534,16 @@ def _validate_completion_and_checksums(
     if indexed != set(cells):
         raise UpperReferenceLinkError("completion_index is missing frozen cells")
 
-    checksum_path = root / "checksums.sha256"
     try:
-        lines = checksum_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as error:
-        raise UpperReferenceLinkError(f"cannot read checksum manifest: {error}") from error
-    parsed_paths: list[str] = []
-    for index, line in enumerate(lines):
-        match = _CHECKSUM_LINE_PATTERN.fullmatch(line)
-        if match is None:
-            raise UpperReferenceLinkError(f"invalid checksum line {index + 1}")
-        relative, path = _safe_relative_path(
-            root,
-            match.group(2),
-            field=f"checksums[{index}].path",
-        )
-        if relative == "checksums.sha256" or relative in parsed_paths:
-            raise UpperReferenceLinkError("checksum manifest has a duplicate or self entry")
-        if sha256_file(path) != match.group(1):
-            raise UpperReferenceLinkError(f"checksum mismatch for {relative}")
-        parsed_paths.append(relative)
-    expected_order = sorted(expected_checksum_paths, key=lambda item: item.encode("utf-8"))
-    if parsed_paths != expected_order:
+        checksum_entries = validate_checksum_manifest(root)
+    except ArtifactChecksumError as error:
+        raise UpperReferenceLinkError(str(error)) from error
+    parsed_paths = {relative for relative, _ in checksum_entries}
+    if parsed_paths != expected_checksum_paths:
         raise UpperReferenceLinkError(
-            "checksum manifest must exactly cover the frozen raw matrix in canonical order"
+            "checksum manifest must exactly cover canonical evidence: "
+            f"missing={sorted(expected_checksum_paths - parsed_paths)}, "
+            f"extra={sorted(parsed_paths - expected_checksum_paths)}"
         )
 
 
@@ -894,11 +911,13 @@ def build_upper_reference_link(
             "registration_sha256": primary_registration_sha256,
             "matrix_manifest_sha256": primary_manifest["manifest_sha256"],
             "provenance": dict(primary_provenance),
+            "raw_integrity": primary_aggregate.get("raw_integrity"),
         },
         "upper_reference": {
             "registration_sha256": upper_registration_sha256,
             "matrix_manifest_sha256": upper_manifest["manifest_sha256"],
             "provenance": dict(upper_provenance),
+            "raw_integrity": upper_aggregate.get("raw_integrity"),
         },
         "source_pairing": {
             "git_commit": primary_provenance["git"]["commit"],

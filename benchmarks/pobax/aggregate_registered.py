@@ -49,19 +49,25 @@ from typing import Any
 import numpy as np
 
 from benchmarks.pobax.aggregate_development import build_development_aggregate
+from benchmarks.pobax.implementation_provenance import normalize_implementation_source
 from benchmarks.pobax.registered_artifacts import (
+    ArtifactChecksumError,
     atomic_write_json,
     canonical_json_bytes,
     canonical_json_sha256,
     registered_cell_id,
     sha256_file,
+    validate_checksum_manifest,
 )
 from benchmarks.pobax.registration_protocol import (
     LEARNER_FIELDS_V2,
     normalize_final_selection_binding,
     normalize_learner,
     realized_environment_steps,
+    registration_fields,
     step_budget_mode,
+    validate_comparison_profile,
+    validate_final_provenance_against_tuning,
     validate_final_selection_against_aggregate,
 )
 from benchmarks.pobax.upper_reference_registry import (
@@ -86,7 +92,7 @@ _MANIFEST_KEYS = {
     "provenance",
     "cells",
 }
-_MANIFEST_KEYS_V4 = _MANIFEST_KEYS | {"tuning_selection"}
+_MANIFEST_KEYS_V4 = _MANIFEST_KEYS | {"registration_sha256", "tuning_selection"}
 _CELL_MANIFEST_KEYS = {
     "cell_id",
     "environment",
@@ -100,6 +106,28 @@ _CELL_MANIFEST_KEYS_V4 = _CELL_MANIFEST_KEYS | {
     "model_family",
     "implementation_model",
     "tuning_aggregate_sha256",
+    "tuning_completion_index_sha256",
+    "tuning_checksum_manifest_sha256",
+    "tuning_implementation_source_sha256",
+    "implementation_source_sha256",
+}
+_COMPLETION_KEYS = {
+    "schema_version",
+    "status",
+    "manifest_sha256",
+    "planned_cells",
+    "completed_cells",
+    "cells",
+}
+_COMPLETED_CELL_KEYS = _CELL_MANIFEST_KEYS | {
+    "artifact_sha256",
+    "log_path",
+    "log_sha256",
+}
+_COMPLETED_CELL_KEYS_V4 = _CELL_MANIFEST_KEYS_V4 | {
+    "artifact_sha256",
+    "log_path",
+    "log_sha256",
 }
 _PROVENANCE_KEYS = {
     "git",
@@ -108,6 +136,7 @@ _PROVENANCE_KEYS = {
     "navix_commit",
     "runtime_contract",
 }
+_PROVENANCE_KEYS_WITH_IMPLEMENTATION = _PROVENANCE_KEYS | {"implementation_source"}
 _GIT_KEYS = {"commit", "dirty", "diff_sha256"}
 _RUNTIME_KEYS = {
     "python",
@@ -311,9 +340,22 @@ def _validate_runtime_contract(value: Any, *, field: str) -> dict[str, Any]:
     }
 
 
-def _validate_provenance(value: Any, *, field: str) -> dict[str, Any]:
+def _validate_provenance(
+    value: Any,
+    *,
+    field: str,
+    require_implementation_source: bool,
+) -> dict[str, Any]:
     provenance = _mapping(value, field=field)
-    _exact_keys(provenance, _PROVENANCE_KEYS, field=field)
+    _exact_keys(
+        provenance,
+        (
+            _PROVENANCE_KEYS_WITH_IMPLEMENTATION
+            if require_implementation_source
+            else _PROVENANCE_KEYS
+        ),
+        field=field,
+    )
     git = _mapping(provenance["git"], field=f"{field}.git")
     _exact_keys(git, _GIT_KEYS, field=f"{field}.git")
     commit = _commit(git["commit"], field=f"{field}.git.commit")
@@ -327,7 +369,7 @@ def _validate_provenance(value: Any, *, field: str) -> dict[str, Any]:
         provenance["runtime_contract"],
         field=f"{field}.runtime_contract",
     )
-    return {
+    normalized = {
         "git": {"commit": commit, "dirty": False, "diff_sha256": None},
         "dependency_lock_sha256": _sha256(
             provenance["dependency_lock_sha256"],
@@ -337,6 +379,14 @@ def _validate_provenance(value: Any, *, field: str) -> dict[str, Any]:
         "navix_commit": _commit(provenance["navix_commit"], field=f"{field}.navix_commit"),
         "runtime_contract": normalized_runtime,
     }
+    if require_implementation_source:
+        try:
+            normalized["implementation_source"] = normalize_implementation_source(
+                provenance["implementation_source"]
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+    return normalized
 
 
 def _validate_frozen_configuration(
@@ -391,6 +441,10 @@ def _validate_frozen_configuration(
             "model_family",
             "implementation_model",
             "tuning_aggregate_sha256",
+            "tuning_completion_index_sha256",
+            "tuning_checksum_manifest_sha256",
+            "tuning_implementation_source_sha256",
+            "implementation_source",
         ):
             if name not in configuration:
                 raise RegisteredAggregationError(f"{field} is missing {name}")
@@ -399,9 +453,25 @@ def _validate_frozen_configuration(
             or configuration["model_family"] != selection["model_family"]
             or configuration["implementation_model"] != identity[1]
             or configuration["tuning_aggregate_sha256"] != selection["tuning_aggregate_sha256"]
+            or configuration["tuning_completion_index_sha256"]
+            != selection["tuning_completion_index_sha256"]
+            or configuration["tuning_checksum_manifest_sha256"]
+            != selection["tuning_checksum_manifest_sha256"]
+            or configuration["tuning_implementation_source_sha256"]
+            != selection["tuning_implementation_source_sha256"]
         ):
             raise RegisteredAggregationError(
                 f"{field} tuning-selection identity drifts from the manifest"
+            )
+        try:
+            implementation_source = normalize_implementation_source(
+                configuration["implementation_source"]
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+        if implementation_source["sha256"] != selection["implementation_source_sha256"]:
+            raise RegisteredAggregationError(
+                f"{field} implementation source drifts from the manifest"
             )
     elif selection is not None:
         raise RegisteredAggregationError(f"{field} has an unexpected tuning selection")
@@ -565,15 +635,16 @@ def _validate_frozen_configuration(
             field=f"{field}.runtime_contract",
         ),
     }
-    expected_sources = {
-        key: provenance[key]
-        for key in (
-            "dependency_lock_sha256",
-            "pobax_commit",
-            "navix_commit",
-            "runtime_contract",
-        )
-    }
+    source_fields = [
+        "dependency_lock_sha256",
+        "pobax_commit",
+        "navix_commit",
+        "runtime_contract",
+    ]
+    if configuration_schema == 4:
+        configured_sources["implementation_source"] = implementation_source
+        source_fields.append("implementation_source")
+    expected_sources = {key: provenance[key] for key in source_fields}
     if configured_sources != expected_sources:
         raise RegisteredAggregationError(f"{field} source provenance does not match the manifest")
     return realized_steps, evaluation_episodes, evaluation_horizon
@@ -855,6 +926,7 @@ def _validate_manifest_tuning_selection(
     models: tuple[str, ...],
     environments: tuple[str, ...],
     final_seeds: tuple[int, ...],
+    final_provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     try:
         binding = normalize_final_selection_binding(value)
@@ -878,6 +950,21 @@ def _validate_manifest_tuning_selection(
         binding["raw_matrix_path"],
         field="manifest.tuning_selection.raw_matrix_path",
     )
+    for filename, binding_field in (
+        ("completion_index.json", "source_completion_index_sha256"),
+        ("checksums.sha256", "source_checksum_manifest_sha256"),
+    ):
+        source_path = raw_matrix_path / filename
+        try:
+            source_hash = sha256_file(source_path)
+        except OSError as error:
+            raise RegisteredAggregationError(
+                f"cannot read bound tuning source: {source_path}"
+            ) from error
+        if source_hash != binding[binding_field]:
+            raise RegisteredAggregationError(
+                f"manifest tuning {binding_field} does not match source bytes"
+            )
     try:
         rebuilt = build_development_aggregate(raw_matrix_path)
         aggregate_bytes = aggregate_path.read_bytes()
@@ -901,6 +988,11 @@ def _validate_manifest_tuning_selection(
             models=models,
             environments=environments,
             final_seeds=final_seeds,
+        )
+        validate_final_provenance_against_tuning(
+            binding=binding,
+            tuning_provenance=rebuilt["provenance"],
+            final_provenance=final_provenance,
         )
     except ValueError as error:
         raise RegisteredAggregationError(str(error)) from error
@@ -965,17 +1057,30 @@ def _validate_manifest(
         )
     if schema_version == 4 and matrix_kind != "primary_comparison":
         raise RegisteredAggregationError("schema-v4 manifest must be a primary comparison")
+    provenance = _validate_provenance(
+        manifest["provenance"],
+        field="manifest.provenance",
+        require_implementation_source=schema_version == 4,
+    )
     tuning_selection = (
         _validate_manifest_tuning_selection(
             manifest["tuning_selection"],
             models=models,
             environments=environments,
             final_seeds=seeds,
+            final_provenance=provenance,
         )
         if schema_version == 4
         else None
     )
-    provenance = _validate_provenance(manifest["provenance"], field="manifest.provenance")
+    registration_sha256 = (
+        _sha256(
+            manifest["registration_sha256"],
+            field="manifest.registration_sha256",
+        )
+        if schema_version == 4
+        else None
+    )
     cells = manifest["cells"]
     if not isinstance(cells, list) or not cells:
         raise RegisteredAggregationError("manifest.cells must be a non-empty list")
@@ -1041,6 +1146,14 @@ def _validate_manifest(
                 or entry["model_family"] != selection["model_family"]
                 or entry["implementation_model"] != model
                 or entry["tuning_aggregate_sha256"] != tuning_selection["aggregate_sha256"]
+                or entry["tuning_completion_index_sha256"]
+                != tuning_selection["source_completion_index_sha256"]
+                or entry["tuning_checksum_manifest_sha256"]
+                != tuning_selection["source_checksum_manifest_sha256"]
+                or entry["tuning_implementation_source_sha256"]
+                != tuning_selection["source_implementation_sha256"]
+                or entry["implementation_source_sha256"]
+                != provenance["implementation_source"]["sha256"]
             ):
                 raise RegisteredAggregationError(
                     f"{field} tuning-selection identity drifts from the manifest binding"
@@ -1050,12 +1163,23 @@ def _validate_manifest(
                 "model_family": selection["model_family"],
                 "implementation_model": model,
                 "tuning_aggregate_sha256": tuning_selection["aggregate_sha256"],
+                "tuning_completion_index_sha256": tuning_selection[
+                    "source_completion_index_sha256"
+                ],
+                "tuning_checksum_manifest_sha256": tuning_selection[
+                    "source_checksum_manifest_sha256"
+                ],
+                "tuning_implementation_source_sha256": tuning_selection[
+                    "source_implementation_sha256"
+                ],
+                "implementation_source_sha256": provenance["implementation_source"]["sha256"],
                 "learner": selection["learner"],
             }
         indexed[identity] = {
             "cell_id": cell_id,
             "configuration_sha256": configuration_sha256,
             "artifact_path": path,
+            "artifact_relative_path": PurePosixPath(entry["artifact_path"]).as_posix(),
             **selection_metadata,
         }
     missing = sorted(expected - set(indexed))
@@ -1072,6 +1196,7 @@ def _validate_manifest(
         "environments": environments,
         "seeds": seeds,
         "provenance": provenance,
+        "registration_sha256": registration_sha256,
         "tuning_selection": tuning_selection,
     }
     return normalized, indexed
@@ -1125,11 +1250,15 @@ def _validate_artifact(
             "model_family",
             "implementation_model",
             "tuning_aggregate_sha256",
+            "tuning_completion_index_sha256",
+            "tuning_checksum_manifest_sha256",
+            "tuning_implementation_source_sha256",
+            "implementation_source_sha256",
         ):
             if name not in artifact:
                 raise RegisteredAggregationError(f"{field} is missing {name}")
     expected_artifact_schema = (
-        7 if manifest_schema_version == 4 else 5 if manifest_schema_version == 2 else 4
+        8 if manifest_schema_version == 4 else 5 if manifest_schema_version == 2 else 4
     )
     if artifact["schema_version"] != expected_artifact_schema:
         raise RegisteredAggregationError(
@@ -1175,6 +1304,12 @@ def _validate_artifact(
         or artifact["model_family"] != expected["model_family"]
         or artifact["implementation_model"] != expected["implementation_model"]
         or artifact["tuning_aggregate_sha256"] != expected["tuning_aggregate_sha256"]
+        or artifact["tuning_completion_index_sha256"] != expected["tuning_completion_index_sha256"]
+        or artifact["tuning_checksum_manifest_sha256"]
+        != expected["tuning_checksum_manifest_sha256"]
+        or artifact["tuning_implementation_source_sha256"]
+        != expected["tuning_implementation_source_sha256"]
+        or artifact["implementation_source_sha256"] != expected["implementation_source_sha256"]
     ):
         raise RegisteredAggregationError(
             f"{field} tuning-selection identity drifts from the manifest"
@@ -1182,6 +1317,7 @@ def _validate_artifact(
     artifact_provenance = _validate_provenance(
         artifact["provenance"],
         field=f"{field}.provenance",
+        require_implementation_source=manifest_schema_version == 4,
     )
     if artifact_provenance != provenance:
         raise RegisteredAggregationError(f"{field}.provenance drifted from the manifest")
@@ -1295,6 +1431,11 @@ def _validate_artifact(
         "evaluation_counts": evaluation_counts,
         "steps": steps,
         "curve_returns": curve_returns,
+        "registration_contract": {
+            "ppo": dict(ppo),
+            "evaluation_episodes_per_environment": evaluation_episodes,
+            "comparison_profile": configuration.get("comparison_profile"),
+        },
     }
 
 
@@ -1391,11 +1532,287 @@ def _paired_record(
     }
 
 
+def _validate_registered_registration(
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    registration_path = manifest_path.parent / "registration.json"
+    raw = _mapping(
+        _load_json(registration_path, kind="frozen registration"),
+        field="registration",
+    )
+    try:
+        expected_fields = registration_fields(raw.get("schema_version"))
+    except ValueError as error:
+        raise RegisteredAggregationError(str(error)) from error
+    _exact_keys(raw, expected_fields, field="registration")
+    environment_ids = [
+        item.get("id") if isinstance(item, Mapping) else None for item in raw["environments"]
+    ]
+    if (
+        raw["schema_version"] != manifest["schema_version"]
+        or raw["status"] != "frozen"
+        or raw["evidence_tier"] != "registered_final"
+        or raw["matrix_kind"] != manifest["matrix_kind"]
+        or tuple(raw["models"]) != manifest["models"]
+        or tuple(environment_ids) != manifest["environments"]
+        or tuple(raw["seeds"]) != manifest["seeds"]
+    ):
+        raise RegisteredAggregationError("frozen registration identity drifts from manifest")
+    if manifest["schema_version"] == 4:
+        try:
+            registration_binding = normalize_final_selection_binding(raw["tuning_selection"])
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+        if registration_binding != manifest["tuning_selection"]:
+            raise RegisteredAggregationError(
+                "frozen registration tuning selection drifts from manifest"
+            )
+    try:
+        comparison_profile = validate_comparison_profile(raw)
+    except ValueError as error:
+        raise RegisteredAggregationError(str(error)) from error
+    normalized_environments: list[dict[str, Any]] = []
+    for index, value in enumerate(raw["environments"]):
+        field = f"registration.environments[{index}]"
+        environment = _mapping(value, field=field)
+        _exact_keys(environment, {"id", "total_steps"}, field=field)
+        normalized_environments.append(
+            {
+                "id": _string(environment["id"], field=f"{field}.id"),
+                "total_steps": _integer(
+                    environment["total_steps"],
+                    field=f"{field}.total_steps",
+                    positive=True,
+                ),
+            }
+        )
+    evaluation_episodes = _integer(
+        raw["evaluation_episodes_per_env"],
+        field="registration.evaluation_episodes_per_env",
+        positive=True,
+    )
+    require_gpu = raw["require_gpu"]
+    quick = raw["quick"]
+    if not isinstance(require_gpu, bool):
+        raise RegisteredAggregationError("registration.require_gpu must be a boolean")
+    if not isinstance(quick, bool):
+        raise RegisteredAggregationError("registration.quick must be a boolean")
+    if quick:
+        raise RegisteredAggregationError("registered-final registration.quick must be false")
+    normalized_learner: dict[str, int | float | bool] | None = None
+    if manifest["schema_version"] in {1, 2}:
+        try:
+            normalized_learner = normalize_learner(
+                raw["learner"],
+                schema_version=manifest["schema_version"],
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
+    if registration_path.read_bytes() != canonical_json_bytes(raw) + b"\n":
+        raise RegisteredAggregationError("frozen registration is not canonical JSON")
+    registration_file_sha256 = sha256_file(registration_path)
+    if (
+        manifest["schema_version"] == 4
+        and registration_file_sha256 != manifest["registration_sha256"]
+    ):
+        raise RegisteredAggregationError(
+            "frozen registration SHA256 drifts from the frozen manifest"
+        )
+    return registration_file_sha256, {
+        **dict(raw),
+        "comparison_profile": comparison_profile,
+        "environments": tuple(normalized_environments),
+        "evaluation_episodes_per_env": evaluation_episodes,
+        "require_gpu": require_gpu,
+        "quick": quick,
+        "learner": normalized_learner,
+    }
+
+
+def _validate_registration_against_artifacts(
+    registration: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    records: Mapping[tuple[str, str, int], Mapping[str, Any]],
+) -> None:
+    """Bind every executable registration field to validated cell artifacts."""
+
+    environment_budgets = {
+        environment["id"]: environment["total_steps"]
+        for environment in registration["environments"]
+    }
+    if set(environment_budgets) != set(manifest["environments"]):
+        raise RegisteredAggregationError(
+            "frozen registration environment budgets drift from the manifest"
+        )
+    schema_version = manifest["schema_version"]
+    for identity, record in records.items():
+        field = f"artifact[{identity[0]},{identity[1]},{identity[2]}].configuration"
+        contract = _mapping(
+            record["registration_contract"],
+            field=f"{field}.registration_contract",
+        )
+        ppo = _mapping(contract["ppo"], field=f"{field}.ppo")
+        configured_steps = _integer(
+            ppo.get("total_steps"),
+            field=f"{field}.ppo.total_steps",
+            positive=True,
+        )
+        if configured_steps != environment_budgets[identity[0]]:
+            raise RegisteredAggregationError(
+                f"{field}.ppo.total_steps drifts from the frozen registration"
+            )
+        if (
+            contract["evaluation_episodes_per_environment"]
+            != registration["evaluation_episodes_per_env"]
+        ):
+            raise RegisteredAggregationError(
+                f"{field} evaluation episodes drift from the frozen registration"
+            )
+        if schema_version in {1, 2}:
+            expected_fields = set(registration["learner"])
+            missing_fields = sorted(expected_fields - set(ppo))
+            if missing_fields:
+                raise RegisteredAggregationError(
+                    f"{field}.ppo is missing frozen registration learner fields: {missing_fields}"
+                )
+            try:
+                artifact_learner = normalize_learner(
+                    {name: ppo[name] for name in expected_fields},
+                    schema_version=schema_version,
+                )
+            except ValueError as error:
+                raise RegisteredAggregationError(str(error)) from error
+            if artifact_learner != registration["learner"]:
+                raise RegisteredAggregationError(
+                    f"{field}.ppo learner drifts from the frozen registration"
+                )
+        if (
+            schema_version in {2, 4}
+            and contract["comparison_profile"] != registration["comparison_profile"]
+        ):
+            raise RegisteredAggregationError(
+                f"{field}.comparison_profile drifts from the frozen registration"
+            )
+    if (
+        registration["require_gpu"]
+        and manifest["provenance"]["runtime_contract"]["jax_backend"] != "gpu"
+    ):
+        raise RegisteredAggregationError(
+            "frozen registration requires GPU but validated artifacts used another backend"
+        )
+
+
+def _validate_registered_completion_and_checksums(
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+    cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
+) -> dict[str, str]:
+    root = manifest_path.parent
+    completion_path = root / "completion_index.json"
+    completion = _mapping(
+        _load_json(completion_path, kind="completion index"),
+        field="completion_index",
+    )
+    _exact_keys(completion, _COMPLETION_KEYS, field="completion_index")
+    expected_count = len(cells)
+    if (
+        completion["schema_version"] != 1
+        or completion["status"] != "complete"
+        or completion["manifest_sha256"] != manifest["manifest_sha256"]
+        or completion["planned_cells"] != expected_count
+        or completion["completed_cells"] != expected_count
+        or not isinstance(completion["cells"], list)
+        or len(completion["cells"]) != expected_count
+    ):
+        raise RegisteredAggregationError(
+            "completion_index is incomplete or belongs to another manifest"
+        )
+    if completion_path.read_bytes() != canonical_json_bytes(completion) + b"\n":
+        raise RegisteredAggregationError("completion_index is not canonical JSON")
+    indexed: set[tuple[str, str, int]] = set()
+    canonical_paths = {
+        (manifest_path.relative_to(root)).as_posix(),
+        "registration.json",
+        "completion_index.json",
+    }
+    cell_keys = _CELL_MANIFEST_KEYS_V4 if manifest["schema_version"] == 4 else _CELL_MANIFEST_KEYS
+    completed_keys = (
+        _COMPLETED_CELL_KEYS_V4 if manifest["schema_version"] == 4 else _COMPLETED_CELL_KEYS
+    )
+    for index, raw_cell in enumerate(completion["cells"]):
+        field = f"completion_index.cells[{index}]"
+        cell = _mapping(raw_cell, field=field)
+        _exact_keys(cell, completed_keys, field=field)
+        identity = (
+            _string(cell["environment"], field=f"{field}.environment"),
+            _string(cell["model"], field=f"{field}.model"),
+            _integer(cell["seed"], field=f"{field}.seed"),
+        )
+        if identity not in cells or identity in indexed:
+            raise RegisteredAggregationError(f"{field} has an invalid or duplicate identity")
+        indexed.add(identity)
+        expected = cells[identity]
+        for key in cell_keys:
+            if key == "artifact_path":
+                expected_value = expected["artifact_relative_path"]
+            elif key == "environment":
+                expected_value = identity[0]
+            elif key == "model":
+                expected_value = identity[1]
+            elif key == "seed":
+                expected_value = identity[2]
+            else:
+                expected_value = expected[key]
+            if cell[key] != expected_value:
+                raise RegisteredAggregationError(f"{field}.{key} drifts from manifest")
+        if sha256_file(expected["artifact_path"]) != _sha256(
+            cell["artifact_sha256"],
+            field=f"{field}.artifact_sha256",
+        ):
+            raise RegisteredAggregationError(f"{field}.artifact_sha256 is incorrect")
+        log_path = _artifact_path(
+            manifest_path,
+            cell["log_path"],
+            field=f"{field}.log_path",
+        )
+        if log_path != expected["artifact_path"].with_suffix(".log"):
+            raise RegisteredAggregationError(f"{field}.log_path is not canonical")
+        try:
+            actual_log_sha256 = sha256_file(log_path)
+        except OSError as error:
+            raise RegisteredAggregationError(
+                f"{field}.log_path does not exist: {log_path}"
+            ) from error
+        if actual_log_sha256 != _sha256(cell["log_sha256"], field=f"{field}.log_sha256"):
+            raise RegisteredAggregationError(f"{field}.log_sha256 is incorrect")
+        canonical_paths.add(expected["artifact_relative_path"])
+        canonical_paths.add(PurePosixPath(cell["log_path"]).as_posix())
+    if indexed != set(cells):
+        raise RegisteredAggregationError("completion_index is missing manifest cells")
+    try:
+        checksum_entries = validate_checksum_manifest(root)
+    except ArtifactChecksumError as error:
+        raise RegisteredAggregationError(str(error)) from error
+    checksum_paths = {relative for relative, _ in checksum_entries}
+    if checksum_paths != canonical_paths:
+        raise RegisteredAggregationError(
+            "checksum inventory does not match canonical matrix evidence: "
+            f"missing={sorted(canonical_paths - checksum_paths)}, "
+            f"extra={sorted(checksum_paths - canonical_paths)}"
+        )
+    return {
+        "completion_index_sha256": sha256_file(completion_path),
+        "checksum_manifest_sha256": sha256_file(root / "checksums.sha256"),
+    }
+
+
 def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
     """Validate and aggregate one complete frozen registered matrix."""
 
     path = Path(manifest_path).resolve()
     manifest, cell_index = _validate_manifest(path)
+    registration_file_sha256, registration = _validate_registered_registration(path, manifest)
     records: dict[tuple[str, str, int], dict[str, Any]] = {}
     evaluation_counts_by_environment: dict[str, tuple[int, int, int]] = {}
     step_grid_by_environment: dict[str, tuple[int, ...]] = {}
@@ -1426,6 +1843,12 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
                         f"within environment {environment!r}"
                     )
                 records[identity] = record
+    _validate_registration_against_artifacts(registration, manifest, records)
+    raw_integrity = _validate_registered_completion_and_checksums(
+        path,
+        manifest,
+        cell_index,
+    )
     if not evaluation_counts_by_environment or not step_grid_by_environment:  # pragma: no cover
         raise AssertionError("non-empty matrix did not produce aggregation metadata")
 
@@ -1514,6 +1937,12 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
         "schema_version": 1,
         "status": "registered_matrix_aggregate",
         "matrix_manifest_sha256": manifest["manifest_sha256"],
+        "raw_integrity": {
+            "registration_file_sha256": registration_file_sha256,
+            **raw_integrity,
+            "completion_index_validated": True,
+            "checksum_inventory_validated": True,
+        },
         "matrix_kind": manifest["matrix_kind"],
         "provenance": manifest["provenance"],
         "models": list(manifest["models"]),
@@ -1541,12 +1970,22 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
     }
     if manifest["tuning_selection"] is not None:
         result["tuning_selection_binding"] = {
+            "raw_matrix_path": manifest["tuning_selection"]["raw_matrix_path"],
             "aggregate_path": manifest["tuning_selection"]["aggregate_path"],
             "aggregate_sha256": manifest["tuning_selection"]["aggregate_sha256"],
             "source_registration_sha256": manifest["tuning_selection"][
                 "source_registration_sha256"
             ],
             "source_manifest_sha256": manifest["tuning_selection"]["source_manifest_sha256"],
+            "source_completion_index_sha256": manifest["tuning_selection"][
+                "source_completion_index_sha256"
+            ],
+            "source_checksum_manifest_sha256": manifest["tuning_selection"][
+                "source_checksum_manifest_sha256"
+            ],
+            "source_implementation_sha256": manifest["tuning_selection"][
+                "source_implementation_sha256"
+            ],
             "validated": True,
             "final_seeds_disjoint_from_tuning": True,
             "selections": [
@@ -1556,6 +1995,7 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
                     "implementation_model": selection["implementation_model"],
                     "candidate_id": selection["candidate_id"],
                     "learner": selection["learner"],
+                    "implementation_source_sha256": selection["implementation_source_sha256"],
                 }
                 for selection in manifest["tuning_selection"]["selections"]
             ],

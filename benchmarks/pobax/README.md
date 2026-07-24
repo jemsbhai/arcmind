@@ -230,12 +230,27 @@ configuration set must also be identical across families.
 Primary registered-final comparisons use schema v4. They contain no free
 global learner block. Instead, `tuning_selection` binds one task to the raw
 schema-v3 tuning matrix, its canonical aggregate and SHA256, its source
-registration and manifest hashes, and the exact winning candidate and learner
-for every model family. Loading the registration rebuilds the tuning
-aggregate from the raw matrix and requires byte identity with the bound
-aggregate. The final 30-seed manifest must be disjoint from all tuning seeds.
+registration, manifest, completion-index, checksum-inventory, and
+implementation-source hashes, and the exact winning candidate, learner, and
+implementation-source hash for every model family. Loading the registration
+rebuilds the tuning aggregate from the raw matrix, validates the exact raw
+file inventory and checksums, and requires byte identity with the bound
+aggregate. The final matrix must use the same deterministic implementation
+source manifest, dependency lock, external POBAX and Navix commits, and
+non-device runtime contract as tuning. The repository commit itself may
+differ so that an audited tuning selection can be frozen in a later clean
+commit. The schema-v4 frozen manifest also binds the SHA256 of the complete
+canonical final registration file, so rechecksumming cannot authorize a
+registration change. The final 30-seed manifest must be disjoint from all tuning seeds.
 Schema-v2 registered upper references remain valid without this binding,
 including the `pobax_author_semantics` lane.
+
+The implementation-source manifest is a versioned canonical manifest over
+every tracked Python file under `arcmind/` and every tracked non-test Python
+file under `benchmarks/pobax/`. It records each repository-relative path and
+file SHA256, then hashes the canonical manifest. This scope includes shared
+training, aggregation, environment, model-core, and reference code while
+excluding tests.
 
 An exact author-code reproduction requires a separate pinned author-code
 runner and separately labeled artifacts. Results from that lane cannot be
@@ -255,10 +270,10 @@ cells, refuses collisions, records the dependency lock, external source
 commits, and actual Python, package, JAX, backend, and accelerator identities,
 then writes a stable completion index plus checksum manifest.
 The canonical per-cell log is written only after the child process exits
-successfully. A failed attempt keeps its output under a unique
-`attempt-*.failed.log` path, and any partial artifact is moved to the matching
-failed-attempt identity. Neither can enter the completion index as the
-canonical successful log or artifact.
+successfully. A failed attempt keeps its log and any partial artifact under
+the sibling `<raw-matrix>.attempts` tree, preserving the cell-relative path
+and assigning a unique attempt identity. Attempt evidence never enters the
+immutable raw matrix, its completion index, or its checksum inventory.
 Every registration declares `matrix_kind`. A `primary_comparison` matrix must
 include ArcMind. An `upper_reference` matrix contains only the memoryless
 policy on its separately labeled privileged or full-observation task. A
@@ -285,6 +300,22 @@ returns, episode counts, and within-task learning-curve grids before computing
 seed-level summaries and paired differences against ArcMind. Early curve
 entries with no completed episode remain JSON `null`; aggregation starts at
 the first step where every cell in that task has a finite return.
+Standalone aggregation also requires the frozen sibling `registration.json`,
+`completion_index.json`, canonical per-cell logs, and `checksums.sha256`.
+It checks exact canonical registration bytes, completion-row identities and
+hashes, every artifact and log hash, and exact checksum-inventory equality
+with all regular files under the raw root. Completion indexes must also have
+exact canonical JSON bytes. No failed-attempt or other extra file is accepted
+inside the raw root, even when checksummed. The aggregate records the three
+validated raw-index hashes and explicit integrity flags.
+For schema-v2 upper references, it also checks each validated cell against
+the frozen learner, environment budget, evaluation episode count, comparison
+profile, and quick-run contract. A declared GPU requirement must agree with
+the validated runtime provenance.
+Schema-v1 registered artifacts retain legacy aggregation support, but their
+frozen evaluation episode count must match every validated cell. A
+registered-final primary-to-upper link rejects every primary schema except
+schema v4, which requires the frozen tuning selection.
 Derived aggregates live outside the immutable raw-matrix directory so its
 checksum manifest continues to cover every file it was created to protect.
 The write commands reject any output path inside that directory.
@@ -318,6 +349,10 @@ mandatory. Every schema-v3 completion row must carry the immutable cell log
 path and hash, and the checksum inventory must cover every log.
 Equal cardinality is not sufficient: every family must use the exact same
 normalized set of complete learner configurations.
+The schema-v3 checksum inventory must equal the exact canonical registration,
+manifest, completion, artifact, and log paths. Additional files inside the
+raw tuning root are rejected even when checksummed. A declared GPU
+requirement must agree with the frozen manifest and artifact runtime.
 
 For tuning only, the aggregator removes the leading prefix through the latest
 first finite `mean_recent_return` across all candidate and seed cells, then
@@ -346,8 +381,9 @@ python -m benchmarks.pobax.link_upper_reference \
 
 The linker requires identical ordered seeds, exact alias-to-primary mappings,
 learner and evaluation contracts, source commits, dependency locks, and
-registered budgets. It validates both raw checksum inventories and permits
-backend or device differences only when all non-device runtime fields match.
+registered budgets. It validates exact raw file inventory and checksums for
+both matrices and permits backend or device differences only when all
+non-device runtime fields match.
 
 The discrete development runner accepts `simple_chain`, `tmaze_10`,
 `rocksample_11_11`, `battleship_10`, and
