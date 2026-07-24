@@ -1093,6 +1093,243 @@ def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
     }
 
 
+def validate_panel_selection_against_aggregate(
+    binding: Mapping[str, Any],
+    aggregate: object,
+    *,
+    final_seeds: Sequence[int],
+) -> None:
+    """Verify schema-v6 selections against one immutable schema-v5 aggregate."""
+
+    if not isinstance(aggregate, Mapping):
+        raise ValueError("compute-aware tuning selection aggregate must be a JSON object")
+    if (
+        aggregate.get("schema_version") != 2
+        or aggregate.get("status") != "development_tuning_selection_aggregate_not_for_paper"
+        or aggregate.get("evidence_tier") != "development_tuning"
+        or aggregate.get("matrix_kind") != "hyperparameter_selection"
+        or aggregate.get("not_for_paper") is not True
+    ):
+        raise ValueError("compute-aware tuning selection aggregate has the wrong evidence identity")
+    integrity = aggregate.get("integrity_indexes")
+    semantics = aggregate.get("frozen_semantic_contract")
+    if (
+        not isinstance(integrity, Mapping)
+        or integrity.get("completion_index_present_and_validated") is not True
+        or integrity.get("checksums_present_and_validated") is not True
+        or not isinstance(semantics, Mapping)
+        or semantics.get("environment_source_in_every_configuration") is not True
+        or semantics.get("parameter_contract_in_every_configuration") is not True
+        or semantics.get("artifact_parameter_contract_validated") is not True
+    ):
+        raise ValueError(
+            "compute-aware tuning selection aggregate has an invalid integrity contract"
+        )
+    eligibility = aggregate.get("selection_eligibility")
+    if not isinstance(eligibility, Mapping) or (
+        eligibility.get("eligible_for_hyperparameter_selection") is not True
+        or eligibility.get("eligible_for_architecture_selection") is not False
+        or eligibility.get("eligible_for_checkpoint_selection") is not False
+        or eligibility.get("eligible_for_registered_final_evidence") is not False
+        or eligibility.get("eligible_for_paper_performance_claims") is not False
+        or eligibility.get("selection_scope")
+        != "learner_within_model_family_across_frozen_task_panel"
+        or eligibility.get("selection_metric") != "mean_task_rank_then_mean_task_range_regret"
+    ):
+        raise ValueError(
+            "compute-aware tuning selection aggregate has an invalid eligibility contract"
+        )
+    for binding_field, aggregate_field in (
+        ("source_registration_sha256", "registration_sha256"),
+        ("source_manifest_sha256", "matrix_manifest_sha256"),
+        ("source_completion_index_sha256", "completion_index_sha256"),
+        ("source_checksum_manifest_sha256", "checksum_manifest_sha256"),
+    ):
+        if aggregate.get(aggregate_field) != binding[binding_field]:
+            raise ValueError(
+                f"compute-aware tuning selection {binding_field} drifts from "
+                f"aggregate {aggregate_field}"
+            )
+    tuning_provenance = aggregate.get("provenance")
+    if not isinstance(tuning_provenance, Mapping):
+        raise ValueError("compute-aware tuning selection aggregate is missing provenance")
+    try:
+        implementation_source = normalize_implementation_source(
+            tuning_provenance.get("implementation_source")
+        )
+    except ValueError as error:
+        raise ValueError(
+            "compute-aware tuning selection aggregate has invalid implementation provenance"
+        ) from error
+    if implementation_source["sha256"] != binding["source_implementation_sha256"]:
+        raise ValueError(
+            "compute-aware tuning selection implementation source hash drifts from aggregate"
+        )
+
+    expected_environments = [environment for environment, _ in COMPUTE_AWARE_TUNING_PANEL]
+    if aggregate.get("environments") != expected_environments or aggregate.get(
+        "environment_budgets"
+    ) != dict(COMPUTE_AWARE_TUNING_PANEL):
+        raise ValueError("compute-aware tuning aggregate has the wrong ordered task panel")
+    tuning_seeds = aggregate.get("seeds")
+    if tuning_seeds != list(COMPUTE_AWARE_TUNING_SEEDS):
+        raise ValueError("compute-aware tuning aggregate has the wrong ordered seed manifest")
+    normalized_final_seeds = _normalize_seed_manifest(final_seeds, field="final_seeds")
+    overlap = sorted(set(tuning_seeds) & set(normalized_final_seeds))
+    if overlap:
+        raise ValueError(
+            f"compute-aware final seeds must be disjoint from tuning seeds: overlap={overlap}"
+        )
+
+    expected_models = [
+        f"{family}.{learner_id}"
+        for family in COMPUTE_AWARE_TUNED_FAMILIES
+        for learner_id, _ in COMPUTE_AWARE_LEARNER_GRID
+    ]
+    if aggregate.get("models") != expected_models:
+        raise ValueError("compute-aware tuning aggregate has the wrong candidate inventory")
+    expected_tuned_families = [
+        {
+            "family_id": family,
+            "implementation_model": family,
+            "candidate_ids": [
+                f"{family}.{learner_id}" for learner_id, _ in COMPUTE_AWARE_LEARNER_GRID
+            ],
+        }
+        for family in COMPUTE_AWARE_TUNED_FAMILIES
+    ]
+    expected_learner_grid = [
+        {
+            "learner_id": learner_id,
+            "learner": _compute_aware_learner(learning_rate),
+        }
+        for learner_id, learning_rate in COMPUTE_AWARE_LEARNER_GRID
+    ]
+    if (
+        aggregate.get("tuned_families") != expected_tuned_families
+        or aggregate.get("learner_grid") != expected_learner_grid
+    ):
+        raise ValueError("compute-aware tuning aggregate has the wrong frozen study design")
+    raw_candidate_selection = aggregate.get("candidate_selection")
+    raw_groups = aggregate.get("groups")
+    if (
+        not isinstance(raw_candidate_selection, list)
+        or len(raw_candidate_selection) != len(COMPUTE_AWARE_TUNED_FAMILIES)
+        or not isinstance(raw_groups, list)
+    ):
+        raise ValueError(
+            "compute-aware tuning aggregate is missing its exact candidate selections or groups"
+        )
+    expected_group_identities = [
+        (environment, candidate_id)
+        for environment in expected_environments
+        for candidate_id in expected_models
+    ]
+    actual_group_identities = [
+        (group.get("environment"), group.get("candidate_id"))
+        if isinstance(group, Mapping)
+        else (None, None)
+        for group in raw_groups
+    ]
+    if actual_group_identities != expected_group_identities:
+        raise ValueError(
+            "compute-aware tuning aggregate has the wrong ordered candidate group inventory"
+        )
+
+    selections = tuple(binding["selections"])
+    if [selection["model_family"] for selection in selections] != list(
+        COMPUTE_AWARE_TUNED_FAMILIES
+    ):
+        raise ValueError(
+            "compute-aware final selections must preserve the registered tuning family order"
+        )
+    for index, selection in enumerate(selections):
+        family = COMPUTE_AWARE_TUNED_FAMILIES[index]
+        raw_winner = raw_candidate_selection[index]
+        if not isinstance(raw_winner, Mapping):
+            raise ValueError("compute-aware tuning aggregate candidate selections must be objects")
+        ranking = raw_winner.get("ranking")
+        task_scores = raw_winner.get("task_scores")
+        ranking_identities = (
+            [
+                (item.get("rank"), item.get("candidate_id"), item.get("learner_id"))
+                if isinstance(item, Mapping)
+                else (None, None, None)
+                for item in ranking
+            ]
+            if isinstance(ranking, list)
+            else []
+        )
+        expected_ranking_identities = {
+            (f"{family}.{learner_id}", learner_id) for learner_id, _ in COMPUTE_AWARE_LEARNER_GRID
+        }
+        if (
+            raw_winner.get("model_family") != family
+            or raw_winner.get("implementation_model") != family
+            or raw_winner.get("metric") != "mean_task_rank_then_mean_task_range_regret"
+            or raw_winner.get("direction") != "lower_is_better"
+            or raw_winner.get("tie_breaker") != "ascending_learner_id"
+            or raw_winner.get("winner_candidate_id") != selection["candidate_id"]
+            or raw_winner.get("winner_learner_id") != selection["learner_id"]
+            or raw_winner.get("winner_learner") != selection["learner"]
+            or selection["implementation_model"] != family
+            or not isinstance(ranking, list)
+            or len(ranking) != len(COMPUTE_AWARE_LEARNER_GRID)
+            or not isinstance(ranking[0], Mapping)
+            or ranking[0].get("rank") != 1
+            or ranking[0].get("candidate_id") != selection["candidate_id"]
+            or ranking[0].get("learner_id") != selection["learner_id"]
+            or ranking[0].get("learner") != selection["learner"]
+            or [identity[0] for identity in ranking_identities]
+            != list(range(1, len(COMPUTE_AWARE_LEARNER_GRID) + 1))
+            or {(identity[1], identity[2]) for identity in ranking_identities}
+            != expected_ranking_identities
+            or not isinstance(task_scores, list)
+            or [score.get("environment") for score in task_scores if isinstance(score, Mapping)]
+            != expected_environments
+            or ranking[0].get("task_scores") != task_scores
+        ):
+            raise ValueError(
+                "compute-aware final candidate does not match the tuning aggregate winner: "
+                f"model_family={family!r}"
+            )
+        matching_groups = [
+            group
+            for group in raw_groups
+            if isinstance(group, Mapping) and group.get("candidate_id") == selection["candidate_id"]
+        ]
+        if (
+            len(matching_groups) != len(COMPUTE_AWARE_TUNING_PANEL)
+            or [group.get("environment") for group in matching_groups] != expected_environments
+        ):
+            raise ValueError(
+                "compute-aware tuning aggregate winner must have one group per tuning task"
+            )
+        for group in matching_groups:
+            try:
+                aggregate_learner = normalize_learner(
+                    group.get("learner"),
+                    schema_version=6,
+                )
+            except ValueError as error:
+                raise ValueError(
+                    "compute-aware tuning aggregate winner has an invalid learner"
+                ) from error
+            if (
+                group.get("model_family") != family
+                or group.get("implementation_model") != family
+                or group.get("learner_id") != selection["learner_id"]
+                or aggregate_learner != selection["learner"]
+                or group.get("implementation_source_sha256")
+                != selection["implementation_source_sha256"]
+                or selection["implementation_source_sha256"]
+                != binding["source_implementation_sha256"]
+            ):
+                raise ValueError(
+                    "compute-aware final learner or source drifts from the tuning aggregate winner"
+                )
+
+
 def normalize_learner_bindings(
     value: object,
     *,
