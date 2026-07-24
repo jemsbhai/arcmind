@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -31,6 +31,15 @@ REGISTRATION_FIELDS_V1 = {
 REGISTRATION_FIELDS_V2 = REGISTRATION_FIELDS_V1 | {"comparison_profile"}
 REGISTRATION_FIELDS_V3 = (REGISTRATION_FIELDS_V2 - {"models", "learner"}) | {"candidate_families"}
 REGISTRATION_FIELDS_V4 = (REGISTRATION_FIELDS_V2 - {"learner"}) | {"tuning_selection"}
+REGISTRATION_FIELDS_V5 = (REGISTRATION_FIELDS_V2 - {"models", "learner"}) | {
+    "tuned_families",
+    "learner_grid",
+}
+REGISTRATION_FIELDS_V6 = (REGISTRATION_FIELDS_V2 - {"learner"}) | {
+    "learner_bindings",
+    "task_model_incidence",
+    "tuning_selection",
+}
 LEARNER_FIELDS_V1 = {
     "num_envs",
     "rollout_steps",
@@ -57,6 +66,20 @@ _FINAL_SELECTION_FIELDS = {
     "learner",
     "implementation_source_sha256",
 }
+_PANEL_SELECTION_FIELDS = {
+    "model_family",
+    "implementation_model",
+    "candidate_id",
+    "learner_id",
+    "learner",
+    "implementation_source_sha256",
+}
+COMPUTE_AWARE_TUNING_PANEL = (
+    ("tmaze_10", 1_000_000),
+    ("rocksample_11_11", 1_000_000),
+)
+COMPUTE_AWARE_TUNING_SEEDS = (4409, 5519, 6637)
+COMPUTE_AWARE_FINAL_SEEDS = tuple(range(10_000, 10_010))
 PUBLISHED_PRIMARY_TRAIN_STEPS = {
     "tmaze_10": 1_000_000,
     "rocksample_11_11": 5_000_000,
@@ -79,7 +102,7 @@ def registration_fields(schema_version: object) -> set[str]:
     """Return the exact top-level field set for a supported registration."""
 
     if isinstance(schema_version, bool):
-        raise ValueError("registration schema_version must be 1, 2, 3, or 4")
+        raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, or 6")
     if schema_version == 1:
         return REGISTRATION_FIELDS_V1
     if schema_version == 2:
@@ -88,7 +111,11 @@ def registration_fields(schema_version: object) -> set[str]:
         return REGISTRATION_FIELDS_V3
     if schema_version == 4:
         return REGISTRATION_FIELDS_V4
-    raise ValueError("registration schema_version must be 1, 2, 3, or 4")
+    if schema_version == 5:
+        return REGISTRATION_FIELDS_V5
+    if schema_version == 6:
+        return REGISTRATION_FIELDS_V6
+    raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, or 6")
 
 
 def learner_fields(schema_version: int) -> set[str]:
@@ -96,9 +123,9 @@ def learner_fields(schema_version: int) -> set[str]:
 
     if schema_version == 1:
         return LEARNER_FIELDS_V1
-    if schema_version in {2, 3, 4}:
+    if schema_version in {2, 3, 4, 5, 6}:
         return LEARNER_FIELDS_V2
-    raise ValueError("registration schema_version must be 1, 2, 3, or 4")
+    raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, or 6")
 
 
 def validate_comparison_profile(registration: Mapping[str, Any]) -> str | None:
@@ -132,14 +159,14 @@ def normalize_learner(
         )
     normalized: dict[str, int | float | bool] = {}
     integer_fields = ["num_envs", "rollout_steps", "update_epochs"]
-    if schema_version in {2, 3, 4}:
+    if schema_version in {2, 3, 4, 5, 6}:
         integer_fields.append("num_minibatches")
     for field in integer_fields:
         value = learner[field]
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"learner.{field} must be a positive integer")
         normalized[field] = value
-    if schema_version in {2, 3, 4} and (
+    if schema_version in {2, 3, 4, 5, 6} and (
         normalized["num_envs"] % normalized["num_minibatches"] != 0
     ):
         raise ValueError("learner.num_envs must be divisible by learner.num_minibatches")
@@ -154,7 +181,7 @@ def normalize_learner(
         raise ValueError("learner.learning_rate must be positive and finite")
     normalized["learning_rate"] = float(learning_rate)
 
-    if schema_version in {2, 3, 4}:
+    if schema_version in {2, 3, 4, 5, 6}:
         gae_lambda = learner["gae_lambda"]
         if (
             isinstance(gae_lambda, bool)
@@ -659,6 +686,538 @@ def normalize_candidate_families(value: object) -> tuple[dict[str, Any], ...]:
             "configuration grid across model families"
         )
     return tuple(families)
+
+
+def normalize_tuned_families(value: object) -> tuple[dict[str, str], ...]:
+    """Validate schema-v5 model families for the shared tuning panel."""
+
+    if not isinstance(value, list) or not value:
+        raise ValueError("tuned_families must be a non-empty list")
+    families: list[dict[str, str]] = []
+    family_ids: set[str] = set()
+    implementation_models: set[str] = set()
+    for index, raw_family in enumerate(value):
+        field = f"tuned_families[{index}]"
+        if not isinstance(raw_family, Mapping) or set(raw_family) != {
+            "family_id",
+            "implementation_model",
+        }:
+            raise ValueError(
+                f"{field} must contain exactly family_id and implementation_model"
+            )
+        family_id = raw_family["family_id"]
+        if (
+            not isinstance(family_id, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(family_id)
+            or family_id in family_ids
+        ):
+            raise ValueError(f"{field}.family_id must be a unique portable identifier")
+        implementation_model = raw_family["implementation_model"]
+        if (
+            not isinstance(implementation_model, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(implementation_model)
+            or implementation_model in implementation_models
+        ):
+            raise ValueError(
+                f"{field}.implementation_model must be a unique portable model identifier"
+            )
+        validate_policy_model_id(
+            implementation_model,
+            field=f"{field}.implementation_model",
+        )
+        validate_model_evidence_tier(
+            implementation_model,
+            "development_tuning",
+            field=f"{field}.implementation_model",
+        )
+        for environment, _ in COMPUTE_AWARE_TUNING_PANEL:
+            validate_model_environment_contract(
+                implementation_model,
+                environment,
+                field=f"{field}.implementation_model",
+            )
+        family_ids.add(family_id)
+        implementation_models.add(implementation_model)
+        families.append(
+            {
+                "family_id": family_id,
+                "implementation_model": implementation_model,
+            }
+        )
+    return tuple(families)
+
+
+def normalize_shared_learner_grid(value: object) -> tuple[dict[str, Any], ...]:
+    """Validate the one literal learner grid shared by all schema-v5 families."""
+
+    if not isinstance(value, list) or len(value) < 2:
+        raise ValueError("learner_grid must contain at least two learners")
+    grid: list[dict[str, Any]] = []
+    learner_ids: set[str] = set()
+    learner_signatures: set[tuple[tuple[str, int | float | bool], ...]] = set()
+    structural_signatures: set[tuple[int, int, int, int]] = set()
+    for index, raw_candidate in enumerate(value):
+        field = f"learner_grid[{index}]"
+        if not isinstance(raw_candidate, Mapping) or set(raw_candidate) != {
+            "learner_id",
+            "learner",
+        }:
+            raise ValueError(f"{field} must contain exactly learner_id and learner")
+        learner_id = raw_candidate["learner_id"]
+        if (
+            not isinstance(learner_id, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(learner_id)
+            or learner_id in learner_ids
+        ):
+            raise ValueError(f"{field}.learner_id must be a unique portable identifier")
+        learner = normalize_learner(raw_candidate["learner"], schema_version=5)
+        learner_signature = tuple(sorted(learner.items()))
+        if learner_signature in learner_signatures:
+            raise ValueError("learner_grid contains duplicate normalized learner configurations")
+        structural_signatures.add(
+            (
+                int(learner["num_envs"]),
+                int(learner["rollout_steps"]),
+                int(learner["update_epochs"]),
+                int(learner["num_minibatches"]),
+            )
+        )
+        learner_ids.add(learner_id)
+        learner_signatures.add(learner_signature)
+        grid.append({"learner_id": learner_id, "learner": learner})
+    if len(structural_signatures) != 1:
+        raise ValueError(
+            "learner_grid requires identical num_envs, rollout_steps, "
+            "update_epochs, and num_minibatches across every learner"
+        )
+    return tuple(grid)
+
+
+def _normalize_seed_manifest(value: object, *, field: str) -> tuple[int, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(f"{field} must be an ordered sequence of integer seeds")
+    seeds = tuple(value)
+    if (
+        not seeds
+        or any(isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 for seed in seeds)
+        or len(set(seeds)) != len(seeds)
+    ):
+        raise ValueError(f"{field} must contain unique non-negative integer seeds")
+    return seeds
+
+
+def validate_compute_aware_tuning_contract(
+    *,
+    schema_version: int,
+    comparison_profile: str | None,
+    matrix_kind: str,
+    tuned_families: tuple[dict[str, str], ...],
+    learner_grid: tuple[dict[str, Any], ...],
+    environments: Mapping[str, int],
+    seeds: Sequence[int],
+    quick: bool,
+) -> None:
+    """Fail closed on the fixed compute-aware two-task tuning panel."""
+
+    if schema_version != 5:
+        raise ValueError("compute-aware tuning requires registration schema version 5")
+    if comparison_profile != "arcmind_shared_comparison":
+        raise ValueError(
+            "compute-aware tuning requires comparison_profile "
+            "'arcmind_shared_comparison'"
+        )
+    if matrix_kind != "hyperparameter_selection":
+        raise ValueError(
+            "compute-aware tuning requires matrix_kind 'hyperparameter_selection'"
+        )
+    if quick:
+        raise ValueError("compute-aware tuning cannot use quick execution")
+    if not tuned_families:
+        raise ValueError("compute-aware tuning requires explicit tuned families")
+    if not learner_grid:
+        raise ValueError("compute-aware tuning requires an explicit shared learner grid")
+    actual_panel = tuple(environments.items())
+    if actual_panel != COMPUTE_AWARE_TUNING_PANEL:
+        raise ValueError(
+            "compute-aware tuning requires the exact ordered two-task panel: "
+            f"expected={COMPUTE_AWARE_TUNING_PANEL}, found={actual_panel}"
+        )
+    normalized_seeds = _normalize_seed_manifest(seeds, field="seeds")
+    if normalized_seeds != COMPUTE_AWARE_TUNING_SEEDS:
+        raise ValueError(
+            "compute-aware tuning requires the exact ordered seed manifest: "
+            f"expected={COMPUTE_AWARE_TUNING_SEEDS}, found={normalized_seeds}"
+        )
+    for candidate in learner_grid:
+        learner = candidate["learner"]
+        for environment, total_steps in COMPUTE_AWARE_TUNING_PANEL:
+            realized_environment_steps(
+                total_steps,
+                num_envs=int(learner["num_envs"]),
+                rollout_steps=int(learner["rollout_steps"]),
+                comparison_profile=comparison_profile,
+            )
+
+
+def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
+    """Validate the immutable schema-v6 binding to schema-v5 panel winners."""
+
+    expected_fields = {
+        "raw_matrix_path",
+        "aggregate_path",
+        "aggregate_sha256",
+        "source_registration_sha256",
+        "source_manifest_sha256",
+        "source_completion_index_sha256",
+        "source_checksum_manifest_sha256",
+        "source_implementation_sha256",
+        "selections",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise ValueError(
+            "tuning_selection has wrong fields: "
+            f"expected={sorted(expected_fields)}"
+        )
+    hashes: dict[str, str] = {}
+    for name in (
+        "aggregate_sha256",
+        "source_registration_sha256",
+        "source_manifest_sha256",
+        "source_completion_index_sha256",
+        "source_checksum_manifest_sha256",
+        "source_implementation_sha256",
+    ):
+        hash_value = value[name]
+        if not isinstance(hash_value, str) or not _SHA256_PATTERN.fullmatch(hash_value):
+            raise ValueError(f"tuning_selection.{name} must be a lowercase SHA256")
+        hashes[name] = hash_value
+    raw_selections = value["selections"]
+    if not isinstance(raw_selections, list) or not raw_selections:
+        raise ValueError("tuning_selection.selections must be a non-empty list")
+    selections: list[dict[str, Any]] = []
+    model_families: set[str] = set()
+    implementation_models: set[str] = set()
+    candidate_ids: set[str] = set()
+    for index, raw_selection in enumerate(raw_selections):
+        field = f"tuning_selection.selections[{index}]"
+        if not isinstance(raw_selection, Mapping) or set(raw_selection) != _PANEL_SELECTION_FIELDS:
+            raise ValueError(
+                f"{field} must contain exactly model_family, implementation_model, "
+                "candidate_id, learner_id, learner, and implementation_source_sha256"
+            )
+        model_family = raw_selection["model_family"]
+        implementation_model = raw_selection["implementation_model"]
+        learner_id = raw_selection["learner_id"]
+        candidate_id = raw_selection["candidate_id"]
+        if (
+            not isinstance(model_family, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(model_family)
+            or model_family in model_families
+        ):
+            raise ValueError(f"{field}.model_family must be a unique portable identifier")
+        if (
+            not isinstance(implementation_model, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(implementation_model)
+            or implementation_model in implementation_models
+        ):
+            raise ValueError(
+                f"{field}.implementation_model must be a unique portable model identifier"
+            )
+        if not isinstance(learner_id, str) or not _IDENTIFIER_PATTERN.fullmatch(learner_id):
+            raise ValueError(f"{field}.learner_id must be a portable identifier")
+        if (
+            not isinstance(candidate_id, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(candidate_id)
+            or candidate_id != f"{model_family}.{learner_id}"
+            or candidate_id in candidate_ids
+        ):
+            raise ValueError(
+                f"{field}.candidate_id must be unique and equal "
+                "model_family + '.' + learner_id"
+            )
+        validate_policy_model_id(
+            implementation_model,
+            field=f"{field}.implementation_model",
+        )
+        validate_model_evidence_tier(
+            implementation_model,
+            "registered_final",
+            field=f"{field}.implementation_model",
+        )
+        implementation_source_sha256 = raw_selection["implementation_source_sha256"]
+        if (
+            not isinstance(implementation_source_sha256, str)
+            or not _SHA256_PATTERN.fullmatch(implementation_source_sha256)
+            or implementation_source_sha256 != hashes["source_implementation_sha256"]
+        ):
+            raise ValueError(
+                f"{field}.implementation_source_sha256 must equal "
+                "tuning_selection.source_implementation_sha256"
+            )
+        selections.append(
+            {
+                "model_family": model_family,
+                "implementation_model": implementation_model,
+                "candidate_id": candidate_id,
+                "learner_id": learner_id,
+                "learner": normalize_learner(raw_selection["learner"], schema_version=6),
+                "implementation_source_sha256": implementation_source_sha256,
+            }
+        )
+        model_families.add(model_family)
+        implementation_models.add(implementation_model)
+        candidate_ids.add(candidate_id)
+    return {
+        "raw_matrix_path": _normalized_repository_path(
+            value["raw_matrix_path"],
+            field="tuning_selection.raw_matrix_path",
+        ),
+        "aggregate_path": _normalized_repository_path(
+            value["aggregate_path"],
+            field="tuning_selection.aggregate_path",
+        ),
+        **hashes,
+        "selections": tuple(selections),
+    }
+
+
+def normalize_learner_bindings(
+    value: object,
+    *,
+    models: Sequence[str],
+) -> tuple[dict[str, str], ...]:
+    """Validate ordered schema-v6 selected and inherited learner bindings."""
+
+    if isinstance(models, (str, bytes)) or not isinstance(models, Sequence):
+        raise ValueError("models must be an ordered sequence")
+    normalized_models = tuple(models)
+    if (
+        not normalized_models
+        or any(not isinstance(model, str) or not model for model in normalized_models)
+        or len(set(normalized_models)) != len(normalized_models)
+    ):
+        raise ValueError("models must contain unique non-empty model names")
+    for index, model in enumerate(normalized_models):
+        validate_policy_model_id(model, field=f"models[{index}]")
+        validate_model_evidence_tier(model, "registered_final", field=f"models[{index}]")
+    if not isinstance(value, list) or len(value) != len(normalized_models):
+        raise ValueError("learner_bindings must contain exactly one entry per model")
+    bindings: list[dict[str, str]] = []
+    for index, raw_binding in enumerate(value):
+        field = f"learner_bindings[{index}]"
+        if not isinstance(raw_binding, Mapping) or set(raw_binding) != {
+            "model",
+            "mode",
+            "source_model_family",
+        }:
+            raise ValueError(
+                f"{field} must contain exactly model, mode, and source_model_family"
+            )
+        model = raw_binding["model"]
+        if model != normalized_models[index]:
+            raise ValueError("learner_bindings must preserve the exact models order")
+        mode = raw_binding["mode"]
+        if mode not in {"selected", "inherited"}:
+            raise ValueError(f"{field}.mode must be 'selected' or 'inherited'")
+        source_model_family = raw_binding["source_model_family"]
+        if (
+            not isinstance(source_model_family, str)
+            or not _IDENTIFIER_PATTERN.fullmatch(source_model_family)
+        ):
+            raise ValueError(f"{field}.source_model_family must be a portable identifier")
+        bindings.append(
+            {
+                "model": model,
+                "mode": mode,
+                "source_model_family": source_model_family,
+            }
+        )
+    return tuple(bindings)
+
+
+def normalize_task_model_incidence(
+    value: object,
+    *,
+    environments: Sequence[str],
+    models: Sequence[str],
+) -> tuple[dict[str, Any], ...]:
+    """Validate the exact non-Cartesian task-by-model design for schema v6."""
+
+    environment_ids = tuple(environments)
+    model_ids = tuple(models)
+    if (
+        not environment_ids
+        or any(
+            not isinstance(environment, str) or not environment
+            for environment in environment_ids
+        )
+        or len(set(environment_ids)) != len(environment_ids)
+    ):
+        raise ValueError("environments must contain unique non-empty identifiers")
+    if (
+        not model_ids
+        or any(not isinstance(model, str) or not model for model in model_ids)
+        or len(set(model_ids)) != len(model_ids)
+    ):
+        raise ValueError("models must contain unique non-empty identifiers")
+    if not isinstance(value, list) or len(value) != len(environment_ids):
+        raise ValueError("task_model_incidence must contain exactly one entry per environment")
+    model_positions = {model: index for index, model in enumerate(model_ids)}
+    used_models: set[str] = set()
+    common_models = set(model_ids)
+    normalized: list[dict[str, Any]] = []
+    for index, raw_entry in enumerate(value):
+        field = f"task_model_incidence[{index}]"
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != {"environment", "models"}:
+            raise ValueError(f"{field} must contain exactly environment and models")
+        environment = raw_entry["environment"]
+        if environment != environment_ids[index]:
+            raise ValueError(
+                "task_model_incidence must preserve the exact environments order"
+            )
+        raw_models = raw_entry["models"]
+        if not isinstance(raw_models, list) or not raw_models:
+            raise ValueError(f"{field}.models must be a non-empty list")
+        if (
+            any(not isinstance(model, str) or model not in model_positions for model in raw_models)
+            or len(set(raw_models)) != len(raw_models)
+        ):
+            raise ValueError(f"{field}.models must be unique members of the global models list")
+        positions = [model_positions[model] for model in raw_models]
+        if positions != sorted(positions):
+            raise ValueError(
+                f"{field}.models must preserve the exact global models order"
+            )
+        if "arcmind" not in raw_models:
+            raise ValueError(f"{field}.models must contain arcmind")
+        for model in raw_models:
+            validate_model_environment_contract(
+                model,
+                environment,
+                field=f"{field}.models",
+            )
+        used_models.update(raw_models)
+        common_models.intersection_update(raw_models)
+        normalized.append({"environment": environment, "models": tuple(raw_models)})
+    missing_models = sorted(set(model_ids) - used_models)
+    if missing_models:
+        raise ValueError(
+            f"every global model must occur in the incidence matrix: missing={missing_models}"
+        )
+    if len(common_models) < 2:
+        raise ValueError(
+            "task_model_incidence must retain at least two all-task common models"
+        )
+    return tuple(normalized)
+
+
+def validate_compute_aware_final_contract(
+    *,
+    schema_version: int,
+    comparison_profile: str | None,
+    matrix_kind: str,
+    models: Sequence[str],
+    learner_bindings: object,
+    task_model_incidence: object,
+    tuning_selection: object,
+    environments: Mapping[str, int],
+    seeds: Sequence[int],
+    quick: bool,
+) -> None:
+    """Fail closed on the compute-aware registered-final design."""
+
+    if schema_version != 6:
+        raise ValueError("compute-aware final requires registration schema version 6")
+    if comparison_profile != "arcmind_shared_comparison":
+        raise ValueError(
+            "compute-aware final requires comparison_profile "
+            "'arcmind_shared_comparison'"
+        )
+    if matrix_kind != "primary_comparison":
+        raise ValueError("compute-aware final requires matrix_kind 'primary_comparison'")
+    if quick:
+        raise ValueError("compute-aware final cannot use quick execution")
+    normalized_seeds = _normalize_seed_manifest(seeds, field="seeds")
+    if normalized_seeds != COMPUTE_AWARE_FINAL_SEEDS:
+        raise ValueError(
+            "compute-aware final requires the exact ordered seed manifest: "
+            f"expected={COMPUTE_AWARE_FINAL_SEEDS}, found={normalized_seeds}"
+        )
+    if set(normalized_seeds) & set(COMPUTE_AWARE_TUNING_SEEDS):
+        raise ValueError("compute-aware final seeds must be disjoint from tuning seeds")
+    actual_budgets = tuple(environments.items())
+    if not actual_budgets:
+        raise ValueError("compute-aware final requires at least one environment")
+    for environment, total_steps in actual_budgets:
+        expected_steps = PUBLISHED_PRIMARY_TRAIN_STEPS.get(environment)
+        if expected_steps is None:
+            raise ValueError(
+                "compute-aware final requires published POBAX primary environments"
+            )
+        if total_steps != expected_steps:
+            raise ValueError(
+                "compute-aware final requires each published task budget: "
+                f"environment={environment!r}, expected={expected_steps}, "
+                f"found={total_steps}"
+            )
+    normalized_bindings = normalize_learner_bindings(
+        learner_bindings,
+        models=models,
+    )
+    normalized_incidence = normalize_task_model_incidence(
+        task_model_incidence,
+        environments=[environment for environment, _ in actual_budgets],
+        models=models,
+    )
+    binding = normalize_panel_selection_binding(tuning_selection)
+    selections_by_family = {
+        selection["model_family"]: selection for selection in binding["selections"]
+    }
+    selected_sources: set[str] = set()
+    bindings_by_model: dict[str, dict[str, str]] = {}
+    for learner_binding in normalized_bindings:
+        model = learner_binding["model"]
+        source_family = learner_binding["source_model_family"]
+        selection = selections_by_family.get(source_family)
+        if selection is None:
+            raise ValueError(
+                f"learner binding for {model!r} names unknown source family "
+                f"{source_family!r}"
+            )
+        if learner_binding["mode"] == "selected":
+            if model != selection["implementation_model"]:
+                raise ValueError(
+                    f"selected learner binding for {model!r} must execute its "
+                    "source family's implementation model"
+                )
+            if source_family in selected_sources:
+                raise ValueError(
+                    f"source family {source_family!r} has duplicate selected bindings"
+                )
+            selected_sources.add(source_family)
+        elif model == selection["implementation_model"]:
+            raise ValueError(
+                f"inherited learner binding for {model!r} must execute a different model"
+            )
+        bindings_by_model[model] = learner_binding
+    missing_selected_sources = sorted(set(selections_by_family) - selected_sources)
+    if missing_selected_sources:
+        raise ValueError(
+            "every tuning selection must have one direct selected binding: "
+            f"missing={missing_selected_sources}"
+        )
+    for incidence_entry in normalized_incidence:
+        environment = incidence_entry["environment"]
+        total_steps = environments[environment]
+        for model in incidence_entry["models"]:
+            source_family = bindings_by_model[model]["source_model_family"]
+            learner = selections_by_family[source_family]["learner"]
+            realized_environment_steps(
+                total_steps,
+                num_envs=int(learner["num_envs"]),
+                rollout_steps=int(learner["rollout_steps"]),
+                comparison_profile=comparison_profile,
+            )
 
 
 def validate_development_tuning_contract(
