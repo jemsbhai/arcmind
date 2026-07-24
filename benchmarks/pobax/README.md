@@ -75,7 +75,9 @@ The development learner supports these policy cores through that common path.
 Unless a lane is explicitly marked supplemental below, learned controls use
 the ArcMind parameter-matching contract:
 
-- memoryless MLP, four-frame MLP, and the shared-input Memory Traces adaptation;
+- memoryless MLP, four-frame MLP, and shared-input memory adaptations;
+- the parameter-matched AGaLiTe shared lane;
+- the fixed source-compatible AGaLiTe policy for discrete tasks;
 - the source-compatible supplemental Memory Traces policy for discrete tasks;
 - the source-verified POPGym positional MLP;
 - Elman RNN, GRU, and LSTM;
@@ -189,6 +191,34 @@ immutable output fixture from the official dependency-light `Mamba.step`
 path. Frozen configurations and result artifacts record this metadata.
 Matrix resume and both aggregators reject missing or changed Mamba source
 metadata.
+
+AGaLiTe has two source-audited evidence lanes. Both implement the executable
+finite-channel recurrence from
+[official commit
+`101acbecc121a258ad8f7e58e2f782f546674979`](https://github.com/subho406/agalite/tree/101acbecc121a258ad8f7e58e2f782f546674979).
+The executable stores exactly `R` channels at
+`linspace(-pi, pi, R)`, initializes its phase counter at one, uses phase two
+for the first token, never resets phase, and normalizes by
+`2 * R * dot(s, q) + 1e-5`. This differs from the finite-channel equations in
+the paper and is frozen as an executable-source contract.
+
+`agalite_source_compat` is the complete released T-Maze vector policy:
+observation-only input, four 128-wide layers, four heads of width 64,
+feedforward width 128, `eta=4`, `R=2`, and separate 128-wide tanh actor and
+critic heads. It uses a categorical actor, is rejected on continuous tasks,
+and is reported as fixed-architecture supplemental evidence. The released
+T-Maze configuration used A2C. Running this policy in the shared POBAX PPO
+learner is an explicit learner adaptation, not an author-code performance
+reproduction.
+
+`agalite_shared` applies the same released recurrence and GTrXL-style block to
+the full augmented policy input. It uses the common heads and shared PPO.
+Parameter matching varies only an even model width while preserving four
+layers, four heads, head width `D/2`, feedforward width `D`, `eta=4`, and
+`R=2`. The registry freezes upstream source hashes, a CPU Flax differential
+fixture, the LayerNorm epsilon used by that fixture, the parameter contract,
+and the comparison role. The upstream requirements are unpinned, so the
+fixture records exact JAX and Flax versions.
 
 ```bash
 python -m benchmarks.pobax.run_pilot \

@@ -1,4 +1,6 @@
 include CHANGELOG.md
 include LICENSE
-recursive-include benchmarks *.in *.md *.py *.txt *.yaml
+include THIRD_PARTY_NOTICES.md
+recursive-include licenses *.txt
+recursive-include benchmarks *.in *.json *.md *.py *.sha256 *.txt *.yaml
 recursive-include docs *.md

@@ -17,6 +17,7 @@ from benchmarks.pobax.implementation_provenance import (
 )
 from benchmarks.pobax.link_upper_reference import _validate_completion_and_checksums
 from benchmarks.pobax.model_registry import (
+    AGALITE_SOURCE_COMPAT_REFERENCE_IMPLEMENTATION,
     MAMBA1_REFERENCE_IMPLEMENTATION,
     MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION,
     policy_contract_metadata_for_model,
@@ -84,6 +85,7 @@ def test_implementation_source_inventory_covers_shared_and_model_runtime():
         "benchmarks/pobax/run_pilot.py",
         "benchmarks/pobax/shared_ppo.py",
         "benchmarks/pobax/policy_core.py",
+        "benchmarks/pobax/agalite_core.py",
         "benchmarks/pobax/mamba_core.py",
         "benchmarks/pobax/memory_trace_core.py",
         "benchmarks/pobax/upper_reference_envs.py",
@@ -476,6 +478,19 @@ def test_official_memory_trace_registration_rejects_continuous_tasks(tmp_path):
     path.write_text(json.dumps(registration), encoding="utf-8")
 
     with pytest.raises(ValueError, match="official.*continuous-action"):
+        _load_registration(path)
+
+
+def test_source_compatible_agalite_registration_rejects_continuous_tasks(tmp_path):
+    registration = _registration()
+    registration["models"] = ["arcmind", "agalite_source_compat"]
+    registration["environments"] = [
+        {"id": "Walker-V-v0", "total_steps": 131_072}
+    ]
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="agalite_source_compat.*continuous-action"):
         _load_registration(path)
 
 
@@ -1177,6 +1192,104 @@ def test_existing_official_memory_trace_artifact_freezes_policy_contract(tmp_pat
         _load_matching_artifact(path, **arguments)
 
 
+def test_existing_source_compatible_agalite_artifact_freezes_source_and_policy(
+    tmp_path,
+):
+    path = tmp_path / "agalite-cell.json"
+    provenance = {
+        "git": {"commit": "a" * 40, "dirty": False, "diff_sha256": None},
+        "dependency_lock_sha256": "b" * 64,
+        "pobax_commit": "c" * 40,
+        "navix_commit": "d" * 40,
+        "runtime_contract": {"runtime": "test"},
+    }
+    policy_core = {
+        "input_dim": 7,
+        "observation_dim": 2,
+        "action_dim": 3,
+        "hidden_size": 128,
+        "head_dim": 64,
+        "feedforward_size": 128,
+        "num_heads": 4,
+        "eta": 4,
+        "approximation_channels": 2,
+        "num_layers": 4,
+        "actor_hidden_size": 128,
+        "critic_hidden_size": 128,
+        "gate_bias": 2.0,
+        "attention_epsilon": 1e-5,
+        "layer_norm_epsilon": 1e-6,
+    }
+    policy_contract = policy_contract_metadata_for_model("agalite_source_compat")
+    configuration = {
+        "environment": "tmaze_10",
+        "model": "agalite_source_compat",
+        "seed": 1103,
+        "reference_implementation": deepcopy(
+            AGALITE_SOURCE_COMPAT_REFERENCE_IMPLEMENTATION
+        ),
+        "policy_core": deepcopy(policy_core),
+        **deepcopy(policy_contract),
+    }
+    configuration_sha256 = canonical_json_sha256(configuration)
+    artifact = {
+        "schema_version": 4,
+        "status": "registered_final_complete",
+        "environment": "tmaze_10",
+        "model": "agalite_source_compat",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "configuration": configuration,
+        "reference_implementation": deepcopy(
+            AGALITE_SOURCE_COMPAT_REFERENCE_IMPLEMENTATION
+        ),
+        "policy_core": deepcopy(policy_core),
+        **deepcopy(policy_contract),
+        "matrix_manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+    }
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    arguments = {
+        "expected_status": "registered_final_complete",
+        "environment": "tmaze_10",
+        "model": "agalite_source_compat",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+        "registration_schema_version": 1,
+    }
+
+    assert _load_matching_artifact(path, **arguments) == artifact
+
+    artifact["reference_implementation"]["audited_commit"] = "0" * 40
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="reference implementation"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["reference_implementation"] = deepcopy(
+        AGALITE_SOURCE_COMPAT_REFERENCE_IMPLEMENTATION
+    )
+    artifact["policy_core"]["eta"] = 8
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="policy contract"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["policy_core"] = deepcopy(policy_core)
+    artifact["comparison_role"] = "parameter_matched_primary"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="policy contract"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["comparison_role"] = policy_contract["comparison_role"]
+    artifact["policy_core"]["input_dim"] = 8
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="policy contract"):
+        _load_matching_artifact(path, **arguments)
+
+
 def test_existing_tuning_artifact_must_match_candidate_identity(tmp_path):
     path = tmp_path / "cell.json"
     provenance = {
@@ -1375,6 +1488,27 @@ def test_memory_trace_shared_cell_namespace_uses_explicit_registered_identifier(
 
     assert args.model == "memory_trace_shared"
     assert command[command.index("--model") + 1] == "memory_trace_shared"
+
+
+@pytest.mark.parametrize("model", ["agalite_source_compat", "agalite_shared"])
+def test_agalite_cell_namespace_uses_explicit_registered_identifier(model):
+    registration = _registration()
+    registration["models"] = ["arcmind", model]
+
+    args = _cell_namespace(
+        registration,
+        environment=registration["environments"][0],
+        model=model,
+        seed=1103,
+        output=None,
+        manifest_sha256=None,
+        cell_id=None,
+        describe_only=True,
+    )
+    command = _command_for_cell(args)
+
+    assert args.model == model
+    assert command[command.index("--model") + 1] == model
 
 
 def test_schema_v4_cell_namespace_carries_bound_final_selection(

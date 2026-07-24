@@ -99,6 +99,56 @@ IMPLEMENTATION_SOURCE = {
 }
 
 
+def _policy_core_for_model(model: str) -> dict[str, Any]:
+    if model == "agalite_source_compat":
+        return {
+            "input_dim": 9,
+            "observation_dim": 4,
+            "action_dim": 3,
+            "hidden_size": 128,
+            "head_dim": 64,
+            "feedforward_size": 128,
+            "num_heads": 4,
+            "eta": 4,
+            "approximation_channels": 2,
+            "num_layers": 4,
+            "actor_hidden_size": 128,
+            "critic_hidden_size": 128,
+            "gate_bias": 2.0,
+            "attention_epsilon": 1e-5,
+            "layer_norm_epsilon": 1e-6,
+        }
+    if model == "agalite_shared":
+        return {
+            "input_dim": 9,
+            "action_dim": 3,
+            "hidden_size": 16,
+            "head_dim": 8,
+            "feedforward_size": 16,
+            "num_heads": 4,
+            "eta": 4,
+            "approximation_channels": 2,
+            "num_layers": 4,
+            "gate_bias": 2.0,
+            "attention_epsilon": 1e-5,
+            "layer_norm_epsilon": 1e-6,
+        }
+    if model == "memory_trace_official":
+        return {
+            "input_dim": 9,
+            "observation_dim": 4,
+            "action_dim": 3,
+            "hidden_size": 64,
+            "decays": [0.0, 0.985],
+        }
+    return {
+        "input_dim": 9,
+        "action_dim": 3,
+        "hidden_size": 16,
+        "decays": [0.0, 0.985],
+    }
+
+
 def _configuration(
     environment: str,
     model: str,
@@ -163,22 +213,7 @@ def _configuration(
     if reference is not None:
         configuration["reference_implementation"] = reference
     if requires_explicit_policy_contract(model):
-        policy_core = (
-            {
-                "input_dim": 9,
-                "observation_dim": 4,
-                "action_dim": 3,
-                "hidden_size": 64,
-                "decays": [0.0, 0.985],
-            }
-            if model == "memory_trace_official"
-            else {
-                "input_dim": 9,
-                "action_dim": 3,
-                "hidden_size": 16,
-                "decays": [0.0, 0.985],
-            }
-        )
+        policy_core = _policy_core_for_model(model)
         configuration.update(
             policy_contract_metadata_for_model(model),
             policy_core=policy_core,
@@ -741,6 +776,47 @@ def test_memory_trace_contracts_and_supplemental_results_are_separated(
     _rewrite_json(
         official_path,
         lambda value: value["policy_core"].update(decays=[0.0, 0.9]),
+    )
+    _refresh_integrity(matrix_root, paths)
+    with pytest.raises(RegisteredAggregationError, match="policy_core"):
+        build_registered_aggregate(manifest_path)
+
+
+def test_agalite_contracts_and_supplemental_results_are_separated(
+    tmp_path: Path,
+) -> None:
+    matrix_root = tmp_path / "agalite"
+    manifest_path, _, paths = _write_matrix(
+        matrix_root,
+        models=["arcmind", "agalite_source_compat", "agalite_shared"],
+    )
+
+    result = build_registered_aggregate(manifest_path)
+    groups = {item["model"]: item for item in result["groups"]}
+
+    assert groups["agalite_source_compat"]["parameter_contract"] == (
+        FIXED_OFFICIAL_PARAMETER_CONTRACT
+    )
+    assert groups["agalite_source_compat"]["comparison_role"] == (
+        SUPPLEMENTAL_COMPARISON_ROLE
+    )
+    assert groups["agalite_shared"]["parameter_contract"] == (
+        PARAMETER_MATCHED_CONTRACT
+    )
+    assert groups["agalite_shared"]["comparison_role"] == PRIMARY_COMPARISON_ROLE
+    assert [
+        item["model"] for item in result["paired_differences_against_arcmind"]
+    ] == ["agalite_shared"]
+    assert [
+        item["model"]
+        for item in result["supplemental_paired_differences_against_arcmind"]
+    ] == ["agalite_source_compat"]
+    assert result["raw_integrity"]["parameter_contract_validated"] is True
+
+    source_path = paths[("tmaze_10", "agalite_source_compat", SEEDS[0])]
+    _rewrite_json(
+        source_path,
+        lambda value: value["policy_core"].update(layer_norm_epsilon=1e-5),
     )
     _refresh_integrity(matrix_root, paths)
     with pytest.raises(RegisteredAggregationError, match="policy_core"):

@@ -17,6 +17,18 @@ import numpy as np
 from jax import random
 from pobax.envs import get_env
 
+from benchmarks.pobax.agalite_core import (
+    AGALITE_APPROXIMATION_CHANNELS,
+    AGALITE_ATTENTION_EPSILON,
+    AGALITE_ETA,
+    AGALITE_GATE_BIAS,
+    AGALITE_LAYER_NORM_EPSILON,
+    AGALITE_NUM_HEADS,
+    AGALITE_NUM_LAYERS,
+    AGaLiTePolicyCore,
+    SourceCompatibleAGaLiTePolicyCore,
+    match_agalite_hidden_size,
+)
 from benchmarks.pobax.arcmind_reference import ReferenceConfig
 from benchmarks.pobax.baseline_cores import (
     ElmanRNNPolicyCore,
@@ -41,6 +53,8 @@ from benchmarks.pobax.implementation_provenance import gather_implementation_sou
 from benchmarks.pobax.mamba_core import MambaPolicyCore, match_mamba_hidden_size
 from benchmarks.pobax.memory_trace_core import OfficialMemoryTracePolicyCore
 from benchmarks.pobax.model_registry import (
+    AGALITE_SHARED_REFERENCE_IMPLEMENTATION,
+    AGALITE_SOURCE_COMPAT_REFERENCE_IMPLEMENTATION,
     MAMBA1_REFERENCE_IMPLEMENTATION,
     MEMORY_TRACE_COMPATIBILITY_REFERENCE_IMPLEMENTATION,
     MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION,
@@ -97,6 +111,8 @@ from benchmarks.pobax.upper_reference_envs import (
 from benchmarks.pobax.upper_reference_registry import UPPER_REFERENCE_SPECS
 
 REFERENCE_IMPLEMENTATIONS = {
+    "agalite_source_compat": AGALITE_SOURCE_COMPAT_REFERENCE_IMPLEMENTATION,
+    "agalite_shared": AGALITE_SHARED_REFERENCE_IMPLEMENTATION,
     "mamba1": MAMBA1_REFERENCE_IMPLEMENTATION,
     "memory_trace_official": MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION,
     "memory_trace_shared": MEMORY_TRACE_SHARED_REFERENCE_IMPLEMENTATION,
@@ -295,7 +311,22 @@ def build_policy_core(
         params = core.initialize(random.PRNGKey(seed))
         return core, core.count_parameters(params), target_count
 
-    if model_name == "ffm":
+    if model_name == "agalite_source_compat":
+        core = SourceCompatibleAGaLiTePolicyCore(
+            input_dim=input_dim,
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+        )
+        params = core.initialize(random.PRNGKey(seed))
+        return core, core.count_parameters(params), target_count
+
+    if model_name == "agalite_shared":
+        width = match_agalite_hidden_size(
+            target_parameters=target_count,
+            input_dim=input_dim,
+            action_dim=action_dim,
+        )
+    elif model_name == "ffm":
         width = match_ffm_hidden_size(
             target_parameters=target_count,
             input_dim=input_dim,
@@ -356,6 +387,21 @@ def build_policy_core(
         core = MemoryTraceSharedPolicyCore(input_dim, action_dim, width)
     elif model_name == "memory_trace_mlp":
         core = MemoryTraceMLPPolicyCore(input_dim, action_dim, width)
+    elif model_name == "agalite_shared":
+        core = AGaLiTePolicyCore(
+            input_dim=input_dim,
+            action_dim=action_dim,
+            hidden_size=width,
+            head_dim=width // 2,
+            feedforward_size=width,
+            num_heads=AGALITE_NUM_HEADS,
+            eta=AGALITE_ETA,
+            approximation_channels=AGALITE_APPROXIMATION_CHANNELS,
+            num_layers=AGALITE_NUM_LAYERS,
+            gate_bias=AGALITE_GATE_BIAS,
+            attention_epsilon=AGALITE_ATTENTION_EPSILON,
+            layer_norm_epsilon=AGALITE_LAYER_NORM_EPSILON,
+        )
     elif model_name == "tcn":
         core = TCNPolicyCore(input_dim, action_dim, width)
     elif model_name == "ffm":
@@ -730,10 +776,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     observation_dim = int(np.prod(observation_shape))
     action_space = environment.action_space(environment_params)
     continuous_action, action_dim = action_space_contract(action_space, label="policy")
-    if args.model == "memory_trace_official" and continuous_action:
+    if args.model in {"agalite_source_compat", "memory_trace_official"} and continuous_action:
         raise ValueError(
-            "memory_trace_official has the official categorical actor and cannot "
-            "serve as a continuous-action policy"
+            f"{args.model} has a fixed categorical actor and cannot serve as "
+            "a continuous-action policy"
         )
     input_dim = observation_dim + action_dim + 2
     reference_metadata = UPPER_REFERENCE_TARGETS.get(args.environment)

@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Causal dual-rate sequence backbone for streaming sensor policies"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/*"]
 requires-python = ">=3.10"
 authors = [
     {name = "Muntaser Syed"},

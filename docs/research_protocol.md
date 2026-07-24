@@ -245,6 +245,31 @@ implementations. Resume and aggregation fail closed on any drift. Aggregates
 place the official lane in a separate supplemental comparison and exclude it
 from the parameter-matched primary result.
 
+[AGaLiTe](https://openreview.net/forum?id=lh6vOAHuvo) is implemented against
+[official commit
+`101acbecc121a258ad8f7e58e2f782f546674979`](https://github.com/subho406/agalite/tree/101acbecc121a258ad8f7e58e2f782f546674979).
+The executable and paper finite-channel equations differ. Registered AGaLiTe
+lanes therefore freeze the executable behavior: exactly `R` channels,
+frequencies from `linspace(-pi, pi, R)`, initial tick one, first used tick two,
+no phase reset, reset-before-current-token memory semantics, and denominator
+`2 * R * dot(s, q) + 1e-5`.
+
+`agalite_source_compat` preserves the complete released T-Maze vector policy.
+It uses observations only, four 128-wide layers, four 64-wide heads,
+feedforward width 128, `eta=4`, `R=2`, and separate 128-wide tanh categorical
+actor and critic heads. Its fixed architecture is supplemental evidence and is
+prohibited on continuous-action tasks. The author configuration used A2C, so
+the shared POBAX PPO learner is disclosed as an integration adaptation.
+
+`agalite_shared` applies the same executable recurrence and GTrXL-style block
+to the shared augmented policy input with common heads and PPO. Its even model
+width is globally parameter matched while `L=4`, `H=4`, `Q=D/2`, `F=D`,
+`eta=4`, and `R=2` remain fixed. Source hashes, the Apache-2.0 attribution,
+architecture, phase and reset semantics, explicit LayerNorm epsilon,
+parameter contract, comparison role, and an official Flax differential
+fixture are immutable configuration fields. Resume and aggregation fail
+closed on any drift.
+
 [Mamba-1](https://openreview.net/pdf?id=tEYskw1VY2) is implemented from the
 [official source pinned at commit
 `10b5d6358f27966f6a40e4bf0baa17a460688128`](https://github.com/state-spaces/mamba/tree/10b5d6358f27966f6a40e4bf0baa17a460688128).
