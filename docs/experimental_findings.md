@@ -1091,7 +1091,7 @@ with each actual experiment.
 ### F-ENG-015: The schema 5 tuning matrix entered immutable execution
 
 - Class: `registered execution provenance`
-- Status: active, performance values blinded pending canonical aggregation
+- Status: paused by user at 55 of 234 cells; performance values remain blinded
 - Date: 2026-07-24
 - Registration:
   - tracked manifest:
@@ -1121,6 +1121,16 @@ with each actual experiment.
 - Continuity control: a process-scoped Windows execution-state guard prevents
   system sleep while the matrix PID is alive and releases automatically when
   the run ends. It does not alter the persistent power plan.
+- Pause checkpoint:
+  - execution stopped at 2026-07-24 12:08 America/New_York after a standard
+    termination signal to the isolated benchmark process group;
+  - 55 immutable artifacts and 55 paired logs remain in the raw matrix;
+  - the interrupted `agalite_shared.lr_low`, seed 5519 cell produced no
+    artifact, log, or attempt evidence and will restart from the beginning;
+  - no benchmark process, child process, or keep-awake guard remains active;
+  - GPU memory and utilization returned to zero; and
+  - resuming the identical registered command will validate and skip the 55
+    complete cells before restarting the first incomplete cell.
 - External cost: zero dollars. The run uses local hardware.
 - Evidence restriction: no per-cell return has been inspected. Selection and
   any performance statement remain prohibited until all 234 cells, paired
