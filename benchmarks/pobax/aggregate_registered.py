@@ -51,7 +51,18 @@ import numpy as np
 from benchmarks.pobax.aggregate_development import build_development_aggregate
 from benchmarks.pobax.implementation_provenance import normalize_implementation_source
 from benchmarks.pobax.model_registry import (
+    PARAMETER_MATCHED_CONTRACT,
+    SUPPLEMENTAL_COMPARISON_ROLE,
+    comparison_role_for_model,
+    fixed_official_parameter_count,
+    parameter_contract_for_model,
+    policy_contract_metadata_for_model,
     reference_implementation_for_model,
+    requires_explicit_policy_contract,
+    validate_model_environment_contract,
+    validate_model_evidence_tier,
+    validate_policy_contract_metadata,
+    validate_policy_core_contract,
     validate_policy_model_id,
     validate_required_reference_implementation,
 )
@@ -448,6 +459,27 @@ def _validate_frozen_configuration(
         )
     except ValueError as error:
         raise RegisteredAggregationError(str(error)) from error
+    expected_policy_contract = policy_contract_metadata_for_model(identity[1])
+    if (
+        requires_explicit_policy_contract(identity[1])
+        or any(name in configuration for name in expected_policy_contract)
+    ):
+        try:
+            validate_policy_contract_metadata(
+                identity[1],
+                {
+                    name: configuration.get(name)
+                    for name in expected_policy_contract
+                },
+                field=f"{field}.policy_contract",
+            )
+            validate_policy_core_contract(
+                identity[1],
+                configuration.get("policy_core"),
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
     if configuration_schema == 4:
         for name in (
             "candidate_id",
@@ -530,7 +562,22 @@ def _validate_frozen_configuration(
         raise RegisteredAggregationError(
             f"{field}.parameter_ratio disagrees with frozen parameter counts"
         )
-    if not 0.9 <= parameter_ratio <= 1.1:
+    expected_fixed_count = fixed_official_parameter_count(
+        identity[1],
+        configuration.get("policy_core"),
+    )
+    if expected_fixed_count is not None and (
+        parameter_count != expected_fixed_count
+        or effective_parameter_count != expected_fixed_count
+    ):
+        raise RegisteredAggregationError(
+            f"{field}.parameter_count does not match the fixed official architecture"
+        )
+    parameter_contract = parameter_contract_for_model(identity[1])
+    if (
+        parameter_contract == PARAMETER_MATCHED_CONTRACT
+        and not 0.9 <= parameter_ratio <= 1.1
+    ):
         raise RegisteredAggregationError(
             f"{field}.parameter_ratio violates the registered matching tolerance"
         )
@@ -1042,6 +1089,21 @@ def _validate_manifest(
         except ValueError as error:
             raise RegisteredAggregationError(str(error)) from error
     environments = _unique_strings(manifest["environments"], field="manifest.environments")
+    for model in models:
+        try:
+            validate_model_evidence_tier(
+                model,
+                "registered_final",
+                field=f"manifest model {model!r}",
+            )
+            for environment in environments:
+                validate_model_environment_contract(
+                    model,
+                    environment,
+                    field=f"manifest model {model!r}",
+                )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
     seeds = _unique_seeds(manifest["seeds"])
     if len(seeds) != _REGISTERED_FINAL_SEED_COUNT:
         raise RegisteredAggregationError(
@@ -1271,6 +1333,24 @@ def _validate_artifact(
             )
         except ValueError as error:
             raise RegisteredAggregationError(str(error)) from error
+    expected_policy_contract = policy_contract_metadata_for_model(model)
+    if (
+        requires_explicit_policy_contract(model)
+        or any(name in artifact for name in expected_policy_contract)
+    ):
+        try:
+            validate_policy_contract_metadata(
+                model,
+                {name: artifact.get(name) for name in expected_policy_contract},
+                field=f"{field}.policy_contract",
+            )
+            validate_policy_core_contract(
+                model,
+                artifact.get("policy_core"),
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
     if manifest_schema_version == 4:
         for name in (
             "candidate_id",
@@ -1367,6 +1447,18 @@ def _validate_artifact(
             raise RegisteredAggregationError(
                 f"{field}.{name} does not match the frozen configuration"
             )
+    for name in policy_contract_metadata_for_model(model):
+        if name in configuration or name in artifact:
+            if artifact.get(name) != configuration.get(name):
+                raise RegisteredAggregationError(
+                    f"{field}.{name} does not match the frozen configuration"
+                )
+    if requires_explicit_policy_contract(model) and artifact.get(
+        "policy_core"
+    ) != configuration.get("policy_core"):
+        raise RegisteredAggregationError(
+            f"{field}.policy_core does not match the frozen configuration"
+        )
     actual_environment_steps = _integer(
         artifact["actual_environment_steps"],
         field=f"{field}.actual_environment_steps",
@@ -1463,6 +1555,8 @@ def _validate_artifact(
             "evaluation_episodes_per_environment": evaluation_episodes,
             "comparison_profile": configuration.get("comparison_profile"),
         },
+        "parameter_contract": parameter_contract_for_model(model),
+        "comparison_role": comparison_role_for_model(model),
     }
 
 
@@ -1495,6 +1589,8 @@ def _group_record(
     return {
         "environment": environment,
         "model": model,
+        "parameter_contract": cells[0]["parameter_contract"],
+        "comparison_role": cells[0]["comparison_role"],
         "seeds": list(seeds),
         "raw_seed_values": raw_seed_values,
         "final_seed_mean_return": _summary(
@@ -1549,6 +1645,7 @@ def _paired_record(
     return {
         "environment": environment,
         "model": model,
+        "comparison_role": comparison_role_for_model(model),
         "reference_model": "arcmind",
         "seeds": list(seeds),
         "raw_seed_differences": raw,
@@ -1932,6 +2029,25 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
             for environment in manifest["environments"]
             for model in manifest["models"]
             if model != "arcmind"
+            and comparison_role_for_model(model) != SUPPLEMENTAL_COMPARISON_ROLE
+        ]
+        if manifest["matrix_kind"] == "primary_comparison"
+        else []
+    )
+    supplemental_paired = (
+        [
+            {
+                **_paired_record(
+                    environment,
+                    model,
+                    manifest["seeds"],
+                    records,
+                ),
+                "comparison_role": SUPPLEMENTAL_COMPARISON_ROLE,
+            }
+            for environment in manifest["environments"]
+            for model in manifest["models"]
+            if comparison_role_for_model(model) == SUPPLEMENTAL_COMPARISON_ROLE
         ]
         if manifest["matrix_kind"] == "primary_comparison"
         else []
@@ -1970,6 +2086,7 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
             "completion_index_validated": True,
             "checksum_inventory_validated": True,
             "reference_implementation_validated": True,
+            "parameter_contract_validated": True,
         },
         "matrix_kind": manifest["matrix_kind"],
         "provenance": manifest["provenance"],
@@ -1995,6 +2112,7 @@ def build_registered_aggregate(manifest_path: str | Path) -> dict[str, Any]:
         },
         "groups": groups,
         "paired_differences_against_arcmind": paired,
+        "supplemental_paired_differences_against_arcmind": supplemental_paired,
     }
     if manifest["tuning_selection"] is not None:
         result["tuning_selection_binding"] = {

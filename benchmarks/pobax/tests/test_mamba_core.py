@@ -115,35 +115,38 @@ def test_pilot_builder_parameter_matches_and_freezes_source_metadata() -> None:
 def test_block_step_matches_official_pytorch_outputs_with_transplanted_weights() -> None:
     payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     configuration = payload["configuration"]
-    core = MambaPolicyCore(
-        input_dim=configuration["hidden_size"],
-        action_dim=2,
-        hidden_size=configuration["hidden_size"],
-    )
-    params = {
-        name: jnp.asarray(values, dtype=jnp.float32)
-        for name, values in payload["parameters"].items()
-    }
-    state = MambaState(
-        convolution=jnp.asarray(
-            payload["initial_state"]["convolution"],
-            dtype=jnp.float32,
-        ),
-        ssm=jnp.asarray(payload["initial_state"]["ssm"], dtype=jnp.float32),
-    )
-    hidden = jnp.asarray(payload["hidden"], dtype=jnp.float32)
-    reset = jnp.zeros((configuration["batch_size"],), dtype=jnp.bool_)
-
-    outputs = []
-    for timestep in range(configuration["sequence_length"]):
-        state, output = core.block_step(
-            params,
-            state,
-            hidden[:, timestep, :],
-            reset,
+    # The PyTorch oracle was exported with full float32 CPU GEMMs. Replay on
+    # CPU so GPU TF32 lowering does not weaken the source differential.
+    with jax.default_device(jax.devices(backend="cpu")[0]):
+        core = MambaPolicyCore(
+            input_dim=configuration["hidden_size"],
+            action_dim=2,
+            hidden_size=configuration["hidden_size"],
         )
-        outputs.append(output)
-    output_sequence = jnp.stack(outputs, axis=1)
+        params = {
+            name: jnp.asarray(values, dtype=jnp.float32)
+            for name, values in payload["parameters"].items()
+        }
+        state = MambaState(
+            convolution=jnp.asarray(
+                payload["initial_state"]["convolution"],
+                dtype=jnp.float32,
+            ),
+            ssm=jnp.asarray(payload["initial_state"]["ssm"], dtype=jnp.float32),
+        )
+        hidden = jnp.asarray(payload["hidden"], dtype=jnp.float32)
+        reset = jnp.zeros((configuration["batch_size"],), dtype=jnp.bool_)
+
+        outputs = []
+        for timestep in range(configuration["sequence_length"]):
+            state, output = core.block_step(
+                params,
+                state,
+                hidden[:, timestep, :],
+                reset,
+            )
+            outputs.append(output)
+        output_sequence = jnp.stack(outputs, axis=1)
 
     np.testing.assert_allclose(
         output_sequence,

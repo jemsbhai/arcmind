@@ -89,7 +89,8 @@ stages:
     validated_policy_cores:
       - memoryless_mlp
       - frame_stack_mlp
-      - memory_trace_mlp
+      - memory_trace_official
+      - memory_trace_shared
       - positional_mlp
       - elman_rnn
       - gru
@@ -102,6 +103,7 @@ stages:
       - ms4n
       - lru
       - s5rl
+      - mamba1
       - causal_transformer
       - transformer_xl
       - gtrxl
@@ -220,6 +222,8 @@ stages:
       aggregate_output_location: outside_immutable_raw_matrix
       freeze_environment_source_and_reference: true
       freeze_parameter_counts_and_ratio: true
+      freeze_parameter_contract_and_comparison_role: true
+      freeze_memory_trace_decay_values_and_origin: true
       record_requested_environment_steps: true
       record_realized_environment_steps: true
       finite_optimizer_metrics:
@@ -257,7 +261,13 @@ stages:
         - registration_file_sha256
         - completion_index_sha256
         - checksum_manifest_sha256
-      parameter_ratio_bounds: [0.9, 1.1]
+      parameter_contracts:
+        parameter_matched_primary:
+          parameter_ratio_bounds: [0.9, 1.1]
+        fixed_official_architecture:
+          exact_parameter_count_from_frozen_policy_core: true
+          comparison_role: supplemental_source_compatible
+          exclude_from_parameter_matched_primary_pairing: true
       upper_reference_link:
         required: true
         ordered_seed_identity: exact
@@ -267,6 +277,8 @@ stages:
       - memoryless_mlp
       - positional_mlp
       - frame_stack_mlp
+      - memory_trace_official
+      - memory_trace_shared
       - gru
       - lstm
       - fast_and_forgetful_memory
@@ -274,6 +286,7 @@ stages:
       - lru
       - s4d
       - s5rl
+      - mamba1
       - transformer_xl
       - arcmind
       - arcmind_unordered

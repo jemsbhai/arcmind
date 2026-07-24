@@ -16,7 +16,16 @@ from benchmarks.pobax.aggregate_development import (
     build_development_aggregate,
 )
 from benchmarks.pobax.implementation_provenance import IMPLEMENTATION_SOURCE_ALGORITHM
-from benchmarks.pobax.model_registry import MAMBA1_REFERENCE_IMPLEMENTATION
+from benchmarks.pobax.model_registry import (
+    FIXED_OFFICIAL_PARAMETER_CONTRACT,
+    PARAMETER_MATCHED_CONTRACT,
+    PRIMARY_COMPARISON_ROLE,
+    SUPPLEMENTAL_COMPARISON_ROLE,
+    fixed_official_parameter_count,
+    policy_contract_metadata_for_model,
+    reference_implementation_for_model,
+    requires_explicit_policy_contract,
+)
 from benchmarks.pobax.registered_artifacts import (
     atomic_write_bytes,
     atomic_write_json,
@@ -132,10 +141,40 @@ def _configuration(
             implementation_model=implementation_model,
             implementation_source=deepcopy(IMPLEMENTATION_SOURCE),
         )
-    if (implementation_model or model) == "mamba1":
-        configuration["reference_implementation"] = deepcopy(
-            MAMBA1_REFERENCE_IMPLEMENTATION
+    actual_model = implementation_model or model
+    reference = reference_implementation_for_model(actual_model)
+    if reference is not None:
+        configuration["reference_implementation"] = reference
+    if requires_explicit_policy_contract(actual_model):
+        policy_core = (
+            {
+                "input_dim": 7,
+                "observation_dim": 2,
+                "action_dim": 2,
+                "hidden_size": 64,
+                "decays": [0.0, 0.985],
+            }
+            if actual_model == "memory_trace_official"
+            else {
+                "input_dim": 7,
+                "action_dim": 2,
+                "hidden_size": 4,
+                "decays": [0.0, 0.985],
+            }
         )
+        configuration.update(
+            policy_contract_metadata_for_model(actual_model),
+            policy_core=policy_core,
+        )
+        fixed_count = fixed_official_parameter_count(actual_model, policy_core)
+        if fixed_count is not None:
+            target_count = 28_000
+            configuration.update(
+                parameter_count=fixed_count,
+                effective_parameter_count=fixed_count,
+                arcmind_target_parameter_count=target_count,
+                parameter_ratio=fixed_count / target_count,
+            )
     return configuration
 
 
@@ -358,14 +397,17 @@ def _write_matrix(
                 },
             ],
         }
-        if (
+        actual_model = (
             candidate_index[model]["implementation_model"]
             if schema_version == 3
             else model
-        ) == "mamba1":
-            artifact["reference_implementation"] = deepcopy(
-                MAMBA1_REFERENCE_IMPLEMENTATION
-            )
+        )
+        reference = reference_implementation_for_model(actual_model)
+        if reference is not None:
+            artifact["reference_implementation"] = reference
+        if requires_explicit_policy_contract(actual_model):
+            artifact["policy_core"] = deepcopy(configuration["policy_core"])
+            artifact.update(policy_contract_metadata_for_model(actual_model))
         if schema_version == 3:
             artifact.update(
                 candidate_id=model,
@@ -519,6 +561,8 @@ def test_complete_matrix_is_deterministic_and_explicitly_not_for_paper(
         "environment_source_in_every_configuration": True,
         "parameter_match_in_every_configuration": True,
         "artifact_parameter_match_validated": True,
+        "parameter_contract_in_every_configuration": True,
+        "artifact_parameter_contract_validated": True,
         "reference_implementation_validated": True,
     }
     assert len(first["groups"]) == 4
@@ -565,6 +609,61 @@ def test_mamba_development_artifacts_fail_closed_on_source_drift(
 
     _rewrite(paths[("short", "mamba1", 7)], drift_source)
     with pytest.raises(DevelopmentAggregationError, match="registered source contract"):
+        build_development_aggregate(matrix_root)
+
+
+def test_memory_trace_contracts_and_supplemental_results_are_separated(
+    tmp_path: Path,
+) -> None:
+    matrix_root = tmp_path / "memory-traces"
+    _, paths = _write_matrix(
+        matrix_root,
+        models=["arcmind", "memory_trace_official", "memory_trace_shared"],
+        environments={"short": 8_192},
+        seeds=[7, 19],
+    )
+
+    result = build_development_aggregate(matrix_root)
+    groups = {item["model"]: item for item in result["groups"]}
+
+    assert groups["memory_trace_official"]["parameter_contract"] == (
+        FIXED_OFFICIAL_PARAMETER_CONTRACT
+    )
+    assert groups["memory_trace_official"]["comparison_role"] == (
+        SUPPLEMENTAL_COMPARISON_ROLE
+    )
+    assert groups["memory_trace_shared"]["parameter_contract"] == (
+        PARAMETER_MATCHED_CONTRACT
+    )
+    assert groups["memory_trace_shared"]["comparison_role"] == PRIMARY_COMPARISON_ROLE
+    assert [
+        item["model"] for item in result["paired_differences_against_arcmind"]
+    ] == ["memory_trace_shared"]
+    assert [
+        item["model"]
+        for item in result["supplemental_paired_differences_against_arcmind"]
+    ] == ["memory_trace_official"]
+    assert (
+        result["frozen_semantic_contract"][
+            "parameter_contract_in_every_configuration"
+        ]
+        is True
+    )
+    assert (
+        result["frozen_semantic_contract"]["parameter_match_in_every_configuration"]
+        is False
+    )
+    assert (
+        result["frozen_semantic_contract"]["artifact_parameter_match_validated"]
+        is False
+    )
+
+    official_path = paths[("short", "memory_trace_official", 7)]
+    _rewrite(
+        official_path,
+        lambda value: value.update(memory_trace_decays=[0.0, 0.9]),
+    )
+    with pytest.raises(DevelopmentAggregationError, match="policy contract"):
         build_development_aggregate(matrix_root)
 
 

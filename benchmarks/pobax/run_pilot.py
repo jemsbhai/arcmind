@@ -25,6 +25,7 @@ from benchmarks.pobax.baseline_cores import (
     LSTMPolicyCore,
     MemorylessMLPPolicyCore,
     MemoryTraceMLPPolicyCore,
+    MemoryTraceSharedPolicyCore,
     TCNPolicyCore,
     match_baseline_width,
 )
@@ -38,9 +39,17 @@ from benchmarks.pobax.ffm_core import (
 )
 from benchmarks.pobax.implementation_provenance import gather_implementation_source
 from benchmarks.pobax.mamba_core import MambaPolicyCore, match_mamba_hidden_size
+from benchmarks.pobax.memory_trace_core import OfficialMemoryTracePolicyCore
 from benchmarks.pobax.model_registry import (
     MAMBA1_REFERENCE_IMPLEMENTATION,
+    MEMORY_TRACE_COMPATIBILITY_REFERENCE_IMPLEMENTATION,
+    MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION,
+    MEMORY_TRACE_SHARED_REFERENCE_IMPLEMENTATION,
+    PARAMETER_MATCHED_CONTRACT,
     POLICY_MODEL_IDS,
+    policy_contract_metadata_for_model,
+    validate_model_environment_contract,
+    validate_model_evidence_tier,
     validate_policy_model_id,
 )
 from benchmarks.pobax.policy_core import ArcMindPolicyCore
@@ -89,15 +98,13 @@ from benchmarks.pobax.upper_reference_registry import UPPER_REFERENCE_SPECS
 
 REFERENCE_IMPLEMENTATIONS = {
     "mamba1": MAMBA1_REFERENCE_IMPLEMENTATION,
+    "memory_trace_official": MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION,
+    "memory_trace_shared": MEMORY_TRACE_SHARED_REFERENCE_IMPLEMENTATION,
+    "memory_trace_mlp": MEMORY_TRACE_COMPATIBILITY_REFERENCE_IMPLEMENTATION,
     "ffm": {
         "repository": "https://github.com/proroklab/ffm",
         "audited_commit": "b3f94d2a0f35ba05089faf19ab1df846057cf8b6",
         "relationship": "shared-input and shared-head policy adaptation",
-    },
-    "memory_trace_mlp": {
-        "repository": "https://github.com/onnoeberhard/memory-traces",
-        "audited_commit": "fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd",
-        "relationship": "shared-input policy adaptation",
     },
     "positional_mlp": POPGYM_POSITIONAL_MLP_REFERENCE,
     "shm": {
@@ -256,12 +263,15 @@ def build_policy_core(
     input_dim: int,
     action_dim: int,
     seed: int,
+    observation_dim: int | None = None,
     target_input_dim: int | None = None,
     max_episode_steps: int = 1_000,
 ):
-    """Build ArcMind or a parameter-matched baseline."""
+    """Build ArcMind, a matched baseline, or an explicit supplemental core."""
     if target_input_dim is None:
         target_input_dim = input_dim
+    if observation_dim is None:
+        observation_dim = input_dim
     target_core = ArcMindPolicyCore(arcmind_config(target_input_dim, action_dim))
     target_params = target_core.initialize(random.PRNGKey(seed))
     target_count = target_core.count_parameters(target_params)
@@ -272,6 +282,15 @@ def build_policy_core(
                 action_dim,
                 model_name=model_name,
             )
+        )
+        params = core.initialize(random.PRNGKey(seed))
+        return core, core.count_parameters(params), target_count
+
+    if model_name == "memory_trace_official":
+        core = OfficialMemoryTracePolicyCore(
+            input_dim=input_dim,
+            observation_dim=observation_dim,
+            action_dim=action_dim,
         )
         params = core.initialize(random.PRNGKey(seed))
         return core, core.count_parameters(params), target_count
@@ -333,6 +352,8 @@ def build_policy_core(
         core = LSTMPolicyCore(input_dim, action_dim, width)
     elif model_name == "frame_stack_mlp":
         core = FrameStackMLPPolicyCore(input_dim, action_dim, width)
+    elif model_name == "memory_trace_shared":
+        core = MemoryTraceSharedPolicyCore(input_dim, action_dim, width)
     elif model_name == "memory_trace_mlp":
         core = MemoryTraceMLPPolicyCore(input_dim, action_dim, width)
     elif model_name == "tcn":
@@ -530,6 +551,12 @@ def validate_upper_reference_task_contract(
 def run(args: argparse.Namespace) -> dict[str, object]:
     """Train and evaluate one model/environment/seed cell."""
     validate_policy_model_id(args.model, field="model")
+    validate_model_evidence_tier(args.model, args.evidence_tier, field="model")
+    validate_model_environment_contract(
+        args.model,
+        args.environment,
+        field="model",
+    )
     if jax.default_backend() != "gpu" and args.require_gpu:
         raise RuntimeError(f"Expected GPU, found {jax.default_backend()!r}")
     commit = source_commit("pobax")
@@ -703,6 +730,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     observation_dim = int(np.prod(observation_shape))
     action_space = environment.action_space(environment_params)
     continuous_action, action_dim = action_space_contract(action_space, label="policy")
+    if args.model == "memory_trace_official" and continuous_action:
+        raise ValueError(
+            "memory_trace_official has the official categorical actor and cannot "
+            "serve as a continuous-action policy"
+        )
     input_dim = observation_dim + action_dim + 2
     reference_metadata = UPPER_REFERENCE_TARGETS.get(args.environment)
     target_input_dim = input_dim
@@ -739,6 +771,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         input_dim=input_dim,
         action_dim=action_dim,
         seed=args.seed,
+        observation_dim=observation_dim,
         target_input_dim=target_input_dim,
         max_episode_steps=maximum_episode_steps,
     )
@@ -756,7 +789,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if continuous_action:
         effective_parameter_count += action_dim
     ratio = parameter_count / target_parameter_count
-    if not 0.9 <= ratio <= 1.1:
+    policy_contract_metadata = policy_contract_metadata_for_model(args.model)
+    if (
+        policy_contract_metadata["parameter_contract"] == PARAMETER_MATCHED_CONTRACT
+        and not 0.9 <= ratio <= 1.1
+    ):
         raise RuntimeError(f"Parameter matching failed: ratio={ratio:.4f}")
     if args.evaluation_episodes_per_env < 1:
         raise ValueError("evaluation_episodes_per_env must be positive")
@@ -785,6 +822,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "effective_parameter_count": effective_parameter_count,
         "arcmind_target_parameter_count": target_parameter_count,
         "parameter_ratio": ratio,
+        **policy_contract_metadata,
         "action_dim": action_dim,
         "action_space": "continuous_box" if continuous_action else "discrete",
         "ppo": asdict(ppo_config),
@@ -906,6 +944,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "effective_parameter_count": effective_parameter_count,
         "arcmind_target_parameter_count": target_parameter_count,
         "parameter_ratio": ratio,
+        **policy_contract_metadata,
         "policy_core": asdict(policy_core),
         "reference_implementation": REFERENCE_IMPLEMENTATIONS.get(args.model),
         "environment_source": frozen_configuration["environment_source"],

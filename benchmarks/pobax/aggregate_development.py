@@ -21,7 +21,19 @@ import numpy as np
 
 from benchmarks.pobax.implementation_provenance import normalize_implementation_source
 from benchmarks.pobax.model_registry import (
+    DEVELOPMENT_COMPATIBILITY_ROLE,
+    PARAMETER_MATCHED_CONTRACT,
+    SUPPLEMENTAL_COMPARISON_ROLE,
+    comparison_role_for_model,
+    fixed_official_parameter_count,
+    parameter_contract_for_model,
+    policy_contract_metadata_for_model,
     reference_implementation_for_model,
+    requires_explicit_policy_contract,
+    validate_model_environment_contract,
+    validate_model_evidence_tier,
+    validate_policy_contract_metadata,
+    validate_policy_core_contract,
     validate_policy_model_id,
     validate_required_reference_implementation,
 )
@@ -117,7 +129,12 @@ class DevelopmentAggregationError(ValueError):
     """Raised when development artifacts are incomplete or inconsistent."""
 
 
-def _validate_parameter_match(value: Mapping[str, Any], *, field: str) -> dict[str, Any]:
+def _validate_parameter_match(
+    value: Mapping[str, Any],
+    *,
+    field: str,
+    model: str,
+) -> dict[str, Any]:
     parameter_count = _integer(
         value["parameter_count"],
         field=f"{field}.parameter_count",
@@ -143,7 +160,22 @@ def _validate_parameter_match(value: Mapping[str, Any], *, field: str) -> dict[s
         raise DevelopmentAggregationError(
             f"{field}.parameter_ratio disagrees with parameter counts"
         )
-    if not 0.9 <= parameter_ratio <= 1.1:
+    expected_fixed_count = fixed_official_parameter_count(
+        model,
+        value.get("policy_core"),
+    )
+    if expected_fixed_count is not None and (
+        parameter_count != expected_fixed_count
+        or effective_parameter_count != expected_fixed_count
+    ):
+        raise DevelopmentAggregationError(
+            f"{field}.parameter_count does not match the fixed official architecture"
+        )
+    parameter_contract = parameter_contract_for_model(model)
+    if (
+        parameter_contract == PARAMETER_MATCHED_CONTRACT
+        and not 0.9 <= parameter_ratio <= 1.1
+    ):
         raise DevelopmentAggregationError(
             f"{field}.parameter_ratio violates the matching tolerance"
         )
@@ -152,6 +184,8 @@ def _validate_parameter_match(value: Mapping[str, Any], *, field: str) -> dict[s
         "effective_parameter_count": effective_parameter_count,
         "arcmind_target_parameter_count": target_parameter_count,
         "parameter_ratio": parameter_ratio,
+        "parameter_contract": parameter_contract,
+        "comparison_role": comparison_role_for_model(model),
     }
 
 
@@ -438,6 +472,26 @@ def _validate_registration(value: Any) -> dict[str, Any]:
             "primary_comparison registration contains upper-reference aliases: "
             f"{sorted(selected_upper_references)}"
         )
+    implementation_models = (
+        [family["implementation_model"] for family in candidate_families]
+        if schema_version == 3
+        else list(models)
+    )
+    try:
+        for implementation_model in implementation_models:
+            validate_model_evidence_tier(
+                implementation_model,
+                tier,
+                field=f"registration model {implementation_model!r}",
+            )
+            for environment_id in environment_ids:
+                validate_model_environment_contract(
+                    implementation_model,
+                    environment_id,
+                    field=f"registration model {implementation_model!r}",
+                )
+    except ValueError as error:
+        raise DevelopmentAggregationError(str(error)) from error
     try:
         normalized_learner = (
             None
@@ -740,6 +794,19 @@ def _validate_configuration(
     else:
         implementation_model = identity[1]
     try:
+        validate_model_evidence_tier(
+            implementation_model,
+            registration["tier"],
+            field=f"{field}.model",
+        )
+        validate_model_environment_contract(
+            implementation_model,
+            identity[0],
+            field=f"{field}.model",
+        )
+    except ValueError as error:
+        raise DevelopmentAggregationError(str(error)) from error
+    try:
         validate_required_reference_implementation(
             implementation_model,
             configuration.get("reference_implementation"),
@@ -747,6 +814,32 @@ def _validate_configuration(
         )
     except ValueError as error:
         raise DevelopmentAggregationError(str(error)) from error
+    expected_policy_contract = policy_contract_metadata_for_model(
+        implementation_model
+    )
+    has_explicit_policy_contract = any(
+        name in configuration for name in expected_policy_contract
+    )
+    if (
+        requires_explicit_policy_contract(implementation_model)
+        or has_explicit_policy_contract
+    ):
+        try:
+            validate_policy_contract_metadata(
+                implementation_model,
+                {
+                    name: configuration.get(name)
+                    for name in expected_policy_contract
+                },
+                field=f"{field}.policy_contract",
+            )
+            validate_policy_core_contract(
+                implementation_model,
+                configuration.get("policy_core"),
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
     environment = identity[0]
     expected_source = expected_environment_source(environment)
     source_frozen = "environment_source" in configuration
@@ -774,9 +867,22 @@ def _validate_configuration(
         raise DevelopmentAggregationError(
             f"{field} has a partial parameter-match contract: missing={missing_parameter_keys}"
         )
-    parameter_match_frozen = present_parameter_keys == _PARAMETER_MATCH_KEYS
-    if parameter_match_frozen:
-        _validate_parameter_match(configuration, field=field)
+    parameter_fields_frozen = present_parameter_keys == _PARAMETER_MATCH_KEYS
+    if parameter_fields_frozen:
+        _validate_parameter_match(
+            configuration,
+            field=field,
+            model=implementation_model,
+        )
+    parameter_contract_frozen = parameter_fields_frozen and (
+        not requires_explicit_policy_contract(implementation_model)
+        or has_explicit_policy_contract
+    )
+    parameter_match_frozen = (
+        parameter_contract_frozen
+        and parameter_contract_for_model(implementation_model)
+        == PARAMETER_MATCHED_CONTRACT
+    )
     ppo = _mapping(configuration["ppo"], field=f"{field}.ppo")
     total_steps = _integer(ppo.get("total_steps"), field=f"{field}.ppo.total_steps", positive=True)
     if total_steps != registration["budgets"][identity[0]]:
@@ -889,6 +995,7 @@ def _validate_configuration(
         {
             "environment_source_frozen": source_frozen,
             "parameter_match_frozen": parameter_match_frozen,
+            "parameter_contract_frozen": parameter_contract_frozen,
         },
     )
 
@@ -1114,6 +1221,26 @@ def _validate_artifact(
             )
         except ValueError as error:
             raise DevelopmentAggregationError(str(error)) from error
+    expected_policy_contract = policy_contract_metadata_for_model(
+        implementation_model
+    )
+    if (
+        requires_explicit_policy_contract(implementation_model)
+        or any(name in artifact for name in expected_policy_contract)
+    ):
+        try:
+            validate_policy_contract_metadata(
+                implementation_model,
+                {name: artifact.get(name) for name in expected_policy_contract},
+                field=f"{field}.policy_contract",
+            )
+            validate_policy_core_contract(
+                implementation_model,
+                artifact.get("policy_core"),
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise DevelopmentAggregationError(str(error)) from error
     if registration["schema_version"] == 3:
         required.update(
             {
@@ -1203,13 +1330,27 @@ def _validate_artifact(
         provenance=manifest["provenance"],
         field=f"{field}.configuration",
     )
-    parameter_match = _validate_parameter_match(artifact, field=field)
-    if frozen_contract["parameter_match_frozen"]:
+    parameter_match = _validate_parameter_match(
+        artifact,
+        field=field,
+        model=implementation_model,
+    )
+    if frozen_contract["parameter_contract_frozen"]:
         for name in _PARAMETER_MATCH_KEYS:
             if artifact[name] != configuration[name]:
                 raise DevelopmentAggregationError(
                     f"{field}.{name} does not match the frozen configuration"
                 )
+        if requires_explicit_policy_contract(implementation_model):
+            if artifact.get("policy_core") != configuration.get("policy_core"):
+                raise DevelopmentAggregationError(
+                    f"{field}.policy_core does not match the frozen configuration"
+                )
+            for name in policy_contract_metadata_for_model(implementation_model):
+                if artifact.get(name) != configuration.get(name):
+                    raise DevelopmentAggregationError(
+                        f"{field}.{name} does not match the frozen configuration"
+                    )
     expected_source = expected_environment_source(environment)
     artifact_source_frozen = "environment_source" in artifact
     if artifact_source_frozen:
@@ -1334,6 +1475,9 @@ def _validate_artifact(
             frozen_contract["environment_source_frozen"] and artifact_source_frozen
         ),
         "parameter_match_frozen": frozen_contract["parameter_match_frozen"],
+        "parameter_contract_frozen": frozen_contract["parameter_contract_frozen"],
+        "parameter_contract": parameter_contract_for_model(implementation_model),
+        "comparison_role": comparison_role_for_model(implementation_model),
         "model_family": (
             registration["candidate_specs"][model]["model_family"]
             if registration["schema_version"] == 3
@@ -1618,12 +1762,13 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                 "development_tuning requires validated completion and checksum indexes"
             )
         if not all(
-            record["environment_source_frozen"] and record["parameter_match_frozen"]
+            record["environment_source_frozen"]
+            and record["parameter_contract_frozen"]
             for record in records.values()
         ):
             raise DevelopmentAggregationError(
                 "development_tuning requires frozen environment source and "
-                "parameter-match contracts in every cell"
+                "parameter contracts in every cell"
             )
 
     curve_start_by_environment: dict[str, int] = {}
@@ -1703,6 +1848,12 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
             group = {
                 "environment": environment,
                 "model": model,
+                "parameter_contract": records[
+                    (environment, model, registration["seeds"][0])
+                ]["parameter_contract"],
+                "comparison_role": records[
+                    (environment, model, registration["seeds"][0])
+                ]["comparison_role"],
                 "seeds": list(registration["seeds"]),
                 "raw_seed_values": raw_seed_values,
                 "final_seed_mean_return": _summary(
@@ -1814,10 +1965,16 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                 )
 
     paired: list[dict[str, Any]] = []
+    supplemental_paired: list[dict[str, Any]] = []
     if "arcmind" in registration["models"]:
         for environment in registration["environments"]:
             for model in registration["models"]:
                 if model == "arcmind":
+                    continue
+                role = records[
+                    (environment, model, registration["seeds"][0])
+                ]["comparison_role"]
+                if role == DEVELOPMENT_COMPATIBILITY_ROLE:
                     continue
                 raw_differences = []
                 differences = []
@@ -1836,19 +1993,22 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
                             "difference": difference,
                         }
                     )
-                paired.append(
-                    {
-                        "environment": environment,
-                        "model": model,
-                        "reference_model": "arcmind",
-                        "seeds": list(registration["seeds"]),
-                        "raw_seed_differences": raw_differences,
-                        "difference_summary": _summary(
-                            differences,
-                            stream=f"development-paired:{environment}:{model}:arcmind",
-                        ),
-                    }
-                )
+                paired_record = {
+                    "environment": environment,
+                    "model": model,
+                    "comparison_role": role,
+                    "reference_model": "arcmind",
+                    "seeds": list(registration["seeds"]),
+                    "raw_seed_differences": raw_differences,
+                    "difference_summary": _summary(
+                        differences,
+                        stream=f"development-paired:{environment}:{model}:arcmind",
+                    ),
+                }
+                if role == SUPPLEMENTAL_COMPARISON_ROLE:
+                    supplemental_paired.append(paired_record)
+                else:
+                    paired.append(paired_record)
 
     result = {
         "schema_version": 1,
@@ -1875,7 +2035,14 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
             "parameter_match_in_every_configuration": all(
                 record["parameter_match_frozen"] for record in records.values()
             ),
-            "artifact_parameter_match_validated": True,
+            "artifact_parameter_match_validated": all(
+                record["parameter_contract"] == PARAMETER_MATCHED_CONTRACT
+                for record in records.values()
+            ),
+            "parameter_contract_in_every_configuration": all(
+                record["parameter_contract_frozen"] for record in records.values()
+            ),
+            "artifact_parameter_contract_validated": True,
             "reference_implementation_validated": all(
                 record["reference_implementation_validated"] for record in records.values()
             ),
@@ -1892,6 +2059,7 @@ def build_development_aggregate(output_root: str | Path) -> dict[str, Any]:
         },
         "groups": groups,
         "paired_differences_against_arcmind": paired,
+        "supplemental_paired_differences_against_arcmind": supplemental_paired,
     }
     if registration["tier"] == "development_tuning":
         result.update(

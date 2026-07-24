@@ -220,6 +220,31 @@ It accepts recurrent state and episode-done flags. The implemented policy core
 uses that recurrence without changing PPO and has parameter, reset, sequence,
 equation, JIT, and gradient tests.
 
+[Memory Traces](https://proceedings.mlr.press/v267/eberhard25a.html) is
+represented by two lanes audited against
+[official commit
+`fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd`](https://github.com/onnoeberhard/memory-traces/tree/fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd).
+`memory_trace_official` preserves observation-only non-episodic traces,
+trace-major flattening, reset-before-current-observation ordering, separate
+actor and critic networks, two 64-unit tanh layers per network, and the
+official orthogonal initialization gains. Its categorical actor restricts it
+to discrete-action tasks. Its architecture is fixed and is therefore
+supplemental source-compatible evidence, not a parameter-matched primary
+comparison.
+
+`memory_trace_shared` applies the same recurrence to the shared augmented
+policy input and uses the common parameter-matched trunk and heads. It is the
+registered main-table adaptation. `memory_trace_mlp` remains only a
+development compatibility alias and is prohibited in tuning and registered
+final selections. The frozen decays `[0.0, 0.985]` are taken from the official
+TMaze64 example. They must not be described as official POBAX hyperparameters.
+Every configuration and artifact records the decay origin, parameter
+contract, comparison role, exact source hashes, and policy-core dimensions.
+An immutable CPU fixture executes the official `Trace` and `ActorCritic`
+implementations. Resume and aggregation fail closed on any drift. Aggregates
+place the official lane in a separate supplemental comparison and exclude it
+from the parameter-matched primary result.
+
 [Mamba-1](https://openreview.net/pdf?id=tEYskw1VY2) is implemented from the
 [official source pinned at commit
 `10b5d6358f27966f6a40e4bf0baa17a460688128`](https://github.com/state-spaces/mamba/tree/10b5d6358f27966f6a40e4bf0baa17a460688128).

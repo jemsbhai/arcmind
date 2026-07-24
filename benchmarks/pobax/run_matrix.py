@@ -14,7 +14,13 @@ from typing import Any
 
 from benchmarks.pobax.aggregate_development import build_development_aggregate
 from benchmarks.pobax.model_registry import (
+    policy_contract_metadata_for_model,
     reference_implementation_for_model,
+    requires_explicit_policy_contract,
+    validate_model_environment_contract,
+    validate_model_evidence_tier,
+    validate_policy_contract_metadata,
+    validate_policy_core_contract,
     validate_policy_model_id,
     validate_required_reference_implementation,
 )
@@ -161,6 +167,7 @@ def _load_registration(path: Path) -> dict[str, Any]:
             raise ValueError("models must not contain duplicates")
         for index, model in enumerate(models):
             validate_policy_model_id(model, field=f"models[{index}]")
+            validate_model_evidence_tier(model, tier, field=f"models[{index}]")
     if matrix_kind == "primary_comparison" and "arcmind" not in models:
         raise ValueError("primary_comparison matrices must contain arcmind")
     if matrix_kind == "upper_reference" and models != ["memoryless_mlp"]:
@@ -196,6 +203,19 @@ def _load_registration(path: Path) -> dict[str, Any]:
         environment_ids.append(environment_id)
     if len(set(environment_ids)) != len(environment_ids):
         raise ValueError("environment ids must not contain duplicates")
+    implementation_models = (
+        [family["implementation_model"] for family in candidate_families]
+        if schema_version == 3
+        else models
+    )
+    for model in implementation_models:
+        validate_model_evidence_tier(model, tier, field=f"model {model!r}")
+        for environment_id in environment_ids:
+            validate_model_environment_contract(
+                model,
+                environment_id,
+                field=f"model {model!r}",
+            )
     if matrix_kind == "upper_reference":
         unsupported = sorted(set(environment_ids) - set(UPPER_REFERENCE_TARGETS))
         if unsupported:
@@ -493,6 +513,44 @@ def _load_matching_artifact(
         except ValueError as error:
             raise ExistingArtifactMismatchError(
                 f"existing cell reference implementation does not match registry: {path}"
+            ) from error
+    expected_policy_contract = policy_contract_metadata_for_model(implementation_model)
+    if (
+        requires_explicit_policy_contract(implementation_model)
+        or any(name in configuration for name in expected_policy_contract)
+        or any(name in artifact for name in expected_policy_contract)
+    ):
+        try:
+            validate_policy_contract_metadata(
+                implementation_model,
+                {
+                    name: configuration.get(name)
+                    for name in expected_policy_contract
+                },
+                field="configuration.policy_contract",
+            )
+            validate_policy_contract_metadata(
+                implementation_model,
+                {name: artifact.get(name) for name in expected_policy_contract},
+                field="artifact.policy_contract",
+            )
+            validate_policy_core_contract(
+                implementation_model,
+                configuration.get("policy_core"),
+                field="configuration.policy_core",
+            )
+            validate_policy_core_contract(
+                implementation_model,
+                artifact.get("policy_core"),
+                field="artifact.policy_core",
+            )
+            if artifact.get("policy_core") != configuration.get("policy_core"):
+                raise ValueError(
+                    "artifact.policy_core does not match configuration.policy_core"
+                )
+        except ValueError as error:
+            raise ExistingArtifactMismatchError(
+                f"existing cell policy contract does not match registry: {path}"
             ) from error
     if registration_schema_version == 3:
         candidate_identity = {

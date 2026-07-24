@@ -8,6 +8,8 @@ from typing import Mapping, NamedTuple
 import jax
 import jax.numpy as jnp
 
+from benchmarks.pobax.model_registry import MEMORY_TRACE_DECAYS
+
 Array = jax.Array
 Params = Mapping[str, Array]
 
@@ -383,13 +385,13 @@ class MemoryTraceState(NamedTuple):
 
 
 @dataclass(frozen=True)
-class MemoryTraceMLPPolicyCore:
-    """ICML 2025 memory-trace features with a parameter-matched MLP."""
+class MemoryTraceSharedPolicyCore:
+    """Memory traces on shared augmented input with a matched shared trunk."""
 
     input_dim: int
     action_dim: int
     hidden_size: int
-    decays: tuple[float, ...] = (0.0, 0.985)
+    decays: tuple[float, ...] = MEMORY_TRACE_DECAYS
 
     def __post_init__(self) -> None:
         if not self.decays:
@@ -480,6 +482,11 @@ class MemoryTraceMLPPolicyCore:
     @staticmethod
     def count_parameters(params: Params) -> int:
         return sum(int(value.size) for value in jax.tree.leaves(params))
+
+
+# Development compatibility name. Registered evidence must use the explicit
+# ``memory_trace_shared`` model identifier.
+MemoryTraceMLPPolicyCore = MemoryTraceSharedPolicyCore
 
 
 @dataclass(frozen=True)
@@ -774,7 +781,11 @@ def match_baseline_width(
                 + width
                 + 1
             )
-        if model in {"frame_stack_mlp", "memory_trace_mlp"}:
+        if model in {
+            "frame_stack_mlp",
+            "memory_trace_mlp",
+            "memory_trace_shared",
+        }:
             history_size = (
                 frame_stack_size
                 if model == "frame_stack_mlp"

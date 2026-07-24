@@ -16,7 +16,11 @@ from benchmarks.pobax.implementation_provenance import (
     gather_implementation_source,
 )
 from benchmarks.pobax.link_upper_reference import _validate_completion_and_checksums
-from benchmarks.pobax.model_registry import MAMBA1_REFERENCE_IMPLEMENTATION
+from benchmarks.pobax.model_registry import (
+    MAMBA1_REFERENCE_IMPLEMENTATION,
+    MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION,
+    policy_contract_metadata_for_model,
+)
 from benchmarks.pobax.registered_artifacts import (
     ExistingArtifactMismatchError,
     atomic_write_json,
@@ -81,6 +85,7 @@ def test_implementation_source_inventory_covers_shared_and_model_runtime():
         "benchmarks/pobax/shared_ppo.py",
         "benchmarks/pobax/policy_core.py",
         "benchmarks/pobax/mamba_core.py",
+        "benchmarks/pobax/memory_trace_core.py",
         "benchmarks/pobax/upper_reference_envs.py",
     }.issubset(paths)
     assert not any(path.startswith("benchmarks/pobax/tests/") for path in paths)
@@ -194,8 +199,10 @@ def _tuning_aggregate() -> dict[str, object]:
         },
         "frozen_semantic_contract": {
             "environment_source_in_every_configuration": True,
-            "parameter_match_in_every_configuration": True,
-            "artifact_parameter_match_validated": True,
+            "parameter_match_in_every_configuration": False,
+            "artifact_parameter_match_validated": False,
+            "parameter_contract_in_every_configuration": True,
+            "artifact_parameter_contract_validated": True,
         },
         "selection_eligibility": {
             "eligible_for_hyperparameter_selection": True,
@@ -432,6 +439,43 @@ def test_tuning_registration_rejects_unknown_policy_implementation(tmp_path):
     path.write_text(json.dumps(registration), encoding="utf-8")
 
     with pytest.raises(ValueError, match="registered policy implementations"):
+        _load_registration(path)
+
+
+def test_memory_trace_alias_is_rejected_for_tuning_and_final_selection(
+    tmp_path,
+    monkeypatch,
+):
+    tuning = _registration_v3()
+    tuning["candidate_families"][0]["implementation_model"] = "memory_trace_mlp"
+    tuning_path = tmp_path / "tuning.json"
+    tuning_path.write_text(json.dumps(tuning), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="development-only compatibility alias"):
+        _load_registration(tuning_path)
+
+    final_root = tmp_path / "final"
+    final_root.mkdir()
+    final, final_path = _registration_v4(final_root, monkeypatch)
+    final["tuning_selection"]["selections"][0][
+        "implementation_model"
+    ] = "memory_trace_mlp"
+    final_path.write_text(json.dumps(final), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="development-only compatibility alias"):
+        _load_registration(final_path)
+
+
+def test_official_memory_trace_registration_rejects_continuous_tasks(tmp_path):
+    registration = _registration()
+    registration["models"] = ["arcmind", "memory_trace_official"]
+    registration["environments"] = [
+        {"id": "Walker-V-v0", "total_steps": 131_072}
+    ]
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="official.*continuous-action"):
         _load_registration(path)
 
 
@@ -1055,6 +1099,84 @@ def test_existing_mamba_artifact_must_match_audited_source_contract(tmp_path):
         )
 
 
+def test_existing_official_memory_trace_artifact_freezes_policy_contract(tmp_path):
+    path = tmp_path / "memory-trace-cell.json"
+    provenance = {
+        "git": {"commit": "a" * 40, "dirty": False, "diff_sha256": None},
+        "dependency_lock_sha256": "b" * 64,
+        "pobax_commit": "c" * 40,
+        "navix_commit": "d" * 40,
+        "runtime_contract": {"runtime": "test"},
+    }
+    policy_core = {
+        "input_dim": 7,
+        "observation_dim": 2,
+        "action_dim": 3,
+        "hidden_size": 64,
+        "decays": [0.0, 0.985],
+    }
+    policy_contract = policy_contract_metadata_for_model("memory_trace_official")
+    configuration = {
+        "environment": "tmaze_10",
+        "model": "memory_trace_official",
+        "seed": 1103,
+        "reference_implementation": deepcopy(
+            MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION
+        ),
+        "policy_core": deepcopy(policy_core),
+        **deepcopy(policy_contract),
+    }
+    configuration_sha256 = canonical_json_sha256(configuration)
+    artifact = {
+        "schema_version": 4,
+        "status": "registered_final_complete",
+        "environment": "tmaze_10",
+        "model": "memory_trace_official",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "configuration": configuration,
+        "reference_implementation": deepcopy(
+            MEMORY_TRACE_OFFICIAL_REFERENCE_IMPLEMENTATION
+        ),
+        "policy_core": deepcopy(policy_core),
+        **deepcopy(policy_contract),
+        "matrix_manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+    }
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    arguments = {
+        "expected_status": "registered_final_complete",
+        "environment": "tmaze_10",
+        "model": "memory_trace_official",
+        "seed": 1103,
+        "configuration_sha256": configuration_sha256,
+        "manifest_sha256": "f" * 64,
+        "cell_id": "1" * 64,
+        "provenance": provenance,
+        "registration_schema_version": 1,
+    }
+
+    assert _load_matching_artifact(path, **arguments) == artifact
+
+    artifact["policy_core"]["decays"] = [0.0, 0.9]
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="policy contract"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["policy_core"] = deepcopy(policy_core)
+    artifact["comparison_role"] = "parameter_matched_primary"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="policy contract"):
+        _load_matching_artifact(path, **arguments)
+
+    artifact["comparison_role"] = policy_contract["comparison_role"]
+    artifact["policy_core"]["input_dim"] = 8
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(ExistingArtifactMismatchError, match="policy contract"):
+        _load_matching_artifact(path, **arguments)
+
+
 def test_existing_tuning_artifact_must_match_candidate_identity(tmp_path):
     path = tmp_path / "cell.json"
     provenance = {
@@ -1233,6 +1355,26 @@ def test_mamba_cell_namespace_and_command_use_registered_implementation():
 
     assert args.model == "mamba1"
     assert command[command.index("--model") + 1] == "mamba1"
+
+
+def test_memory_trace_shared_cell_namespace_uses_explicit_registered_identifier():
+    registration = _registration()
+    registration["models"] = ["arcmind", "memory_trace_shared"]
+
+    args = _cell_namespace(
+        registration,
+        environment=registration["environments"][0],
+        model="memory_trace_shared",
+        seed=1103,
+        output=None,
+        manifest_sha256=None,
+        cell_id=None,
+        describe_only=True,
+    )
+    command = _command_for_cell(args)
+
+    assert args.model == "memory_trace_shared"
+    assert command[command.index("--model") + 1] == "memory_trace_shared"
 
 
 def test_schema_v4_cell_namespace_carries_bound_final_selection(

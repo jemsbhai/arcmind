@@ -9,7 +9,11 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from benchmarks.pobax.implementation_provenance import normalize_implementation_source
-from benchmarks.pobax.model_registry import validate_policy_model_id
+from benchmarks.pobax.model_registry import (
+    validate_model_environment_contract,
+    validate_model_evidence_tier,
+    validate_policy_model_id,
+)
 
 REGISTRATION_FIELDS_V1 = {
     "schema_version",
@@ -253,6 +257,16 @@ def normalize_final_selection_binding(value: object) -> dict[str, Any]:
             implementation_model,
             field=f"{field}.implementation_model",
         )
+        validate_model_evidence_tier(
+            implementation_model,
+            "registered_final",
+            field=f"{field}.implementation_model",
+        )
+        validate_model_environment_contract(
+            implementation_model,
+            environment,
+            field=f"{field}.implementation_model",
+        )
         identity = (environment, model_family)
         implementation_identity = (environment, implementation_model)
         if identity in identities:
@@ -318,8 +332,8 @@ def validate_final_selection_against_aggregate(
         or integrity.get("checksums_present_and_validated") is not True
         or not isinstance(semantics, Mapping)
         or semantics.get("environment_source_in_every_configuration") is not True
-        or semantics.get("parameter_match_in_every_configuration") is not True
-        or semantics.get("artifact_parameter_match_validated") is not True
+        or semantics.get("parameter_contract_in_every_configuration") is not True
+        or semantics.get("artifact_parameter_contract_validated") is not True
     ):
         raise ValueError("tuning selection aggregate has an invalid integrity contract")
     eligibility = aggregate.get("selection_eligibility")
@@ -568,6 +582,11 @@ def normalize_candidate_families(value: object) -> tuple[dict[str, Any], ...]:
             )
         validate_policy_model_id(
             implementation_model,
+            field=f"{field}.implementation_model",
+        )
+        validate_model_evidence_tier(
+            implementation_model,
+            "development_tuning",
             field=f"{field}.implementation_model",
         )
         raw_candidates = raw_family["candidates"]
