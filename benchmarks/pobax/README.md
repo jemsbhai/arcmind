@@ -134,11 +134,18 @@ both residual connections with the GRU-type gates from the
 [GTrXL paper](https://proceedings.mlr.press/v119/parisotto20a.html). The
 full-window control instead retains raw policy inputs and recomputes the whole
 causal window at every decision, making it a deliberately expensive
-exact-attention reference. The POBAX paper names its attention agent
-Transformer-XL, while the pinned repository enables GRU-style transformer
-gating by default. Compatibility reports must record the gate and
-normalization settings. They must use the name Transformer-XL unless those
-settings verify the exact GTrXL architecture.
+exact-attention reference. Its window is the task's complete maximum episode
+horizon: 1,000 steps for RockSample and the other bounded POBAX tasks, and
+2,000 steps for Navix. New tuning and registered configurations serialize
+this value as `policy_core.window_length` and fail validation or resume when
+it differs from `evaluation_max_episode_steps`. Earlier schema-v2 development
+artifacts with the former 32-step default remain readable, but they are not
+full-horizon attention measurements and are ineligible for paper claims. The
+POBAX paper names its attention agent Transformer-XL, while the pinned
+repository enables GRU-style transformer gating by default. Compatibility
+reports must record the gate and normalization settings. They must use the
+name Transformer-XL unless those settings verify the exact GTrXL
+architecture.
 
 Memory Traces has two explicit evidence lanes. `memory_trace_official` follows
 the [official source at commit

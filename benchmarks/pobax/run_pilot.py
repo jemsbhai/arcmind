@@ -62,6 +62,7 @@ from benchmarks.pobax.model_registry import (
     PARAMETER_MATCHED_CONTRACT,
     POLICY_MODEL_IDS,
     policy_contract_metadata_for_model,
+    validate_causal_transformer_horizon_contract,
     validate_model_environment_contract,
     validate_model_evidence_tier,
     validate_policy_model_id,
@@ -454,6 +455,7 @@ def build_policy_core(
             input_dim,
             action_dim,
             width,
+            window_length=max_episode_steps,
         )
     else:
         raise ValueError(f"Unsupported model: {model_name}")
@@ -821,6 +823,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         target_input_dim=target_input_dim,
         max_episode_steps=maximum_episode_steps,
     )
+    serialized_policy_core = asdict(policy_core)
+    validate_causal_transformer_horizon_contract(
+        args.model,
+        serialized_policy_core,
+        maximum_episode_steps,
+        field="policy_core",
+    )
     if continuous_action:
         # Every continuous policy learns the same state-independent diagonal
         # log standard deviation in addition to its mean-producing core.
@@ -857,7 +866,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "model": candidate_id if args.registration_schema_version == 3 else args.model,
         "seed": args.seed,
-        "policy_core": asdict(policy_core),
+        "policy_core": serialized_policy_core,
         "reference_implementation": REFERENCE_IMPLEMENTATIONS.get(args.model),
         "environment_reference": reference_metadata,
         "environment_contract": ENVIRONMENT_CONTRACTS.get(args.environment),
@@ -991,7 +1000,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "arcmind_target_parameter_count": target_parameter_count,
         "parameter_ratio": ratio,
         **policy_contract_metadata,
-        "policy_core": asdict(policy_core),
+        "policy_core": serialized_policy_core,
         "reference_implementation": REFERENCE_IMPLEMENTATIONS.get(args.model),
         "environment_source": frozen_configuration["environment_source"],
         "environment_reference": reference_metadata,

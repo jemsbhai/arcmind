@@ -120,12 +120,22 @@ Mandatory controls and baselines:
 - Fast and Forgetful Memory, Stable Hadamard Memory, memory traces, LRU, S4D,
   S5/S5RL, a modern stable diagonal SSM, and source-audited Mamba-1;
 - the repository's selective SSM without exact recall;
-- a full-window causal Transformer and the published POBAX Transformer-XL
+- a full-window causal Transformer whose visible window equals the task's
+  maximum episode horizon, and the published POBAX Transformer-XL
   configuration at matched parameter count;
 - ArcMind without age encoding, without episodic memory, without gating, and
   without the SSM path;
 - a fully observable policy or privileged-state upper reference where the
   environment supplies one.
+
+For the causal Transformer, full-window means the complete bounded episode,
+not a fixed short context. The registered policy core therefore uses a
+1,000-step window on RockSample and a 2,000-step window on Navix. The
+serialized window must equal `evaluation_max_episode_steps` in the tuning and
+final configuration and artifact. Resume and aggregation fail closed on any
+disagreement. Legacy development artifacts that serialized the former
+32-step default remain readable, but they cannot support full-horizon
+attention, latency, memory, or return claims.
 
 POBAX does not implement a positional MLP. The
 [`backend="positional"` setting](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/gymnax.py#L242-L273)

@@ -224,6 +224,10 @@ stages:
       freeze_parameter_counts_and_ratio: true
       freeze_parameter_contract_and_comparison_role: true
       freeze_memory_trace_decay_values_and_origin: true
+      causal_transformer_horizon_contract:
+        registered_window_length: equals_task_maximum_episode_steps
+        validate_configuration_artifact_resume_and_aggregation: true
+        legacy_schema_v1_v2_development_artifacts: readable_but_not_paper_eligible
       record_requested_environment_steps: true
       record_realized_environment_steps: true
       finite_optimizer_metrics:

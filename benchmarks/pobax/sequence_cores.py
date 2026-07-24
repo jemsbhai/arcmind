@@ -1274,20 +1274,21 @@ class TransformerXLPolicyCore:
 
 @dataclass(frozen=True)
 class FullCausalTransformerPolicyCore:
-    """Full self-attention over a bounded causal input window.
+    """Full self-attention over the complete bounded task episode.
 
     Unlike Transformer-XL, this control retains raw policy inputs and
     recomputes every layer for the entire visible window on each decision.
     This is deliberately more expensive and serves as the exact-attention
-    reference at the same configured context length.
+    reference. The benchmark runner must set ``window_length`` to the task's
+    maximum episode horizon.
     """
 
     input_dim: int
     action_dim: int
     hidden_size: int
+    window_length: int
     num_heads: int = 4
     num_layers: int = 2
-    window_length: int = 32
 
     def __post_init__(self) -> None:
         if self.hidden_size % self.num_heads:

@@ -59,6 +59,7 @@ from benchmarks.pobax.model_registry import (
     policy_contract_metadata_for_model,
     reference_implementation_for_model,
     requires_explicit_policy_contract,
+    validate_causal_transformer_horizon_contract,
     validate_model_environment_contract,
     validate_model_evidence_tier,
     validate_policy_contract_metadata,
@@ -677,6 +678,16 @@ def _validate_frozen_configuration(
         field=f"{field}.evaluation_max_episode_steps",
         positive=True,
     )
+    if configuration_schema == 4:
+        try:
+            validate_causal_transformer_horizon_contract(
+                identity[1],
+                configuration.get("policy_core"),
+                evaluation_horizon,
+                field=f"{field}.policy_core",
+            )
+        except ValueError as error:
+            raise RegisteredAggregationError(str(error)) from error
     configured_sources = {
         "dependency_lock_sha256": _sha256(
             configuration["dependency_lock_sha256"],

@@ -17,6 +17,7 @@ from benchmarks.pobax.model_registry import (
     policy_contract_metadata_for_model,
     reference_implementation_for_model,
     requires_explicit_policy_contract,
+    validate_causal_transformer_horizon_contract,
     validate_model_environment_contract,
     validate_model_evidence_tier,
     validate_policy_contract_metadata,
@@ -551,6 +552,28 @@ def _load_matching_artifact(
         except ValueError as error:
             raise ExistingArtifactMismatchError(
                 f"existing cell policy contract does not match registry: {path}"
+            ) from error
+    if registration_schema_version in {3, 4}:
+        try:
+            maximum_episode_steps = configuration.get(
+                "evaluation_max_episode_steps"
+            )
+            validate_causal_transformer_horizon_contract(
+                implementation_model,
+                configuration.get("policy_core"),
+                maximum_episode_steps,
+                field="configuration.policy_core",
+            )
+            validate_causal_transformer_horizon_contract(
+                implementation_model,
+                artifact.get("policy_core"),
+                maximum_episode_steps,
+                field="artifact.policy_core",
+            )
+        except ValueError as error:
+            raise ExistingArtifactMismatchError(
+                f"existing cell causal attention horizon does not match its "
+                f"registered task: {path}"
             ) from error
     if registration_schema_version == 3:
         candidate_identity = {

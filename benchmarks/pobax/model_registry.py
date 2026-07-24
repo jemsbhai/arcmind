@@ -513,6 +513,37 @@ def validate_policy_core_contract(model: str, value: object, *, field: str) -> N
         )
 
 
+def validate_causal_transformer_horizon_contract(
+    model: str,
+    value: object,
+    maximum_episode_steps: object,
+    *,
+    field: str,
+) -> None:
+    """Require registered full attention to cover the complete task horizon."""
+
+    if model != "causal_transformer":
+        return
+    if (
+        isinstance(maximum_episode_steps, bool)
+        or not isinstance(maximum_episode_steps, int)
+        or maximum_episode_steps <= 0
+    ):
+        raise ValueError(f"{field} requires a positive integer task horizon")
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object for model {model!r}")
+    window_length = value.get("window_length")
+    if (
+        isinstance(window_length, bool)
+        or not isinstance(window_length, int)
+        or window_length != maximum_episode_steps
+    ):
+        raise ValueError(
+            f"{field}.window_length must equal the task maximum episode horizon "
+            f"{maximum_episode_steps}, found {window_length!r}"
+        )
+
+
 def fixed_official_parameter_count(model: str, policy_core: object) -> int | None:
     """Return the exact fixed-source count, or None for matched models."""
 
