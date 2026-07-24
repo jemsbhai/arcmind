@@ -793,6 +793,110 @@ with each actual experiment.
 - Evidence restriction: no AGaLiTe return, efficiency, superiority, or
   equivalence claim is supported until registered experiments are complete.
 
+### F-ENG-013: Full-episode causal attention exceeds the local training resource gate
+
+- Class: `development smoke` and `null or negative result`
+- Status: resource gate complete, registered performance experiments not
+  started
+- Date: 2026-07-24
+- Question: can the exact-attention control be trained with a visible window
+  equal to the complete bounded task episode on the declared local hardware?
+- Correction:
+  - the first RockSample calibration at commit
+    `74d1fc69cd3fb0db9ee4428753676192961a8879` serialized
+    `policy_core.window_length = 32`, despite describing the model as
+    full-window causal attention;
+  - its 193.009732-second training measurement is therefore a 32-step
+    attention measurement and cannot support full-episode attention,
+    resource, latency, or return claims;
+  - commit `3a12cb33b29f8018ef2d87cb2713650c537a6e66` removes the silent default and
+    binds the causal Transformer window to `evaluation_max_episode_steps`;
+    and
+  - schema-v3 tuning and schema-v4 final configuration, artifact, resume, and
+    aggregation paths now reject a causal Transformer whose serialized
+    window differs from the task horizon. Legacy schema-v1 and schema-v2
+    development artifacts remain readable but are not paper eligible.
+- Validation:
+  - the focused horizon, matrix, development aggregation, and registered
+    aggregation suite passed 197 of 197 tests;
+  - the full POBAX suite passed 391 of 391 tests in the pinned environment;
+    and
+  - the corrected RockSample build used the 1,000-step task horizon at clean
+    commit `03abcf15b992c1591cce4ef0332e350b11e75da2`.
+- Corrected resource result:
+  - hardware was an NVIDIA GeForce RTX 4090 Laptop GPU with 16,376 MiB total
+    memory, using JAX and `jaxlib` 0.6.2 on CUDA;
+  - XLA reported that rematerialization could not reduce the graph below
+    11.39 GiB and reduced the compiled requirement only to 17.71 GiB;
+  - execution then failed while requesting 19,013,566,104 bytes; and
+  - no training update or return artifact completed.
+- Frozen corrected gate:
+  - registration:
+    `benchmarks/pobax/manifests/compute_calibration_rocksample_full_attention_v2.json`;
+  - source registration SHA256:
+    `8c8a37e5195cd318c5be9c47f3028e21702c84f349273ec4c746a3775f89f891`;
+  - canonical output registration SHA256:
+    `e385f2a914b437ba94313837bbc3554a0b884a7283676cbf2ff21781c4c3c192`;
+  - frozen-manifest SHA256:
+    `c8a5930220c1293966c6d1e139a1d251248d180ccacf3672102bd838dde05bb1`;
+  - internal manifest identity:
+    `4fceef8f9188b379c4480e52ccdd82d19a9f3f693112ccfd4af09ed06cc7b0ce`;
+  - raw attempt directory:
+    `benchmark_results/pobax/compute-calibration-03abcf1/rocksample-full-attention-v2.attempts`;
+    and
+  - failed-log SHA256:
+    `238a944fc19c1192910751c45d67957bda9c212512af66dfce83029612f40777`.
+- Common T-Maze timing gate:
+
+  | Model | Parameters | Training seconds for 128,000 steps |
+  |---|---:|---:|
+  | Memoryless MLP | 28,663 | 11.832806 |
+  | Frame-stack MLP | 28,865 | 30.957087 |
+  | GRU | 28,893 | 59.144321 |
+  | Shared Memory Traces | 28,553 | 72.926713 |
+  | ArcMind | 28,717 | 648.643372 |
+
+- Timing integrity:
+  - the common timing matrix completed all five planned cells at clean commit
+    `03abcf15b992c1591cce4ef0332e350b11e75da2`;
+  - its source registration SHA256 is
+    `71e97e02b5306feddb720c452a0cbfb615e535196c2eae3567188bff2b2e225c`;
+  - its canonical output registration SHA256 is
+    `125438cf7bddec2b102a64fa807d57f7295f7c7770922603d276221cce762c4c`;
+  - its frozen-manifest SHA256 is
+    `40dfd36febed03c69970d9400b1a30663fa7236d70d3d467917f89b4c1689360`;
+  - its internal manifest identity is
+    `69b864e053d29ec40d87694d1e1972604fb942ab2312660ce4e8235743aa618d`;
+  - its completion-index SHA256 is
+    `c1f033fe4665a40373af7e5d395190833dc08a43652e6c6a36d5291e4db0d807`;
+  - its checksum-manifest SHA256 is
+    `5f72d923f9f22e7ca68b9b0986aa61e4776bcacf7ae8b86c685d2aa25ccd71a5`;
+    and
+  - the raw directory is
+    `benchmark_results/pobax/compute-calibration-03abcf1/tmaze-common-v2`.
+- Unexpected observation: the ArcMind timing was 2.98 times the
+  217.655288-second measurement from the earlier T-Maze calibration even
+  though the ArcMind execution path, dependency versions, learner, task,
+  parameter count, and step budget were unchanged. The runtime manifest does
+  not capture accelerator clocks or power state, so these measurements do not
+  identify the source of the difference. Compute planning must use the slower
+  measurement or add replicated hardware-state measurements. It must not
+  average the discrepancy away.
+- Decision:
+  - do not silently shorten the causal Transformer context;
+  - exclude full-episode causal attention from trainable registered
+    comparisons on the declared 16 GiB device;
+  - retain bounded Transformer-XL as the trainable recurrent-attention
+    baseline where task incidence permits; and
+  - retain full-episode causal attention only as an explicitly labeled
+    resource reference unless a new frozen resource contract makes it
+    feasible.
+- Evidence restriction: calibration returns were not inspected for selection
+  and cannot support performance claims. This finding supports only the
+  implementation correction, measured timing conditions, and local resource
+  exclusion.
+- External cost: zero dollars. All measurements used local hardware.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`
