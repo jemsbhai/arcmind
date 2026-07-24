@@ -42,14 +42,18 @@ from benchmarks.pobax.registration_protocol import (
     normalize_candidate_families,
     normalize_final_selection_binding,
     normalize_learner,
+    normalize_shared_learner_grid,
+    normalize_tuned_families,
     realized_environment_steps,
     registration_fields,
     validate_comparison_profile,
+    validate_compute_aware_tuning_contract,
     validate_development_tuning_contract,
     validate_final_provenance_against_tuning,
     validate_final_selection_against_aggregate,
 )
 from benchmarks.pobax.run_pilot import (
+    ARTIFACT_SCHEMA_BY_REGISTRATION,
     EVIDENCE_STATUS,
     UPPER_REFERENCE_TARGETS,
     run,
@@ -67,6 +71,24 @@ _MATRIX_KINDS = {
     "hyperparameter_selection",
 }
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _schema_v5_candidates(registration: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Expand the one shared learner grid into immutable family candidates."""
+
+    families = normalize_tuned_families(registration["tuned_families"])
+    learner_grid = normalize_shared_learner_grid(registration["learner_grid"])
+    return tuple(
+        {
+            "candidate_id": f"{family['family_id']}.{grid_item['learner_id']}",
+            "model_family": family["family_id"],
+            "implementation_model": family["implementation_model"],
+            "learner_id": grid_item["learner_id"],
+            "learner": grid_item["learner"],
+        }
+        for family in families
+        for grid_item in learner_grid
+    )
 
 
 def _bound_repository_path(relative_path: str, *, field: str) -> Path:
@@ -144,11 +166,14 @@ def _load_registration(path: Path) -> dict[str, Any]:
         raise ValueError("registration schema version 3 is reserved for development_tuning")
     if schema_version == 4 and tier != "registered_final":
         raise ValueError("registration schema version 4 is reserved for registered_final")
+    if schema_version == 5 and tier != "development_tuning":
+        raise ValueError("registration schema version 5 is reserved for development_tuning")
     matrix_kind = registration.get("matrix_kind")
     if matrix_kind not in _MATRIX_KINDS:
         raise ValueError(f"unsupported matrix_kind: {matrix_kind!r}")
 
     candidate_families: tuple[dict[str, Any], ...] = ()
+    schema_v5_candidates: tuple[dict[str, Any], ...] = ()
     if schema_version == 3:
         candidate_families = normalize_candidate_families(registration.get("candidate_families"))
         models = [
@@ -156,6 +181,9 @@ def _load_registration(path: Path) -> dict[str, Any]:
             for family in candidate_families
             for candidate in family["candidates"]
         ]
+    elif schema_version == 5:
+        schema_v5_candidates = _schema_v5_candidates(registration)
+        models = [candidate["candidate_id"] for candidate in schema_v5_candidates]
     else:
         models = registration.get("models")
         if (
@@ -173,8 +201,10 @@ def _load_registration(path: Path) -> dict[str, Any]:
         raise ValueError("primary_comparison matrices must contain arcmind")
     if matrix_kind == "upper_reference" and models != ["memoryless_mlp"]:
         raise ValueError("upper_reference matrices must contain only memoryless_mlp")
-    if matrix_kind == "hyperparameter_selection" and schema_version != 3:
-        raise ValueError("hyperparameter_selection requires registration schema version 3")
+    if matrix_kind == "hyperparameter_selection" and schema_version not in {3, 5}:
+        raise ValueError(
+            "hyperparameter_selection requires registration schema version 3 or 5"
+        )
     if schema_version == 4 and matrix_kind != "primary_comparison":
         raise ValueError("registration schema version 4 requires primary_comparison")
     if tier == "registered_final" and matrix_kind == "primary_comparison" and schema_version != 4:
@@ -207,6 +237,11 @@ def _load_registration(path: Path) -> dict[str, Any]:
     implementation_models = (
         [family["implementation_model"] for family in candidate_families]
         if schema_version == 3
+        else [
+            family["implementation_model"]
+            for family in normalize_tuned_families(registration["tuned_families"])
+        ]
+        if schema_version == 5
         else models
     )
     for model in implementation_models:
@@ -235,6 +270,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
             for candidate in family["candidates"]
         ]
         if schema_version == 3
+        else [candidate["learner"] for candidate in schema_v5_candidates]
+        if schema_version == 5
         else [selection["learner"] for selection in final_selection["selections"]]
         if schema_version == 4
         else [
@@ -273,17 +310,36 @@ def _load_registration(path: Path) -> dict[str, Any]:
             if learners[0][field] != expected:
                 raise ValueError(f"quick registrations must record learner.{field}={expected}")
     if tier == "development_tuning":
-        validate_development_tuning_contract(
-            schema_version=schema_version,
-            comparison_profile=comparison_profile,
-            matrix_kind=matrix_kind,
-            candidate_families=candidate_families,
-            environments={
-                environment["id"]: environment["total_steps"] for environment in environments
-            },
-            seeds=seeds,
-            quick=registration["quick"],
-        )
+        environment_budgets = {
+            environment["id"]: environment["total_steps"] for environment in environments
+        }
+        if schema_version == 3:
+            validate_development_tuning_contract(
+                schema_version=schema_version,
+                comparison_profile=comparison_profile,
+                matrix_kind=matrix_kind,
+                candidate_families=candidate_families,
+                environments=environment_budgets,
+                seeds=seeds,
+                quick=registration["quick"],
+            )
+        elif schema_version == 5:
+            validate_compute_aware_tuning_contract(
+                schema_version=schema_version,
+                comparison_profile=comparison_profile,
+                matrix_kind=matrix_kind,
+                tuned_families=normalize_tuned_families(
+                    registration["tuned_families"]
+                ),
+                learner_grid=normalize_shared_learner_grid(
+                    registration["learner_grid"]
+                ),
+                environments=environment_budgets,
+                seeds=seeds,
+                quick=registration["quick"],
+            )
+        else:  # pragma: no cover - schema reservation checks reject this
+            raise AssertionError("unsupported development-tuning registration schema")
     if schema_version == 4 and comparison_profile != "arcmind_shared_comparison":
         raise ValueError(
             "schema-v4 registered final requires comparison_profile 'arcmind_shared_comparison'"
@@ -306,6 +362,7 @@ def _cell_namespace(
 ) -> Namespace:
     candidate_id: str | None = None
     model_family: str | None = None
+    learner_id: str | None = None
     tuning_aggregate_sha256: str | None = None
     tuning_completion_index_sha256: str | None = None
     tuning_checksum_manifest_sha256: str | None = None
@@ -325,6 +382,22 @@ def _cell_namespace(
             raise AssertionError(f"unknown tuning candidate: {model}")
         model_family, candidate_spec = candidate
         candidate_id = candidate_spec["candidate_id"]
+        implementation_model = candidate_spec["implementation_model"]
+        learner = candidate_spec["learner"]
+    elif registration["schema_version"] == 5:
+        candidate_spec = next(
+            (
+                candidate
+                for candidate in _schema_v5_candidates(registration)
+                if candidate["candidate_id"] == model
+            ),
+            None,
+        )
+        if candidate_spec is None:  # pragma: no cover - registration validates
+            raise AssertionError(f"unknown compute-aware tuning candidate: {model}")
+        candidate_id = candidate_spec["candidate_id"]
+        model_family = candidate_spec["model_family"]
+        learner_id = candidate_spec["learner_id"]
         implementation_model = candidate_spec["implementation_model"]
         learner = candidate_spec["learner"]
     elif registration["schema_version"] == 4:
@@ -356,6 +429,7 @@ def _cell_namespace(
         model=implementation_model,
         candidate_id=candidate_id,
         model_family=model_family,
+        learner_id=learner_id,
         tuning_aggregate_sha256=tuning_aggregate_sha256,
         tuning_completion_index_sha256=tuning_completion_index_sha256,
         tuning_checksum_manifest_sha256=tuning_checksum_manifest_sha256,
@@ -432,6 +506,8 @@ def _command_for_cell(args: Namespace) -> list[str]:
     if getattr(args, "candidate_id", None) is not None:
         command.extend(["--candidate-id", args.candidate_id])
         command.extend(["--model-family", args.model_family])
+    if getattr(args, "learner_id", None) is not None:
+        command.extend(["--learner-id", args.learner_id])
     if getattr(args, "tuning_aggregate_sha256", None) is not None:
         command.extend(["--tuning-aggregate-sha256", args.tuning_aggregate_sha256])
         command.extend(
@@ -467,7 +543,9 @@ def _load_matching_artifact(
     if not path.exists():
         return None
     artifact = json.loads(path.read_text(encoding="utf-8"))
-    expected_artifact_schema = {1: 4, 2: 5, 3: 6, 4: 8}.get(registration_schema_version)
+    expected_artifact_schema = ARTIFACT_SCHEMA_BY_REGISTRATION.get(
+        registration_schema_version
+    )
     if artifact.get("schema_version") != expected_artifact_schema:
         raise ExistingArtifactMismatchError(f"existing cell has the wrong schema: {path}")
     expected = {
@@ -496,7 +574,7 @@ def _load_matching_artifact(
         )
     implementation_model = (
         configuration.get("implementation_model")
-        if registration_schema_version in {3, 4}
+        if registration_schema_version in {3, 4, 5}
         else model
     )
     if reference_implementation_for_model(implementation_model) is not None:
@@ -553,7 +631,7 @@ def _load_matching_artifact(
             raise ExistingArtifactMismatchError(
                 f"existing cell policy contract does not match registry: {path}"
             ) from error
-    if registration_schema_version in {3, 4}:
+    if registration_schema_version in {3, 4, 5}:
         try:
             maximum_episode_steps = configuration.get(
                 "evaluation_max_episode_steps"
@@ -590,6 +668,27 @@ def _load_matching_artifact(
         ):
             raise ExistingArtifactMismatchError(
                 f"existing cell candidate identity does not match its configuration: {path}"
+            )
+    if registration_schema_version == 5:
+        candidate_identity = {
+            "candidate_id": model,
+            "model_family": configuration.get("model_family"),
+            "learner_id": configuration.get("learner_id"),
+            "implementation_model": configuration.get("implementation_model"),
+        }
+        if (
+            configuration.get("model") != model
+            or configuration.get("candidate_id") != model
+            or configuration.get("candidate_id")
+            != f"{configuration.get('model_family')}.{configuration.get('learner_id')}"
+            or {field: artifact.get(field) for field in candidate_identity}
+            != candidate_identity
+            or artifact.get("implementation_source_sha256")
+            != configuration.get("implementation_source", {}).get("sha256")
+        ):
+            raise ExistingArtifactMismatchError(
+                "existing compute-aware tuning cell identity does not match "
+                f"its configuration: {path}"
             )
     if registration_schema_version == 4:
         if (
@@ -668,6 +767,11 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         if registration["schema_version"] == 3
         else ()
     )
+    schema_v5_candidates = (
+        _schema_v5_candidates(registration)
+        if registration["schema_version"] == 5
+        else ()
+    )
     final_selection = (
         normalize_final_selection_binding(registration["tuning_selection"])
         if registration["schema_version"] == 4
@@ -680,6 +784,8 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
             for candidate in family["candidates"]
         ]
         if candidate_families
+        else [candidate["candidate_id"] for candidate in schema_v5_candidates]
+        if schema_v5_candidates
         else registration["models"]
     )
     candidate_index = {
@@ -690,6 +796,15 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         for family in candidate_families
         for candidate in family["candidates"]
     }
+    if schema_v5_candidates:
+        candidate_index = {
+            candidate["candidate_id"]: {
+                "model_family": candidate["model_family"],
+                "learner_id": candidate["learner_id"],
+                "implementation_model": candidate["implementation_model"],
+            }
+            for candidate in schema_v5_candidates
+        }
     if final_selection is not None:
         candidate_index = {
             selection["implementation_model"]: {
@@ -734,7 +849,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                         "runtime_contract": configuration["runtime_contract"],
                         **(
                             {"implementation_source": configuration["implementation_source"]}
-                            if registration["schema_version"] in {3, 4}
+                            if registration["schema_version"] in {3, 4, 5}
                             else {}
                         ),
                     }
@@ -753,7 +868,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                                     "implementation_source"
                                 ]
                             }
-                            if registration["schema_version"] in {3, 4}
+                            if registration["schema_version"] in {3, 4, 5}
                             else {}
                         ),
                     }
@@ -779,7 +894,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                     "configuration_sha256": configuration_sha256,
                     "artifact_path": relative_path.as_posix(),
                 }
-                if registration["schema_version"] in {3, 4}:
+                if registration["schema_version"] in {3, 4, 5}:
                     cell.update(candidate_index[model])
                     cell["implementation_source_sha256"] = description["configuration"][
                         "implementation_source"
@@ -808,6 +923,9 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
     }
     if registration["schema_version"] == 3:
         manifest_without_hash["candidate_families"] = registration["candidate_families"]
+    if registration["schema_version"] == 5:
+        manifest_without_hash["tuned_families"] = registration["tuned_families"]
+        manifest_without_hash["learner_grid"] = registration["learner_grid"]
     if registration["schema_version"] == 4:
         manifest_without_hash["tuning_selection"] = registration["tuning_selection"]
         manifest_without_hash["registration_sha256"] = hashlib.sha256(
