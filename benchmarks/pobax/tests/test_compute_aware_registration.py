@@ -135,6 +135,8 @@ def _validate_tuning(
     seeds: tuple[int, ...] = COMPUTE_AWARE_TUNING_SEEDS,
     comparison_profile: str = "arcmind_shared_comparison",
     matrix_kind: str = "hyperparameter_selection",
+    evaluation_episodes_per_env: int = 1,
+    require_gpu: bool = True,
     quick: bool = False,
 ) -> None:
     normalized_families = normalize_tuned_families(_families() if families is None else families)
@@ -147,6 +149,8 @@ def _validate_tuning(
         learner_grid=normalized_grid,
         environments=(dict(COMPUTE_AWARE_TUNING_PANEL) if environments is None else environments),
         seeds=seeds,
+        evaluation_episodes_per_env=evaluation_episodes_per_env,
+        require_gpu=require_gpu,
         quick=quick,
     )
 
@@ -159,6 +163,8 @@ def _validate_final(
     tuning_selection: object | None = None,
     environments: dict[str, int] | None = None,
     seeds: tuple[int, ...] = COMPUTE_AWARE_FINAL_SEEDS,
+    evaluation_episodes_per_env: int = 16,
+    require_gpu: bool = True,
 ) -> None:
     validate_compute_aware_final_contract(
         schema_version=6,
@@ -170,8 +176,48 @@ def _validate_final(
         tuning_selection=(_selection_binding() if tuning_selection is None else tuning_selection),
         environments=(_final_environments() if environments is None else environments),
         seeds=seeds,
+        evaluation_episodes_per_env=evaluation_episodes_per_env,
+        require_gpu=require_gpu,
         quick=False,
     )
+
+
+@pytest.mark.parametrize(
+    ("evaluation_episodes", "require_gpu", "message"),
+    [
+        (4, True, "exactly 1 evaluation episode"),
+        (1, False, "GPU"),
+    ],
+)
+def test_compute_aware_tuning_freezes_evaluation_and_device(
+    evaluation_episodes: int,
+    require_gpu: bool,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _validate_tuning(
+            evaluation_episodes_per_env=evaluation_episodes,
+            require_gpu=require_gpu,
+        )
+
+
+@pytest.mark.parametrize(
+    ("evaluation_episodes", "require_gpu", "message"),
+    [
+        (1, True, "exactly 16 evaluation episodes"),
+        (16, False, "GPU"),
+    ],
+)
+def test_compute_aware_final_freezes_evaluation_and_device(
+    evaluation_episodes: int,
+    require_gpu: bool,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _validate_final(
+            evaluation_episodes_per_env=evaluation_episodes,
+            require_gpu=require_gpu,
+        )
 
 
 def test_registration_field_sets_preserve_v1_to_v4_and_add_v5_v6() -> None:

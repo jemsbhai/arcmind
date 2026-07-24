@@ -581,6 +581,8 @@ def _validate_registration(value: Any) -> dict[str, Any]:
                     learner_grid=learner_grid,
                     environments=environment_budgets,
                     seeds=list(seeds),
+                    evaluation_episodes_per_env=evaluation_episodes,
+                    require_gpu=registration["require_gpu"],
                     quick=registration["quick"],
                 )
             else:

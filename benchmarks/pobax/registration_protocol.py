@@ -40,6 +40,10 @@ REGISTRATION_FIELDS_V6 = (REGISTRATION_FIELDS_V2 - {"learner"}) | {
     "task_model_incidence",
     "tuning_selection",
 }
+REGISTRATION_FIELDS_V7 = (REGISTRATION_FIELDS_V2 - {"learner"}) | {
+    "primary_matrix_binding",
+    "memoryless_learner_binding",
+}
 LEARNER_FIELDS_V1 = {
     "num_envs",
     "rollout_steps",
@@ -80,11 +84,20 @@ COMPUTE_AWARE_TUNING_PANEL = (
 )
 COMPUTE_AWARE_TUNING_SEEDS = (4409, 5519, 6637)
 COMPUTE_AWARE_FINAL_SEEDS = tuple(range(10_000, 10_010))
+COMPUTE_AWARE_TUNING_EVALUATION_EPISODES_PER_ENV = 1
+COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV = 16
+COMPUTE_AWARE_REQUIRE_GPU = True
 COMPUTE_AWARE_FINAL_PANEL = (
     ("tmaze_10", 1_000_000),
     ("rocksample_11_11", 5_000_000),
     ("battleship_10", 10_000_000),
     ("Navix-DMLab-Maze-01-v0", 10_000_000),
+)
+COMPUTE_AWARE_UPPER_REFERENCE_PANEL = (
+    ("tmaze_10-perfect-memory", 1_000_000),
+    ("rocksample_11_11-fully-observable", 5_000_000),
+    ("battleship_10-perfect-recall", 10_000_000),
+    ("Navix-DMLab-Maze-01-fully-observable", 10_000_000),
 )
 COMPUTE_AWARE_LEARNER_GRID = (
     ("lr_low", 0.0001),
@@ -159,7 +172,7 @@ def registration_fields(schema_version: object) -> set[str]:
     """Return the exact top-level field set for a supported registration."""
 
     if isinstance(schema_version, bool):
-        raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, or 6")
+        raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, 6, or 7")
     if schema_version == 1:
         return REGISTRATION_FIELDS_V1
     if schema_version == 2:
@@ -172,7 +185,9 @@ def registration_fields(schema_version: object) -> set[str]:
         return REGISTRATION_FIELDS_V5
     if schema_version == 6:
         return REGISTRATION_FIELDS_V6
-    raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, or 6")
+    if schema_version == 7:
+        return REGISTRATION_FIELDS_V7
+    raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, 6, or 7")
 
 
 def learner_fields(schema_version: int) -> set[str]:
@@ -180,9 +195,9 @@ def learner_fields(schema_version: int) -> set[str]:
 
     if schema_version == 1:
         return LEARNER_FIELDS_V1
-    if schema_version in {2, 3, 4, 5, 6}:
+    if schema_version in {2, 3, 4, 5, 6, 7}:
         return LEARNER_FIELDS_V2
-    raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, or 6")
+    raise ValueError("registration schema_version must be 1, 2, 3, 4, 5, 6, or 7")
 
 
 def validate_comparison_profile(registration: Mapping[str, Any]) -> str | None:
@@ -216,14 +231,14 @@ def normalize_learner(
         )
     normalized: dict[str, int | float | bool] = {}
     integer_fields = ["num_envs", "rollout_steps", "update_epochs"]
-    if schema_version in {2, 3, 4, 5, 6}:
+    if schema_version in {2, 3, 4, 5, 6, 7}:
         integer_fields.append("num_minibatches")
     for field in integer_fields:
         value = learner[field]
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"learner.{field} must be a positive integer")
         normalized[field] = value
-    if schema_version in {2, 3, 4, 5, 6} and (
+    if schema_version in {2, 3, 4, 5, 6, 7} and (
         normalized["num_envs"] % normalized["num_minibatches"] != 0
     ):
         raise ValueError("learner.num_envs must be divisible by learner.num_minibatches")
@@ -238,7 +253,7 @@ def normalize_learner(
         raise ValueError("learner.learning_rate must be positive and finite")
     normalized["learning_rate"] = float(learning_rate)
 
-    if schema_version in {2, 3, 4, 5, 6}:
+    if schema_version in {2, 3, 4, 5, 6, 7}:
         gae_lambda = learner["gae_lambda"]
         if (
             isinstance(gae_lambda, bool)
@@ -901,6 +916,8 @@ def validate_compute_aware_tuning_contract(
     learner_grid: tuple[dict[str, Any], ...],
     environments: Mapping[str, int],
     seeds: Sequence[int],
+    evaluation_episodes_per_env: int,
+    require_gpu: bool,
     quick: bool,
 ) -> None:
     """Fail closed on the fixed compute-aware two-task tuning panel."""
@@ -915,6 +932,14 @@ def validate_compute_aware_tuning_contract(
         raise ValueError("compute-aware tuning requires matrix_kind 'hyperparameter_selection'")
     if quick:
         raise ValueError("compute-aware tuning cannot use quick execution")
+    if evaluation_episodes_per_env != COMPUTE_AWARE_TUNING_EVALUATION_EPISODES_PER_ENV:
+        raise ValueError(
+            "compute-aware tuning requires exactly "
+            f"{COMPUTE_AWARE_TUNING_EVALUATION_EPISODES_PER_ENV} "
+            "evaluation episode per environment"
+        )
+    if require_gpu is not COMPUTE_AWARE_REQUIRE_GPU:
+        raise ValueError("compute-aware tuning requires GPU execution")
     expected_families = tuple(
         {
             "family_id": family,
@@ -1469,6 +1494,8 @@ def validate_compute_aware_final_contract(
     tuning_selection: object,
     environments: Mapping[str, int],
     seeds: Sequence[int],
+    evaluation_episodes_per_env: int,
+    require_gpu: bool,
     quick: bool,
 ) -> None:
     """Fail closed on the compute-aware registered-final design."""
@@ -1483,6 +1510,14 @@ def validate_compute_aware_final_contract(
         raise ValueError("compute-aware final requires matrix_kind 'primary_comparison'")
     if quick:
         raise ValueError("compute-aware final cannot use quick execution")
+    if evaluation_episodes_per_env != COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV:
+        raise ValueError(
+            "compute-aware final requires exactly "
+            f"{COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV} "
+            "evaluation episodes per environment"
+        )
+    if require_gpu is not COMPUTE_AWARE_REQUIRE_GPU:
+        raise ValueError("compute-aware final requires GPU execution")
     normalized_seeds = _normalize_seed_manifest(seeds, field="seeds")
     if normalized_seeds != COMPUTE_AWARE_FINAL_SEEDS:
         raise ValueError(
@@ -1570,6 +1605,339 @@ def validate_compute_aware_final_contract(
                 rollout_steps=int(learner["rollout_steps"]),
                 comparison_profile=comparison_profile,
             )
+
+
+def normalize_primary_matrix_binding(value: object) -> dict[str, str]:
+    """Validate the schema-v7 byte and content binding to the primary matrix."""
+
+    expected_fields = {
+        "raw_matrix_path",
+        "aggregate_path",
+        "primary_aggregate_file_sha256",
+        "primary_registration_file_sha256",
+        "primary_manifest_file_sha256",
+        "primary_manifest_internal_sha256",
+        "primary_completion_index_file_sha256",
+        "primary_checksum_manifest_file_sha256",
+        "primary_implementation_source_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise ValueError(
+            f"primary_matrix_binding has wrong fields: expected={sorted(expected_fields)}"
+        )
+    normalized = {
+        "raw_matrix_path": _normalized_repository_path(
+            value["raw_matrix_path"],
+            field="primary_matrix_binding.raw_matrix_path",
+        ),
+        "aggregate_path": _normalized_repository_path(
+            value["aggregate_path"],
+            field="primary_matrix_binding.aggregate_path",
+        ),
+    }
+    for name in sorted(expected_fields - {"raw_matrix_path", "aggregate_path"}):
+        hash_value = value[name]
+        if not isinstance(hash_value, str) or not _SHA256_PATTERN.fullmatch(hash_value):
+            raise ValueError(f"primary_matrix_binding.{name} must be a lowercase SHA256")
+        normalized[name] = hash_value
+    return normalized
+
+
+def normalize_memoryless_learner_binding(value: object) -> dict[str, Any]:
+    """Validate the exact selected memoryless learner copied from schema v6."""
+
+    expected_fields = {
+        "candidate_id",
+        "model_family",
+        "learner_id",
+        "learner",
+        "implementation_model",
+        "learner_binding_mode",
+        "learner_source_model_family",
+        "tuning_aggregate_sha256",
+        "tuning_completion_index_sha256",
+        "tuning_checksum_manifest_sha256",
+        "tuning_implementation_source_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise ValueError(
+            f"memoryless_learner_binding has wrong fields: expected={sorted(expected_fields)}"
+        )
+    learner_id = value["learner_id"]
+    candidate_id = value["candidate_id"]
+    if (
+        value["model_family"] != "memoryless_mlp"
+        or value["implementation_model"] != "memoryless_mlp"
+        or value["learner_binding_mode"] != "selected"
+        or value["learner_source_model_family"] != "memoryless_mlp"
+        or not isinstance(learner_id, str)
+        or not _IDENTIFIER_PATTERN.fullmatch(learner_id)
+        or candidate_id != f"memoryless_mlp.{learner_id}"
+    ):
+        raise ValueError(
+            "memoryless_learner_binding must identify one direct selected memoryless_mlp learner"
+        )
+    registered_learning_rate = dict(COMPUTE_AWARE_LEARNER_GRID).get(learner_id)
+    if registered_learning_rate is None:
+        raise ValueError("memoryless_learner_binding.learner_id must name one registered learner")
+    learner = normalize_learner(value["learner"], schema_version=7)
+    if learner != _compute_aware_learner(registered_learning_rate):
+        raise ValueError("memoryless_learner_binding.learner must equal its registered learner")
+    hashes: dict[str, str] = {}
+    for name in (
+        "tuning_aggregate_sha256",
+        "tuning_completion_index_sha256",
+        "tuning_checksum_manifest_sha256",
+        "tuning_implementation_source_sha256",
+    ):
+        hash_value = value[name]
+        if not isinstance(hash_value, str) or not _SHA256_PATTERN.fullmatch(hash_value):
+            raise ValueError(f"memoryless_learner_binding.{name} must be a lowercase SHA256")
+        hashes[name] = hash_value
+    return {
+        "candidate_id": candidate_id,
+        "model_family": "memoryless_mlp",
+        "learner_id": learner_id,
+        "learner": learner,
+        "implementation_model": "memoryless_mlp",
+        "learner_binding_mode": "selected",
+        "learner_source_model_family": "memoryless_mlp",
+        **hashes,
+    }
+
+
+def validate_compute_aware_primary_binding_against_aggregate(
+    primary_matrix_binding: Mapping[str, Any],
+    memoryless_learner_binding: Mapping[str, Any],
+    primary_aggregate: object,
+) -> None:
+    """Verify a schema-v7 upper matrix against its completed schema-v6 primary."""
+
+    primary = normalize_primary_matrix_binding(primary_matrix_binding)
+    learner_binding = normalize_memoryless_learner_binding(memoryless_learner_binding)
+    if not isinstance(primary_aggregate, Mapping):
+        raise ValueError("schema-v7 primary aggregate must be a JSON object")
+    if (
+        primary_aggregate.get("schema_version") != 2
+        or primary_aggregate.get("status") != "registered_matrix_aggregate"
+        or primary_aggregate.get("matrix_kind") != "primary_comparison"
+        or primary_aggregate.get("statistical_unit") != "seed"
+    ):
+        raise ValueError("schema-v7 primary aggregate has the wrong evidence identity")
+
+    raw_integrity = primary_aggregate.get("raw_integrity")
+    if (
+        not isinstance(raw_integrity, Mapping)
+        or raw_integrity.get("completion_index_validated") is not True
+        or raw_integrity.get("checksum_inventory_validated") is not True
+        or raw_integrity.get("reference_implementation_validated") is not True
+        or raw_integrity.get("parameter_contract_validated") is not True
+    ):
+        raise ValueError("schema-v7 primary aggregate has an invalid integrity contract")
+    for binding_field, aggregate_value in (
+        (
+            "primary_registration_file_sha256",
+            raw_integrity.get("registration_file_sha256"),
+        ),
+        (
+            "primary_manifest_internal_sha256",
+            primary_aggregate.get("matrix_manifest_sha256"),
+        ),
+        (
+            "primary_completion_index_file_sha256",
+            raw_integrity.get("completion_index_sha256"),
+        ),
+        (
+            "primary_checksum_manifest_file_sha256",
+            raw_integrity.get("checksum_manifest_sha256"),
+        ),
+    ):
+        if primary[binding_field] != aggregate_value:
+            raise ValueError(
+                f"primary_matrix_binding.{binding_field} drifts from primary aggregate"
+            )
+    provenance = primary_aggregate.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("schema-v7 primary aggregate is missing provenance")
+    try:
+        implementation_source = normalize_implementation_source(
+            provenance.get("implementation_source")
+        )
+    except ValueError as error:
+        raise ValueError(
+            "schema-v7 primary aggregate has invalid implementation provenance"
+        ) from error
+    if implementation_source["sha256"] != primary["primary_implementation_source_sha256"]:
+        raise ValueError(
+            "primary_matrix_binding.primary_implementation_source_sha256 "
+            "drifts from primary aggregate"
+        )
+
+    expected_environments = [environment for environment, _ in COMPUTE_AWARE_FINAL_PANEL]
+    expected_incidence = [
+        {"environment": environment, "models": list(models)}
+        for environment, models in COMPUTE_AWARE_TASK_MODEL_INCIDENCE
+    ]
+    expected_group_identities = [
+        (environment, model)
+        for environment, models in COMPUTE_AWARE_TASK_MODEL_INCIDENCE
+        for model in models
+    ]
+    raw_groups = primary_aggregate.get("groups")
+    actual_group_identities = (
+        [
+            (group.get("environment"), group.get("model"))
+            if isinstance(group, Mapping)
+            else (None, None)
+            for group in raw_groups
+        ]
+        if isinstance(raw_groups, list)
+        else []
+    )
+    if (
+        primary_aggregate.get("models") != list(COMPUTE_AWARE_FINAL_MODELS)
+        or primary_aggregate.get("environments") != expected_environments
+        or primary_aggregate.get("seeds") != list(COMPUTE_AWARE_FINAL_SEEDS)
+        or primary_aggregate.get("common_models") != list(COMPUTE_AWARE_FINAL_MODELS[:8])
+        or primary_aggregate.get("task_model_incidence") != expected_incidence
+        or actual_group_identities != expected_group_identities
+    ):
+        raise ValueError(
+            "schema-v7 primary aggregate does not equal the registered schema-v6 design"
+        )
+
+    raw_learner_bindings = primary_aggregate.get("learner_bindings")
+    selected_binding = (
+        next(
+            (
+                binding
+                for binding in raw_learner_bindings
+                if isinstance(binding, Mapping) and binding.get("model") == "memoryless_mlp"
+            ),
+            None,
+        )
+        if isinstance(raw_learner_bindings, list)
+        else None
+    )
+    if selected_binding != {
+        "model": "memoryless_mlp",
+        "mode": "selected",
+        "source_model_family": "memoryless_mlp",
+    }:
+        raise ValueError("schema-v7 primary aggregate lacks the selected memoryless learner lane")
+
+    tuning_binding = primary_aggregate.get("tuning_selection_binding")
+    if (
+        not isinstance(tuning_binding, Mapping)
+        or tuning_binding.get("validated") is not True
+        or tuning_binding.get("final_seeds_disjoint_from_tuning") is not True
+    ):
+        raise ValueError("schema-v7 primary aggregate has an invalid tuning-selection binding")
+    raw_selections = tuning_binding.get("selections")
+    selected_learner = (
+        next(
+            (
+                selection
+                for selection in raw_selections
+                if isinstance(selection, Mapping)
+                and selection.get("model_family") == "memoryless_mlp"
+            ),
+            None,
+        )
+        if isinstance(raw_selections, list)
+        else None
+    )
+    expected_selection = {
+        "model_family": learner_binding["model_family"],
+        "implementation_model": learner_binding["implementation_model"],
+        "candidate_id": learner_binding["candidate_id"],
+        "learner_id": learner_binding["learner_id"],
+        "learner": learner_binding["learner"],
+        "implementation_source_sha256": primary["primary_implementation_source_sha256"],
+    }
+    if selected_learner != expected_selection:
+        raise ValueError("memoryless_learner_binding drifts from the primary aggregate selection")
+    for learner_field, aggregate_field in (
+        ("tuning_aggregate_sha256", "aggregate_sha256"),
+        ("tuning_completion_index_sha256", "source_completion_index_sha256"),
+        (
+            "tuning_checksum_manifest_sha256",
+            "source_checksum_manifest_sha256",
+        ),
+        (
+            "tuning_implementation_source_sha256",
+            "source_implementation_sha256",
+        ),
+    ):
+        if learner_binding[learner_field] != tuning_binding.get(aggregate_field):
+            raise ValueError(
+                f"memoryless_learner_binding.{learner_field} drifts from "
+                "the primary aggregate tuning selection"
+            )
+    if (
+        learner_binding["tuning_implementation_source_sha256"]
+        != primary["primary_implementation_source_sha256"]
+    ):
+        raise ValueError("schema-v7 tuning and primary implementation-source hashes must match")
+
+
+def validate_compute_aware_upper_reference_contract(
+    *,
+    schema_version: int,
+    comparison_profile: str | None,
+    matrix_kind: str,
+    models: Sequence[str],
+    primary_matrix_binding: object,
+    memoryless_learner_binding: object,
+    environments: Mapping[str, int],
+    seeds: Sequence[int],
+    evaluation_episodes_per_env: int,
+    require_gpu: bool,
+    quick: bool,
+) -> None:
+    """Fail closed on the compute-aware four-task upper-reference design."""
+
+    if schema_version != 7:
+        raise ValueError("compute-aware upper references require registration schema version 7")
+    if comparison_profile != "arcmind_shared_comparison":
+        raise ValueError(
+            "compute-aware upper references require comparison_profile 'arcmind_shared_comparison'"
+        )
+    if matrix_kind != "upper_reference":
+        raise ValueError("compute-aware upper references require matrix_kind 'upper_reference'")
+    if quick:
+        raise ValueError("compute-aware upper references cannot use quick execution")
+    if evaluation_episodes_per_env != COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV:
+        raise ValueError(
+            "compute-aware upper references must equal the bound primary with "
+            f"{COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV} evaluation "
+            "episodes per environment"
+        )
+    if require_gpu is not COMPUTE_AWARE_REQUIRE_GPU:
+        raise ValueError("compute-aware upper references require GPU execution")
+    if tuple(models) != ("memoryless_mlp",):
+        raise ValueError("compute-aware upper references require only memoryless_mlp")
+    if tuple(environments.items()) != COMPUTE_AWARE_UPPER_REFERENCE_PANEL:
+        raise ValueError(
+            "compute-aware upper references require the exact ordered four-alias panel: "
+            f"expected={COMPUTE_AWARE_UPPER_REFERENCE_PANEL}, "
+            f"found={tuple(environments.items())}"
+        )
+    normalized_seeds = _normalize_seed_manifest(seeds, field="seeds")
+    if normalized_seeds != COMPUTE_AWARE_FINAL_SEEDS:
+        raise ValueError(
+            "compute-aware upper references require the exact ordered seed manifest: "
+            f"expected={COMPUTE_AWARE_FINAL_SEEDS}, found={normalized_seeds}"
+        )
+    normalize_primary_matrix_binding(primary_matrix_binding)
+    learner_binding = normalize_memoryless_learner_binding(memoryless_learner_binding)
+    for _, total_steps in COMPUTE_AWARE_UPPER_REFERENCE_PANEL:
+        realized_environment_steps(
+            total_steps,
+            num_envs=int(learner_binding["learner"]["num_envs"]),
+            rollout_steps=int(learner_binding["learner"]["rollout_steps"]),
+            comparison_profile=comparison_profile,
+        )
 
 
 def validate_development_tuning_contract(

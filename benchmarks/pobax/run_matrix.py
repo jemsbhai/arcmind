@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.pobax.aggregate_development import build_development_aggregate
+from benchmarks.pobax.aggregate_registered import build_registered_aggregate
 from benchmarks.pobax.model_registry import (
     policy_contract_metadata_for_model,
     reference_implementation_for_model,
@@ -39,11 +40,14 @@ from benchmarks.pobax.registered_artifacts import (
     write_checksum_manifest,
 )
 from benchmarks.pobax.registration_protocol import (
+    COMPUTE_AWARE_UPPER_REFERENCE_PANEL,
     normalize_candidate_families,
     normalize_final_selection_binding,
     normalize_learner,
     normalize_learner_bindings,
+    normalize_memoryless_learner_binding,
     normalize_panel_selection_binding,
+    normalize_primary_matrix_binding,
     normalize_shared_learner_grid,
     normalize_task_model_incidence,
     normalize_tuned_families,
@@ -51,7 +55,9 @@ from benchmarks.pobax.registration_protocol import (
     registration_fields,
     validate_comparison_profile,
     validate_compute_aware_final_contract,
+    validate_compute_aware_primary_binding_against_aggregate,
     validate_compute_aware_tuning_contract,
+    validate_compute_aware_upper_reference_contract,
     validate_development_tuning_contract,
     validate_final_provenance_against_tuning,
     validate_final_selection_against_aggregate,
@@ -75,6 +81,15 @@ _MATRIX_KINDS = {
     "upper_reference",
     "hyperparameter_selection",
 }
+_SCHEMA_V7_PRIMARY_HASH_FIELDS = (
+    "primary_aggregate_file_sha256",
+    "primary_registration_file_sha256",
+    "primary_manifest_file_sha256",
+    "primary_manifest_internal_sha256",
+    "primary_completion_index_file_sha256",
+    "primary_checksum_manifest_file_sha256",
+    "primary_implementation_source_sha256",
+)
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -132,6 +147,14 @@ def _schema_v6_environment_models(
         models=registration["models"],
     )
     return {entry["environment"]: entry["models"] for entry in incidence}
+
+
+def _schema_v7_final_spec(registration: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the upper-reference memoryless learner and primary hashes."""
+
+    learner = normalize_memoryless_learner_binding(registration["memoryless_learner_binding"])
+    primary = normalize_primary_matrix_binding(registration["primary_matrix_binding"])
+    return {**learner, **primary}
 
 
 def _matrix_cell_identities(
@@ -274,6 +297,50 @@ def _validate_compute_aware_final_tuning_selection(
     return binding, rebuilt
 
 
+def _validate_compute_aware_upper_primary(
+    registration: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, Any], dict[str, Any]]:
+    primary = normalize_primary_matrix_binding(registration["primary_matrix_binding"])
+    learner = normalize_memoryless_learner_binding(registration["memoryless_learner_binding"])
+    raw_matrix_path = _bound_repository_path(
+        primary["raw_matrix_path"],
+        field="primary_matrix_binding.raw_matrix_path",
+    )
+    aggregate_path = _bound_repository_path(
+        primary["aggregate_path"],
+        field="primary_matrix_binding.aggregate_path",
+    )
+    paths = {
+        "primary_registration_file_sha256": raw_matrix_path / "registration.json",
+        "primary_manifest_file_sha256": raw_matrix_path / "frozen_manifest.json",
+        "primary_completion_index_file_sha256": raw_matrix_path / "completion_index.json",
+        "primary_checksum_manifest_file_sha256": raw_matrix_path / "checksums.sha256",
+        "primary_aggregate_file_sha256": aggregate_path,
+    }
+    for binding_field, path in paths.items():
+        try:
+            actual_hash = sha256_file(path)
+        except OSError as error:
+            raise ValueError(f"cannot read schema-v7 primary source: {path}") from error
+        if actual_hash != primary[binding_field]:
+            raise ValueError(f"primary_matrix_binding.{binding_field} does not match source bytes")
+    rebuilt = build_registered_aggregate(raw_matrix_path / "frozen_manifest.json")
+    try:
+        aggregate_bytes = aggregate_path.read_bytes()
+    except OSError as error:  # pragma: no cover - hash read above normally catches this
+        raise ValueError(f"cannot read schema-v7 primary aggregate: {aggregate_path}") from error
+    if aggregate_bytes != canonical_json_bytes(rebuilt) + b"\n":
+        raise ValueError(
+            "schema-v7 primary aggregate is not the canonical rebuild of its raw matrix"
+        )
+    validate_compute_aware_primary_binding_against_aggregate(
+        primary,
+        learner,
+        rebuilt,
+    )
+    return primary, learner, rebuilt
+
+
 def _load_registration(path: Path) -> dict[str, Any]:
     registration = json.loads(path.read_text(encoding="utf-8"))
     schema_version = registration.get("schema_version")
@@ -296,6 +363,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
         raise ValueError("registration schema version 5 is reserved for development_tuning")
     if schema_version == 6 and tier != "registered_final":
         raise ValueError("registration schema version 6 is reserved for registered_final")
+    if schema_version == 7 and tier != "registered_final":
+        raise ValueError("registration schema version 7 is reserved for registered_final")
     matrix_kind = registration.get("matrix_kind")
     if matrix_kind not in _MATRIX_KINDS:
         raise ValueError(f"unsupported matrix_kind: {matrix_kind!r}")
@@ -335,6 +404,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
         raise ValueError(
             f"registration schema version {schema_version} requires primary_comparison"
         )
+    if schema_version == 7 and matrix_kind != "upper_reference":
+        raise ValueError("registration schema version 7 requires upper_reference")
     if (
         tier == "registered_final"
         and matrix_kind == "primary_comparison"
@@ -399,6 +470,10 @@ def _load_registration(path: Path) -> dict[str, Any]:
                     environment_id,
                     field=f"model {model!r}",
                 )
+    if schema_version == 7 and environment_ids != [
+        environment for environment, _ in COMPUTE_AWARE_UPPER_REFERENCE_PANEL
+    ]:
+        raise ValueError("schema-v7 upper references require the exact ordered registered aliases")
     if matrix_kind == "upper_reference":
         unsupported = sorted(set(environment_ids) - set(UPPER_REFERENCE_TARGETS))
         if unsupported:
@@ -412,6 +487,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
     )
     if schema_version == 6:
         _validate_compute_aware_final_tuning_selection(registration)
+    if schema_version == 7:
+        _validate_compute_aware_upper_primary(registration)
     schema_v6_specs = _schema_v6_final_specs(registration) if schema_version == 6 else {}
     learners = (
         [
@@ -426,6 +503,12 @@ def _load_registration(path: Path) -> dict[str, Any]:
         if schema_version == 4
         else [schema_v6_specs[model]["learner"] for model in models]
         if schema_version == 6
+        else [
+            normalize_memoryless_learner_binding(registration["memoryless_learner_binding"])[
+                "learner"
+            ]
+        ]
+        if schema_version == 7
         else [
             normalize_learner(
                 registration.get("learner"),
@@ -484,6 +567,8 @@ def _load_registration(path: Path) -> dict[str, Any]:
                 learner_grid=normalize_shared_learner_grid(registration["learner_grid"]),
                 environments=environment_budgets,
                 seeds=seeds,
+                evaluation_episodes_per_env=evaluation_episodes,
+                require_gpu=registration["require_gpu"],
                 quick=registration["quick"],
             )
         else:  # pragma: no cover - schema reservation checks reject this
@@ -506,6 +591,25 @@ def _load_registration(path: Path) -> dict[str, Any]:
             tuning_selection=registration["tuning_selection"],
             environments=environment_budgets,
             seeds=seeds,
+            evaluation_episodes_per_env=evaluation_episodes,
+            require_gpu=registration["require_gpu"],
+            quick=registration["quick"],
+        )
+    elif schema_version == 7:
+        environment_budgets = {
+            environment["id"]: environment["total_steps"] for environment in environments
+        }
+        validate_compute_aware_upper_reference_contract(
+            schema_version=schema_version,
+            comparison_profile=comparison_profile,
+            matrix_kind=matrix_kind,
+            models=models,
+            primary_matrix_binding=registration["primary_matrix_binding"],
+            memoryless_learner_binding=registration["memoryless_learner_binding"],
+            environments=environment_budgets,
+            seeds=seeds,
+            evaluation_episodes_per_env=evaluation_episodes,
+            require_gpu=registration["require_gpu"],
             quick=registration["quick"],
         )
     elif tier == "registered_final" and len(registration["seeds"]) != 30:
@@ -533,6 +637,13 @@ def _cell_namespace(
     tuning_implementation_source_sha256: str | None = None
     learner_binding_mode: str | None = None
     learner_source_model_family: str | None = None
+    primary_aggregate_file_sha256: str | None = None
+    primary_registration_file_sha256: str | None = None
+    primary_manifest_file_sha256: str | None = None
+    primary_manifest_internal_sha256: str | None = None
+    primary_completion_index_file_sha256: str | None = None
+    primary_checksum_manifest_file_sha256: str | None = None
+    primary_implementation_source_sha256: str | None = None
     implementation_model = model
     if registration["schema_version"] == 3:
         candidate = next(
@@ -601,6 +712,26 @@ def _cell_namespace(
         tuning_completion_index_sha256 = spec["tuning_completion_index_sha256"]
         tuning_checksum_manifest_sha256 = spec["tuning_checksum_manifest_sha256"]
         tuning_implementation_source_sha256 = spec["tuning_implementation_source_sha256"]
+    elif registration["schema_version"] == 7:
+        spec = _schema_v7_final_spec(registration)
+        candidate_id = spec["candidate_id"]
+        model_family = spec["model_family"]
+        learner_id = spec["learner_id"]
+        implementation_model = spec["implementation_model"]
+        learner_binding_mode = spec["learner_binding_mode"]
+        learner_source_model_family = spec["learner_source_model_family"]
+        learner = spec["learner"]
+        tuning_aggregate_sha256 = spec["tuning_aggregate_sha256"]
+        tuning_completion_index_sha256 = spec["tuning_completion_index_sha256"]
+        tuning_checksum_manifest_sha256 = spec["tuning_checksum_manifest_sha256"]
+        tuning_implementation_source_sha256 = spec["tuning_implementation_source_sha256"]
+        primary_aggregate_file_sha256 = spec["primary_aggregate_file_sha256"]
+        primary_registration_file_sha256 = spec["primary_registration_file_sha256"]
+        primary_manifest_file_sha256 = spec["primary_manifest_file_sha256"]
+        primary_manifest_internal_sha256 = spec["primary_manifest_internal_sha256"]
+        primary_completion_index_file_sha256 = spec["primary_completion_index_file_sha256"]
+        primary_checksum_manifest_file_sha256 = spec["primary_checksum_manifest_file_sha256"]
+        primary_implementation_source_sha256 = spec["primary_implementation_source_sha256"]
     else:
         learner = registration["learner"]
     return Namespace(
@@ -615,6 +746,13 @@ def _cell_namespace(
         tuning_implementation_source_sha256=tuning_implementation_source_sha256,
         learner_binding_mode=learner_binding_mode,
         learner_source_model_family=learner_source_model_family,
+        primary_aggregate_file_sha256=primary_aggregate_file_sha256,
+        primary_registration_file_sha256=primary_registration_file_sha256,
+        primary_manifest_file_sha256=primary_manifest_file_sha256,
+        primary_manifest_internal_sha256=primary_manifest_internal_sha256,
+        primary_completion_index_file_sha256=primary_completion_index_file_sha256,
+        primary_checksum_manifest_file_sha256=primary_checksum_manifest_file_sha256,
+        primary_implementation_source_sha256=primary_implementation_source_sha256,
         seed=seed,
         total_steps=environment["total_steps"],
         num_envs=learner["num_envs"],
@@ -704,6 +842,32 @@ def _command_for_cell(args: Namespace) -> list[str]:
                 args.tuning_implementation_source_sha256,
             ]
         )
+    if getattr(args, "primary_aggregate_file_sha256", None) is not None:
+        for option, value in (
+            ("--primary-aggregate-file-sha256", args.primary_aggregate_file_sha256),
+            (
+                "--primary-registration-file-sha256",
+                args.primary_registration_file_sha256,
+            ),
+            ("--primary-manifest-file-sha256", args.primary_manifest_file_sha256),
+            (
+                "--primary-manifest-internal-sha256",
+                args.primary_manifest_internal_sha256,
+            ),
+            (
+                "--primary-completion-index-file-sha256",
+                args.primary_completion_index_file_sha256,
+            ),
+            (
+                "--primary-checksum-manifest-file-sha256",
+                args.primary_checksum_manifest_file_sha256,
+            ),
+            (
+                "--primary-implementation-source-sha256",
+                args.primary_implementation_source_sha256,
+            ),
+        ):
+            command.extend([option, value])
     if args.require_gpu:
         command.append("--require-gpu")
     if args.quick:
@@ -756,7 +920,7 @@ def _load_matching_artifact(
         )
     implementation_model = (
         configuration.get("implementation_model")
-        if registration_schema_version in {3, 4, 5, 6}
+        if registration_schema_version in {3, 4, 5, 6, 7}
         else model
     )
     if reference_implementation_for_model(implementation_model) is not None:
@@ -808,7 +972,7 @@ def _load_matching_artifact(
             raise ExistingArtifactMismatchError(
                 f"existing cell policy contract does not match registry: {path}"
             ) from error
-    if registration_schema_version in {3, 4, 5, 6}:
+    if registration_schema_version in {3, 4, 5, 6, 7}:
         try:
             maximum_episode_steps = configuration.get("evaluation_max_episode_steps")
             validate_causal_transformer_horizon_contract(
@@ -916,6 +1080,41 @@ def _load_matching_artifact(
                 "existing compute-aware final cell identity does not match "
                 f"its configuration: {path}"
             )
+    if registration_schema_version == 7:
+        candidate_identity = {
+            "candidate_id": configuration.get("candidate_id"),
+            "model_family": configuration.get("model_family"),
+            "learner_id": configuration.get("learner_id"),
+            "implementation_model": model,
+            "learner_binding_mode": configuration.get("learner_binding_mode"),
+            "learner_source_model_family": configuration.get("learner_source_model_family"),
+            "tuning_aggregate_sha256": configuration.get("tuning_aggregate_sha256"),
+            "tuning_completion_index_sha256": configuration.get("tuning_completion_index_sha256"),
+            "tuning_checksum_manifest_sha256": configuration.get("tuning_checksum_manifest_sha256"),
+            "tuning_implementation_source_sha256": configuration.get(
+                "tuning_implementation_source_sha256"
+            ),
+            **{field: configuration.get(field) for field in _SCHEMA_V7_PRIMARY_HASH_FIELDS},
+        }
+        if (
+            model != "memoryless_mlp"
+            or configuration.get("model") != model
+            or configuration.get("implementation_model") != model
+            or configuration.get("candidate_id")
+            != f"memoryless_mlp.{configuration.get('learner_id')}"
+            or configuration.get("model_family") != "memoryless_mlp"
+            or configuration.get("learner_binding_mode") != "selected"
+            or configuration.get("learner_source_model_family") != "memoryless_mlp"
+            or {field: artifact.get(field) for field in candidate_identity} != candidate_identity
+            or artifact.get("implementation_source_sha256")
+            != configuration.get("implementation_source", {}).get("sha256")
+            or configuration.get("implementation_source", {}).get("sha256")
+            != configuration.get("primary_implementation_source_sha256")
+        ):
+            raise ExistingArtifactMismatchError(
+                "existing compute-aware upper-reference cell identity does not "
+                f"match its configuration: {path}"
+            )
     return artifact
 
 
@@ -988,6 +1187,9 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
     schema_v6_specs = (
         _schema_v6_final_specs(registration) if registration["schema_version"] == 6 else {}
     )
+    schema_v7_spec = (
+        _schema_v7_final_spec(registration) if registration["schema_version"] == 7 else {}
+    )
     matrix_models = (
         [
             candidate["candidate_id"]
@@ -1038,6 +1240,14 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
             model: {name: value for name, value in spec.items() if name != "learner"}
             for model, spec in schema_v6_specs.items()
         }
+    if schema_v7_spec:
+        candidate_index = {
+            "memoryless_mlp": {
+                name: value
+                for name, value in schema_v7_spec.items()
+                if name not in {"learner", "raw_matrix_path", "aggregate_path"}
+            }
+        }
 
     matrix_inventory = _matrix_cell_identities(registration)
     for environment, model, seed in matrix_inventory:
@@ -1064,7 +1274,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 "runtime_contract": configuration["runtime_contract"],
                 **(
                     {"implementation_source": configuration["implementation_source"]}
-                    if registration["schema_version"] in {3, 4, 5, 6}
+                    if registration["schema_version"] in {3, 4, 5, 6, 7}
                     else {}
                 ),
             }
@@ -1077,7 +1287,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 "runtime_contract": description["configuration"]["runtime_contract"],
                 **(
                     {"implementation_source": description["configuration"]["implementation_source"]}
-                    if registration["schema_version"] in {3, 4, 5, 6}
+                    if registration["schema_version"] in {3, 4, 5, 6, 7}
                     else {}
                 ),
             }
@@ -1103,7 +1313,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
             "configuration_sha256": configuration_sha256,
             "artifact_path": relative_path.as_posix(),
         }
-        if registration["schema_version"] in {3, 4, 5, 6}:
+        if registration["schema_version"] in {3, 4, 5, 6, 7}:
             cell.update(candidate_index[model])
             cell["implementation_source_sha256"] = description["configuration"][
                 "implementation_source"
@@ -1122,6 +1332,17 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         validate_final_provenance_against_tuning(
             binding=validated_binding,
             tuning_provenance=tuning_aggregate["provenance"],
+            final_provenance=provenance,
+        )
+    if registration["schema_version"] == 7:
+        primary_binding, _, primary_aggregate = _validate_compute_aware_upper_primary(registration)
+        validate_final_provenance_against_tuning(
+            binding={
+                "source_implementation_sha256": primary_binding[
+                    "primary_implementation_source_sha256"
+                ]
+            },
+            tuning_provenance=primary_aggregate["provenance"],
             final_provenance=provenance,
         )
     manifest_without_hash = {
@@ -1145,7 +1366,12 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         manifest_without_hash["tuning_selection"] = registration["tuning_selection"]
         manifest_without_hash["learner_bindings"] = registration["learner_bindings"]
         manifest_without_hash["task_model_incidence"] = registration["task_model_incidence"]
-    if registration["schema_version"] in {4, 6}:
+    if registration["schema_version"] == 7:
+        manifest_without_hash["primary_matrix_binding"] = registration["primary_matrix_binding"]
+        manifest_without_hash["memoryless_learner_binding"] = registration[
+            "memoryless_learner_binding"
+        ]
+    if registration["schema_version"] in {4, 6, 7}:
         manifest_without_hash["registration_sha256"] = hashlib.sha256(
             canonical_json_bytes(registration) + b"\n"
         ).hexdigest()

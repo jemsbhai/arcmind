@@ -81,7 +81,12 @@ from benchmarks.pobax.registered_artifacts import (
 )
 from benchmarks.pobax.registration_protocol import (
     COMPARISON_PROFILES,
+    COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV,
+    COMPUTE_AWARE_FINAL_SEEDS,
+    COMPUTE_AWARE_REQUIRE_GPU,
+    COMPUTE_AWARE_TUNING_EVALUATION_EPISODES_PER_ENV,
     COMPUTE_AWARE_TUNING_PANEL,
+    COMPUTE_AWARE_UPPER_REFERENCE_PANEL,
     PUBLISHED_PRIMARY_TRAIN_STEPS,
     step_budget_mode,
 )
@@ -232,7 +237,17 @@ ARTIFACT_SCHEMA_BY_REGISTRATION = {
     4: 8,
     5: 9,
     6: 10,
+    7: 11,
 }
+SCHEMA_V7_PRIMARY_HASH_FIELDS = (
+    "primary_aggregate_file_sha256",
+    "primary_registration_file_sha256",
+    "primary_manifest_file_sha256",
+    "primary_manifest_internal_sha256",
+    "primary_completion_index_file_sha256",
+    "primary_checksum_manifest_file_sha256",
+    "primary_implementation_source_sha256",
+)
 
 RUNTIME_DISTRIBUTIONS = (
     "brax",
@@ -614,6 +629,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         args.environment,
         field="model",
     )
+    expected_evaluation_episodes = (
+        COMPUTE_AWARE_TUNING_EVALUATION_EPISODES_PER_ENV
+        if args.registration_schema_version == 5
+        else COMPUTE_AWARE_FINAL_EVALUATION_EPISODES_PER_ENV
+        if args.registration_schema_version in {6, 7}
+        else None
+    )
+    if expected_evaluation_episodes is not None and (
+        args.evaluation_episodes_per_env != expected_evaluation_episodes
+        or args.require_gpu is not COMPUTE_AWARE_REQUIRE_GPU
+    ):
+        raise ValueError(
+            f"schema v{args.registration_schema_version} requires "
+            f"evaluation_episodes_per_env={expected_evaluation_episodes} "
+            "and GPU execution"
+        )
     if jax.default_backend() != "gpu" and args.require_gpu:
         raise RuntimeError(f"Expected GPU, found {jax.default_backend()!r}")
     commit = source_commit("pobax")
@@ -659,14 +690,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "tuning_implementation_source_sha256",
         None,
     )
-    if args.registration_schema_version not in {1, 2, 3, 4, 5, 6}:
-        raise ValueError("registration_schema_version must be 1, 2, 3, 4, 5, or 6")
+    primary_hashes = {field: getattr(args, field, None) for field in SCHEMA_V7_PRIMARY_HASH_FIELDS}
+    if args.registration_schema_version not in {1, 2, 3, 4, 5, 6, 7}:
+        raise ValueError("registration_schema_version must be 1, 2, 3, 4, 5, 6, or 7")
     if args.registration_schema_version == 1:
         if args.comparison_profile is not None:
             raise ValueError("schema v1 does not accept a comparison_profile")
     elif args.comparison_profile not in COMPARISON_PROFILES:
-        raise ValueError("schema v2, v3, v4, v5, and v6 require a supported comparison_profile")
-    if args.registration_schema_version in {3, 4, 5, 6}:
+        raise ValueError("schema v2, v3, v4, v5, v6, and v7 require a supported comparison_profile")
+    if args.registration_schema_version in {3, 4, 5, 6, 7}:
         if (
             not isinstance(candidate_id, str)
             or not isinstance(model_family, str)
@@ -675,7 +707,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             or not candidate_id.startswith(f"{model_family}.")
         ):
             raise ValueError(
-                "schema v3, v4, v5, and v6 require a portable candidate ID "
+                "schema v3, v4, v5, v6, and v7 require a portable candidate ID "
                 "prefixed by its model family"
             )
     elif (
@@ -685,20 +717,20 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         or learner_binding_mode is not None
         or learner_source_model_family is not None
     ):
-        raise ValueError("candidate identity is supported only by schema v3, v4, v5, and v6")
-    if args.registration_schema_version in {5, 6}:
+        raise ValueError("candidate identity is supported only by schema v3, v4, v5, v6, and v7")
+    if args.registration_schema_version in {5, 6, 7}:
         if (
             not isinstance(learner_id, str)
             or re.fullmatch(r"[a-z0-9][a-z0-9._-]*", learner_id) is None
             or candidate_id != f"{model_family}.{learner_id}"
         ):
             raise ValueError(
-                "schema v5 and v6 require a portable learner ID that exactly derives "
+                "schema v5, v6, and v7 require a portable learner ID that exactly derives "
                 "its candidate ID"
             )
     elif learner_id is not None:
-        raise ValueError("learner identity is supported only by schema v5 and v6")
-    if args.registration_schema_version == 6:
+        raise ValueError("learner identity is supported only by schema v5, v6, and v7")
+    if args.registration_schema_version in {6, 7}:
         if (
             learner_binding_mode not in {"selected", "inherited"}
             or not isinstance(learner_source_model_family, str)
@@ -710,12 +742,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             or learner_source_model_family != model_family
             or (learner_binding_mode == "selected" and args.model != learner_source_model_family)
             or (learner_binding_mode == "inherited" and args.model == learner_source_model_family)
+            or (
+                args.registration_schema_version == 7
+                and (
+                    args.model != "memoryless_mlp"
+                    or model_family != "memoryless_mlp"
+                    or learner_binding_mode != "selected"
+                    or learner_source_model_family != "memoryless_mlp"
+                )
+            )
         ):
             raise ValueError(
-                "schema v6 requires an unambiguous selected or inherited learner binding"
+                f"schema v{args.registration_schema_version} requires an unambiguous "
+                "selected or inherited learner binding"
             )
     elif learner_binding_mode is not None or learner_source_model_family is not None:
-        raise ValueError("learner binding identity is supported only by schema v6")
+        raise ValueError("learner binding identity is supported only by schema v6 and v7")
     if args.registration_schema_version == 3 and args.evidence_tier != "development_tuning":
         raise ValueError("schema v3 is reserved for development_tuning")
     if args.registration_schema_version == 4 and args.evidence_tier != "registered_final":
@@ -724,7 +766,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("schema v5 is reserved for development_tuning")
     if args.registration_schema_version == 6 and args.evidence_tier != "registered_final":
         raise ValueError("schema v6 is reserved for registered_final")
-    if args.registration_schema_version in {4, 6}:
+    if args.registration_schema_version == 7 and args.evidence_tier != "registered_final":
+        raise ValueError("schema v7 is reserved for registered_final")
+    if args.registration_schema_version in {4, 6, 7}:
         tuning_hashes = {
             "aggregate": tuning_aggregate_sha256,
             "completion index": tuning_completion_index_sha256,
@@ -750,7 +794,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             tuning_implementation_source_sha256,
         )
     ):
-        raise ValueError("tuning aggregate identity is supported only by schema v4 and v6")
+        raise ValueError("tuning aggregate identity is supported only by schema v4, v6, and v7")
+    if args.registration_schema_version == 7:
+        for field, value in primary_hashes.items():
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"schema v7 requires {field} as a lowercase SHA256")
+    elif any(value is not None for value in primary_hashes.values()):
+        raise ValueError("primary matrix identity is supported only by schema v7")
     if args.quick and args.evidence_tier != "smoke":
         raise ValueError("--quick requires --evidence-tier smoke")
     if args.evidence_tier == "development_tuning":
@@ -800,11 +850,25 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 f"schema v{args.registration_schema_version} is only for "
                 "registered primary comparisons"
             )
-        if not is_upper_reference and args.registration_schema_version not in {4, 6}:
+        if not is_upper_reference and args.registration_schema_version not in {4, 6, 7}:
             raise ValueError(
                 "registered-final primary tasks require schema version 4 or 6 "
                 "and an explicit tuning selection"
             )
+        if args.registration_schema_version == 7:
+            expected_upper_steps = dict(COMPUTE_AWARE_UPPER_REFERENCE_PANEL).get(args.environment)
+            if (
+                not is_upper_reference
+                or expected_upper_steps is None
+                or args.model != "memoryless_mlp"
+                or args.seed not in COMPUTE_AWARE_FINAL_SEEDS
+            ):
+                raise ValueError("schema v7 requires one exact compute-aware upper-reference cell")
+            if total_steps != expected_upper_steps:
+                raise ValueError(
+                    "schema v7 requires the exact upper-reference task budget: "
+                    f"expected={expected_upper_steps}, found={total_steps}"
+                )
         expected_steps = REGISTERED_TRAIN_STEPS.get(args.environment)
         if expected_steps is None:
             raise ValueError(f"{args.environment!r} is not a registered primary task")
@@ -821,9 +885,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             raise ValueError("registered_final requires a frozen cell ID")
     implementation_source = (
         gather_implementation_source(repository_root)
-        if args.registration_schema_version in {3, 4, 5, 6}
+        if args.registration_schema_version in {3, 4, 5, 6, 7}
         else None
     )
+    if (
+        args.registration_schema_version == 7
+        and implementation_source["sha256"]
+        != primary_hashes["primary_implementation_source_sha256"]
+    ):
+        raise ValueError("schema v7 current implementation source drifts from its primary matrix")
     environment_key = random.PRNGKey(args.seed + 10)
     environment, environment_params = make_environment(
         args.environment,
@@ -968,7 +1038,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "dependency_lock_sha256": lock_sha256,
         "runtime_contract": installed_runtime,
     }
-    if args.registration_schema_version in {3, 4, 5, 6}:
+    if args.registration_schema_version in {3, 4, 5, 6, 7}:
         frozen_configuration.update(
             {
                 "candidate_id": candidate_id,
@@ -977,16 +1047,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "implementation_source": implementation_source,
             }
         )
-    if args.registration_schema_version in {5, 6}:
+    if args.registration_schema_version in {5, 6, 7}:
         frozen_configuration["learner_id"] = learner_id
-    if args.registration_schema_version == 6:
+    if args.registration_schema_version in {6, 7}:
         frozen_configuration.update(
             {
                 "learner_binding_mode": learner_binding_mode,
                 "learner_source_model_family": learner_source_model_family,
             }
         )
-    if args.registration_schema_version in {4, 6}:
+    if args.registration_schema_version in {4, 6, 7}:
         frozen_configuration.update(
             {
                 "tuning_aggregate_sha256": tuning_aggregate_sha256,
@@ -995,7 +1065,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "tuning_implementation_source_sha256": (tuning_implementation_source_sha256),
             }
         )
-    if args.registration_schema_version in {2, 3, 4, 5, 6}:
+    if args.registration_schema_version == 7:
+        frozen_configuration.update(primary_hashes)
+    if args.registration_schema_version in {2, 3, 4, 5, 6, 7}:
         frozen_configuration.update(
             {
                 "comparison_profile": args.comparison_profile,
@@ -1122,7 +1194,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "contract": installed_runtime,
         },
     }
-    if args.registration_schema_version in {3, 4, 5, 6}:
+    if args.registration_schema_version in {3, 4, 5, 6, 7}:
         record.update(
             {
                 "candidate_id": candidate_id,
@@ -1131,16 +1203,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "implementation_source_sha256": implementation_source["sha256"],
             }
         )
-    if args.registration_schema_version in {5, 6}:
+    if args.registration_schema_version in {5, 6, 7}:
         record["learner_id"] = learner_id
-    if args.registration_schema_version == 6:
+    if args.registration_schema_version in {6, 7}:
         record.update(
             {
                 "learner_binding_mode": learner_binding_mode,
                 "learner_source_model_family": learner_source_model_family,
             }
         )
-    if args.registration_schema_version in {4, 6}:
+    if args.registration_schema_version in {4, 6, 7}:
         record.update(
             {
                 "tuning_aggregate_sha256": tuning_aggregate_sha256,
@@ -1149,7 +1221,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "tuning_implementation_source_sha256": (tuning_implementation_source_sha256),
             }
         )
-    if args.registration_schema_version in {2, 3, 4, 5, 6}:
+    if args.registration_schema_version == 7:
+        record.update(primary_hashes)
+    if args.registration_schema_version in {2, 3, 4, 5, 6, 7}:
         record.update(
             {
                 "comparison_profile": args.comparison_profile,
@@ -1187,7 +1261,7 @@ def main() -> None:
     parser.add_argument(
         "--registration-schema-version",
         type=int,
-        choices=(1, 2, 3, 4, 5, 6),
+        choices=(1, 2, 3, 4, 5, 6, 7),
         default=1,
     )
     parser.add_argument("--candidate-id")
@@ -1199,6 +1273,13 @@ def main() -> None:
     parser.add_argument("--tuning-completion-index-sha256")
     parser.add_argument("--tuning-checksum-manifest-sha256")
     parser.add_argument("--tuning-implementation-source-sha256")
+    parser.add_argument("--primary-aggregate-file-sha256")
+    parser.add_argument("--primary-registration-file-sha256")
+    parser.add_argument("--primary-manifest-file-sha256")
+    parser.add_argument("--primary-manifest-internal-sha256")
+    parser.add_argument("--primary-completion-index-file-sha256")
+    parser.add_argument("--primary-checksum-manifest-file-sha256")
+    parser.add_argument("--primary-implementation-source-sha256")
     parser.add_argument(
         "--comparison-profile",
         choices=tuple(COMPARISON_PROFILES),

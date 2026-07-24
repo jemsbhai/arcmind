@@ -442,7 +442,7 @@ def _schema6_configuration(
             "total_steps": total_steps,
             "step_budget_mode": "exact",
         },
-        "evaluation_episodes_per_environment": 1,
+        "evaluation_episodes_per_environment": 16,
         "evaluation_max_episode_steps": 10,
         "dependency_lock_sha256": PROVENANCE["dependency_lock_sha256"],
         "pobax_commit": PROVENANCE["pobax_commit"],
@@ -465,8 +465,11 @@ def _schema6_artifact(
     model = configuration["model"]
     seed = configuration["seed"]
     horizon = configuration["evaluation_max_episode_steps"]
-    returns = [[float(index)] for index in range(8)]
-    flat = [row[0] for row in returns]
+    returns = [
+        [float(environment_index * 16 + episode) for episode in range(16)]
+        for environment_index in range(8)
+    ]
+    flat = [value for row in returns for value in row]
     total_steps = configuration["ppo"]["total_steps"]
     return {
         "schema_version": 10,
@@ -493,20 +496,20 @@ def _schema6_artifact(
         "provenance": deepcopy(PROVENANCE),
         "actual_environment_steps": total_steps,
         "ppo": deepcopy(configuration["ppo"]),
-        "evaluation_episodes_per_environment": 1,
+        "evaluation_episodes_per_environment": 16,
         "evaluation_max_episode_steps": horizon,
-        "actual_evaluation_steps_per_environment": horizon,
-        "actual_evaluation_transitions": horizon * 8,
+        "actual_evaluation_steps_per_environment": 16 * horizon,
+        "actual_evaluation_transitions": 16 * horizon * 8,
         "comparison_profile": "arcmind_shared_comparison",
         "requested_environment_steps": total_steps,
         "realized_environment_steps": total_steps,
         "evaluation": {
             "mean_return": sum(flat) / len(flat),
-            "median_return": 3.5,
-            "episodes": 8,
-            "episodes_per_environment": 1,
+            "median_return": 63.5,
+            "episodes": 128,
+            "episodes_per_environment": 16,
             "num_environments": 8,
-            "scan_steps_per_environment": horizon,
+            "scan_steps_per_environment": 16 * horizon,
             "returns_by_environment": returns,
         },
         "training": deepcopy(OPTIMIZER_METRICS),

@@ -52,7 +52,7 @@ def _registration() -> dict[str, object]:
         ],
         "seeds": [4409, 5519, 6637],
         "comparison_profile": "arcmind_shared_comparison",
-        "evaluation_episodes_per_env": 4,
+        "evaluation_episodes_per_env": 1,
         "require_gpu": True,
         "quick": False,
     }
