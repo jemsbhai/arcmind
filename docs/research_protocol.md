@@ -38,6 +38,50 @@ The paper's central hypothesis is:
 This is a comparative hypothesis, not an assumed property. It must be rejected
 or narrowed if the registered evaluation does not support it.
 
+### Frozen first-paper study
+
+The first paper uses one exact compute-aware design. This section takes
+precedence over the broader benchmark and baseline audit later in this
+document.
+
+The primary task panel is:
+
+- `tmaze_10`, 1,000,000 training steps;
+- `rocksample_11_11`, 5,000,000 training steps;
+- `battleship_10`, 10,000,000 training steps; and
+- `Navix-DMLab-Maze-01-v0`, 10,000,000 training steps.
+
+Schema 5 selects one learning rate for each of 13 families using T-Maze and
+RockSample at 1,000,000 steps each, learning rates `0.0001`, `0.00025`, and
+`0.0005`, and development seeds `4409`, `5519`, and `6637`. The families are
+memoryless MLP, frame-stack MLP, GRU, shared Memory Traces, S5RL, Mamba-1,
+shared AGaLiTe, ArcMind, FFM, SHM, LRU, S4D, and Transformer-XL. Selection
+uses complete-case learning-curve AUC. Within each task, candidates receive
+shared ranks and range-normalized regret. The family winner minimizes mean
+task rank, then mean task regret, then learner ID. Final evaluation return
+cannot affect selection.
+
+Schema 6 evaluates seeds `10000` through `10009`. Eight models occur on all
+four tasks: memoryless MLP, frame-stack MLP, GRU, shared Memory Traces, S5RL,
+Mamba-1, shared AGaLiTe, and ArcMind. FFM, SHM, LRU, S4D, and Transformer-XL
+add T-Maze and RockSample comparisons. The official Memory Traces and
+source-compatible AGaLiTe lanes add supplemental T-Maze evidence. Five
+ArcMind ablations add RockSample evidence. This is an exact 49
+task-model-group, 490-cell primary matrix. Every final cell uses 16
+evaluation episodes per vector environment, or 128 evaluation episodes per
+seed, and must record GPU provenance.
+
+Schema 7 evaluates four separately labeled upper references with the same ten
+final seeds and selected memoryless learner. It contains the T-Maze
+persistent-cue, RockSample fully observable, Battleship perfect-recall, and
+Navix fully observable aliases, for 40 cells. These are information
+references, not parameter-matched memory baselines.
+
+The study therefore uses 10 final seeds rather than the 30 final seeds in the
+published POBAX protocol. It preserves the published interaction budgets for
+the four selected tasks but must not be described as a complete POBAX
+reproduction or as evidence about masked continuous-control tasks.
+
 ## 2. Accuracy revision
 
 The initial implementation treated episodic slots as an unordered set and
@@ -80,30 +124,20 @@ forms of partial observability and a measurable gap between memoryless and
 more-informed agents. Prefer low-dimensional observations for the first paper;
 a vision encoder would confound the backbone comparison.
 
-The registered low-dimensional task set is:
+The frozen first-paper task set is:
 
 - `tmaze_10`, which tests object uncertainty and tracking;
 - `rocksample_11_11`, which tests object uncertainty;
 - `battleship_10`, which tests spatial uncertainty and episode
-  nonstationarity;
-- `Walker-V-v0` and `HalfCheetah-V-v0`, which retain only velocity features,
-  require history to infer missing position information, and test the moment
-  features category. At the pinned POBAX commit, Walker-V selects dimensions
-  8 through 16 for a 9-value observation, while Walker-F selects all 17
-  dimensions. Both use a 6-value bounded continuous action and a 1,000-step
-  episode limit. The corresponding upper-reference pairing is Walker-V
-  against Walker-F; HalfCheetah-V is similarly paired with HalfCheetah-F,
-  whose full observation also has 17 values
-  ([environment map](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/__init__.py#L49-L86),
-  [Brax wrapper](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/gymnax.py#L242-L273)); and
+  nonstationarity; and
 - `Navix-DMLab-Maze-01-v0`, which tests spatial uncertainty and episode
   nonstationarity.
 
 The environment identifiers above are the names used by the pinned source.
-`HalfCheetah-P-v0` is exposed by the library but is not one of the two masked
-MuJoCo tasks validated for the published POBAX benchmark. Simple Chain has one
-action and remains an infrastructure check only. Pixel control and
-no-inventory Crafter are held out for a later encoder study.
+Walker-V, HalfCheetah-V, pixel control, and no-inventory Crafter were excluded
+before registered performance runs to keep the first claim low-dimensional,
+discrete, and feasible under the frozen local compute plan. Simple Chain has
+one action and remains an infrastructure check only.
 
 Use [POPGym](https://arxiv.org/abs/2303.01859) as the controlled memory suite
 and [Memory Gym](https://www.jmlr.org/papers/v26/24-0043.html) as the first
@@ -112,7 +146,7 @@ official GRU and Transformer-XL references. Use
 [Memory Maze](https://openreview.net/pdf?id=yHLvIlE9RGN) only as a later 3D
 stretch evaluation after the low-dimensional claim is established.
 
-Mandatory controls and baselines:
+The broader source-audited control universe is:
 
 - memoryless MLP, positional MLP, and fixed frame stack;
 - Elman RNN, GRU, and LSTM;
@@ -129,13 +163,13 @@ Mandatory controls and baselines:
   environment supplies one.
 
 For the causal Transformer, full-window means the complete bounded episode,
-not a fixed short context. The registered policy core therefore uses a
-1,000-step window on RockSample and a 2,000-step window on Navix. The
-serialized window must equal `evaluation_max_episode_steps` in the tuning and
-final configuration and artifact. Resume and aggregation fail closed on any
-disagreement. Legacy development artifacts that serialized the former
-32-step default remain readable, but they cannot support full-horizon
-attention, latency, memory, or return claims.
+not a fixed short context. A corrected 1,000-step RockSample build exceeded
+the declared 16 GiB device, so full-episode causal attention is a resource
+reference and is not a trainable schema 5 or schema 6 method. The bounded
+Transformer-XL control remains registered on T-Maze and RockSample. Legacy
+development artifacts that serialized the former 32-step causal-attention
+default remain readable, but they cannot support full-horizon attention,
+latency, memory, or return claims.
 
 POBAX does not implement a positional MLP. The
 [`backend="positional"` setting](https://github.com/taodav/pobax/blob/a5e1d62d14e4efe783885b9d4f19cffa2a568eec/pobax/envs/wrappers/gymnax.py#L242-L273)
@@ -328,13 +362,21 @@ caveats are maintained in
 
 Primary metrics:
 
-- episode return or task success, normalized per environment;
-- interquartile mean (IQM), median, mean, and optimality-gap profiles across
-  tasks;
-- sample efficiency as area under the learning curve;
-- paired bootstrap 95% confidence intervals;
+- per-task episode return and paired seed differences against ArcMind;
+- sample efficiency as area under the learning curve for development
+  selection only;
+- paired bootstrap 95% confidence intervals within each task;
+- taskwise probability of ArcMind improvement, assigning 0.5 to an exact tie
+  and averaging the four task probabilities with fixed weight 0.25; and
 - parameter count, peak accelerator memory, environment steps per second, and
   single-environment streaming latency.
+
+The schema 6 cross-task statistic uses 10,000 deterministic bootstrap draws.
+Seed indices are resampled within each task and the same task-specific draw
+matrix is reused for every method. Tasks are not resampled. Raw returns and
+raw return differences are never pooled across tasks. Only the eight-model
+all-task intersection can enter a cross-task comparison. Other baselines,
+source-compatible lanes, and ablations receive task-local paired analyses.
 
 Classify every run before execution:
 
@@ -343,17 +385,17 @@ Classify every run before execution:
 - A pilot run checks learnability and freezes architecture and tuning choices.
   It may use shortened budgets and three to five development seeds, but it is
   not paper evidence.
-- A development tuning run selects separately within each architecture from a
-  frozen, equal-cardinality candidate matrix. It uses one task at its full
-  published budget, the published task-specific tuning-seed count, and mean
-  seed learning-curve AUC on the shared complete-case suffix. It cannot rank
-  architectures, select a checkpoint, or serve as paper performance evidence.
-- A registered final run uses frozen choices, paired seed manifests, and the
-  published interaction budget for every method in a task cell. A primary
-  comparison must use schema v4 and bind every learner to the exact winner of
-  one verified tuning aggregate on the same task. Final seeds must be
-  disjoint from tuning seeds. Separately labeled schema-v2 upper references
-  do not require a tuning binding.
+- A compute-aware development tuning run uses schema 5 and the exact
+  234-cell two-task matrix defined above. It selects one learner per family,
+  cannot select a checkpoint, and cannot serve as paper performance evidence.
+- A compute-aware registered primary run uses schema 6, the exact sparse
+  490-cell matrix, and the 10 disjoint final seeds. Every selected or inherited
+  learner is tied to the canonical schema 5 winner.
+- A compute-aware upper-reference run uses schema 7 and binds a completed
+  schema 6 primary matrix plus its exact selected memoryless learner.
+- Schemas 1 through 4 remain readable for legacy and published-protocol
+  evidence. They are not the registration contract for the first ArcMind
+  paper.
 
 Primary and upper-reference results require a cross-matrix link artifact
 before comparison. The linker validates the complete raw checksum inventories,
@@ -365,9 +407,10 @@ completion index, per-cell logs, and checksum inventory beside the raw
 manifest. The checksum inventory must equal the complete set of regular files
 under the raw root and every entry must verify. The aggregate records the
 validated registration, completion-index, and checksum-inventory file hashes.
-For schema-v4 primary matrices, the frozen manifest also records the SHA256 of
-the complete canonical registration file. Any registration change therefore
-invalidates the frozen manifest even when the checksum inventory is rebuilt.
+For schema-v4 and schema-v6 primary matrices, the frozen manifest also records
+the SHA256 of the complete canonical registration file. Any registration
+change therefore invalidates the frozen manifest even when the checksum
+inventory is rebuilt.
 Completion indexes must have exact canonical JSON bytes. No failed-attempt or
 other noncanonical file is allowed inside a completed raw root, even when it
 is listed in the checksum inventory.
@@ -377,17 +420,18 @@ episode count, comparison profile, and quick-run contract. A declared GPU
 requirement must agree with validated runtime provenance.
 Schema-v1 registered artifacts retain legacy aggregation support, but their
 frozen evaluation episode count must also match every validated cell.
-Only a schema-v4 primary matrix with a frozen tuning selection can enter a
-registered-final, paper-eligible primary-to-upper link.
+The compute-aware paper link accepts only the exact schema 6 primary and
+schema 7 upper-reference pair. The legacy link continues to require schema 4
+primary evidence and its existing upper-reference contract.
 
 The published POBAX budgets are 1 million steps for T-Maze-10, 5 million for
 RockSample11, 10 million for Battleship-10, 50 million each for Walker-V and
 HalfCheetah-V, and 10 million for Navix-01. The paper uses 5 tuning seeds for
 T-Maze, RockSample, masked MuJoCo, and Navix, 10 tuning seeds for Battleship,
-then 30 final seeds for every reported environment. ArcMind targets 30 paired
-final seeds per main method-task cell. A preliminary table may use 10 paired
-seeds, but it must not be described as matching the published POBAX final
-protocol.
+then 30 final seeds for every reported environment. The frozen ArcMind study
+uses four of those interaction budgets, three tuning seeds on its two tuning
+tasks, and 10 paired final seeds. It is a compute-aware controlled study, not
+a reproduction of the published POBAX tuning or 30-seed final protocol.
 
 Use identical environment seeds and training budgets across models. Give every
 architecture the same number of tuning trials, even when its search space
@@ -397,39 +441,33 @@ in
 Precipice](https://proceedings.neurips.cc/paper/2021/hash/f514cec81cb148559cf475e7426eed5e-Abstract.html).
 
 The tuning aggregate is mechanically separated from registered-final
-aggregation. It requires schema v3, explicit immutable candidate IDs grouped
-by implementation model, the shared exact-step comparison profile, one
-complete Cartesian candidate matrix, checksum and completion indexes, frozen
-environment semantics, and frozen parameter matching. Every model family has
-the same candidate count and the exact same normalized learner configuration
-set. All candidates share `num_envs`, `rollout_steps`, `update_epochs`, and
-`num_minibatches`; only learning rate, GAE lambda, entropy coefficient, and
-learning-rate annealing may vary. The common curve
-starts at the latest first finite return across all candidate and seed cells
-and must retain at least two observations. Per-seed AUC uses trapezoidal
-integration over environment steps with no extrapolation. Dividing by the
-common interval width yields `auc_mean_return`, and candidates are ranked by
-its seed mean only within their model family. The selected configurations must
-be frozen in a new manifest and rerun on disjoint registered-final seeds.
-Every tuning completion row must identify its immutable cell log and SHA256,
-and the matrix checksum inventory must equal the exact canonical set of
-registration, manifest, completion index, cell artifacts, and cell logs.
-Additional files inside the raw tuning root are prohibited even when they are
-checksummed. When tuning declares a GPU requirement, its frozen manifest and
-validated artifacts must record a GPU runtime.
+aggregation. Schema 5 requires the exact 13-family, three-learner, two-task,
+three-seed Cartesian matrix. The common curve starts at the latest first
+finite return across every candidate and seed cell and retains at least two
+observations. Per-seed AUC uses trapezoidal integration over environment steps
+without extrapolation. Dividing by the common interval width yields
+`auc_mean_return`. The aggregate computes task scores, shared task ranks, and
+range-normalized task regret, then selects one learner per family by mean
+rank, mean regret, and learner ID. It does not rank model families. Every
+completion row identifies its immutable cell log and SHA256, and the checksum
+inventory must equal the exact canonical file set.
 
-Schema v4 closes the selection-to-final boundary. Its registration names the
-raw tuning matrix and canonical tuning aggregate by repository-relative path,
-binds the tuning registration, manifest, completion-index,
-checksum-inventory, implementation-source, and aggregate file hashes, and
-copies only the winning candidate identity, complete learner, and
-implementation-source hash for each model family. The schema-v4 manifest
-separately binds the SHA256 of the complete canonical final registration file,
-including fields outside the selected learner identity. The loader validates the
-exact tuning file inventory, rebuilds the tuning aggregate, requires exact
-canonical bytes, checks every declared winner and learner, and rejects any
-overlap between tuning and final seeds. The same binding is frozen in the
-final matrix manifest and revalidated during registered aggregation.
+Schema 6 closes the selection-to-final boundary. Its registration names the
+raw schema 5 matrix and canonical aggregate by normalized repository-relative
+paths, binds the registration, manifest, completion, checksum,
+implementation-source, and aggregate hashes, and copies the exact 13 winners.
+The runner rebuilds the tuning aggregate, requires canonical bytes, verifies
+every winner and complete learner, rejects final-seed overlap, and derives
+seven inherited learners for the two source-compatible lanes and five ArcMind
+ablations. Its manifest binds the complete canonical schema 6 registration.
+Registered aggregation independently repeats every check.
+
+Schema 7 binds a completed schema 6 primary matrix and its canonical
+registered aggregate. It proves the exact selected memoryless learner,
+requires matching implementation provenance, and emits only the four frozen
+upper aliases. The schema 6 and schema 7 linker rebuilds both aggregates and
+checks the exact alias, learner, evaluation, source, and checksum contracts.
+It does not treat privileged observations as an ordinary primary method.
 
 Tuning and final execution must have identical versioned
 implementation-source manifests. The manifest covers every tracked Python

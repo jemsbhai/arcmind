@@ -1,350 +1,317 @@
-protocol_version: 9
-status: development
+protocol_version: 10
+status: preregistered_compute_aware_pre_performance
 target_venue: ICLR
 cloud_budget_usd: 10
+planned_cloud_spend_usd: 0
 
 principles:
   model_selection:
-    delayed_sensor_recall: validation_nll_only
     pomdp: fixed_interaction_budget_no_return_based_checkpoint_selection
-    robot_imitation: heldout_demonstration_validation_metric
-  test_evaluation: once_after_selection_or_fixed_budget
-  paired_data: true
+    tuning_metric: complete_case_learning_curve_auc_only
+    final_evaluation_return_affects_selection: false
+  paired_environment_seeds: true
   report_uncertainty: true
   preserve_raw_per_seed_results: true
+  raw_returns_pooled_across_tasks: false
+  performance_based_pruning_or_stopping: prohibited
+
+published_pobax_reference:
+  source: https://rlj.cs.umass.edu/2025/papers/RLJ_RLC_2025_153.pdf
+  source_commit: a5e1d62d14e4efe783885b9d4f19cffa2a568eec
+  final_seed_count: 30
+  task_budgets:
+    tmaze_10: 1000000
+    rocksample_11_11: 5000000
+    battleship_10: 10000000
+    Walker-V-v0: 50000000
+    HalfCheetah-V-v0: 50000000
+    Navix-DMLab-Maze-01-v0: 10000000
+  paper_claim_restriction: >-
+    The compute-aware ArcMind study preserves four published interaction
+    budgets but does not reproduce the published task set, tuning counts, or
+    30-seed final protocol.
 
 result_tiers:
   smoke:
-    purpose: validate_environment_adapter_shapes_jit_gradients_and_artifacts
-    allowed_budget: quick_or_shortened
-    allowed_seeds: 1
+    purpose: validate_shapes_resets_jit_gradients_and_artifacts
     paper_status: prohibited
   pilot:
-    purpose: debug_learning_and_freeze_architectures_hyperparameters_and_failures
-    allowed_budget: may_be_shorter_than_published_reference
-    typical_seed_count: 3
+    purpose: debug_learning_and_measure_resources
     paper_status: development_only
   development_tuning:
-    purpose: select_frozen_candidates_by_predeclared_learning_curve_auc
-    registration_schema: 3
-    budget_rule: use_published_reference_steps_for_pobax
-    seed_rule: use_published_task_specific_tuning_count
-    comparison_profile: arcmind_shared_comparison
+    registration_schema: 5
+    artifact_schema: 9
+    aggregate_schema: 2
     matrix_kind: hyperparameter_selection
-    matrix_rule: one_primary_environment_complete_cartesian_candidate_grid
-    selection_scope: within_model_family_only
     paper_status: selection_only_not_performance_evidence
-  registered_final:
-    purpose: evaluate_frozen_methods_on_paired_seed_manifests
-    primary_registration_schema: 4
-    upper_reference_registration_schema: 2
-    budget_rule: use_published_reference_steps_for_pobax
-    target_seed_count: 30
-    tuning_seed_overlap: prohibited
+  registered_primary:
+    registration_schema: 6
+    artifact_schema: 10
+    aggregate_schema: 2
+    matrix_kind: primary_comparison
     paper_status: eligible_after_all_release_gates_pass
+  registered_upper_reference:
+    registration_schema: 7
+    artifact_schema: 11
+    aggregate_schema: 3
+    matrix_kind: upper_reference
+    paper_status: separately_labeled_information_reference
+  legacy:
+    supported_registration_schemas: [1, 2, 3, 4]
+    role: compatibility_and_published_protocol_evidence_only
 
-stages:
-  local_diagnostic:
-    benchmark: delayed_sensor_recall
-    purpose: isolate fading-memory and exact-recall contributions
-    exact_recall_window: 8
-    retained_memory_slots: 16
-    train_examples: 4096
-    validation_examples: 1024
-    test_examples: 2048
-    seeds: [1103, 2207, 3301, 4409, 5519]
-    models:
-      - memoryless_mlp
-      - gru
-      - lstm
-      - causal_transformer
-      - arcmind_ssm_only
-      - arcmind_unordered
-      - arcmind
-    selection_metric: nll
-    metrics:
-      - accuracy
-      - nll
-      - short_lag_accuracy
-      - long_lag_accuracy
-      - parameter_count
-      - train_seconds
-      - inference_examples_per_second
+shared_learner:
+  implementation: shared_jax_ppo
+  comparison_profile: arcmind_shared_comparison
+  num_envs: 8
+  rollout_steps: 125
+  update_epochs: 4
+  num_minibatches: 4
+  gae_lambda: 0.95
+  entropy_coefficient: 0.01
+  anneal_learning_rate: false
+  exact_steps_per_update: 1000
+  interaction_budget_rule: require_exact_vector_rollout_divisibility
+  final_policy_after_fixed_budget: true
 
-  pomdp_pilot:
-    benchmark: POBAX
-    implementation: shared_jax_ppo
-    result_status: development_only_until_all_adapters_and_hyperparameters_are_frozen
-    seeds: [1103, 2207, 3301]
-    first_frozen_matrix:
-      manifest: benchmarks/pobax/manifests/tmaze_pilot_v1.json
-      environment: tmaze_10
-      train_steps: 250000
-      num_envs: 8
-      rollout_steps: 125
-      exact_steps_per_update: 1000
-      update_epochs: 4
-      evaluation_episodes_per_environment: 16
-      total_evaluation_episodes_per_seed: 128
-    validated_policy_cores:
+compute_aware_tuning:
+  registration_schema: 5
+  artifact_schema: 9
+  environments:
+    - id: tmaze_10
+      total_steps: 1000000
+    - id: rocksample_11_11
+      total_steps: 1000000
+  seeds: [4409, 5519, 6637]
+  evaluation_episodes_per_environment: 1
+  require_gpu: true
+  learning_rate_grid:
+    lr_low: 0.0001
+    lr_mid: 0.00025
+    lr_high: 0.0005
+  ordered_families:
+    - memoryless_mlp
+    - frame_stack_mlp
+    - gru
+    - memory_trace_shared
+    - s5rl
+    - mamba1
+    - agalite_shared
+    - arcmind
+    - ffm
+    - shm
+    - lru
+    - s4d
+    - transformer_xl
+  planned_cells: 234
+  selection:
+    common_curve_start: latest_first_finite_return_across_all_cells
+    integration: trapezoid_without_extrapolation
+    per_seed_metric: auc_mean_return
+    task_score: mean_seed_auc_mean_return
+    task_rank: one_plus_count_strictly_better
+    exact_score_ties_share_rank: true
+    task_regret: range_normalized_best_minus_score
+    zero_range_regret: 0
+    winner_order:
+      - mean_task_rank_ascending
+      - mean_task_regret_ascending
+      - learner_id_ascending
+    architecture_ranking: prohibited
+    checkpoint_selection: prohibited
+    final_evaluation_return_used: false
+
+compute_aware_primary:
+  registration_schema: 6
+  artifact_schema: 10
+  seeds: [10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10009]
+  evaluation_episodes_per_environment: 16
+  total_evaluation_episodes_per_seed: 128
+  require_gpu: true
+  environments:
+    - id: tmaze_10
+      total_steps: 1000000
+    - id: rocksample_11_11
+      total_steps: 5000000
+    - id: battleship_10
+      total_steps: 10000000
+    - id: Navix-DMLab-Maze-01-v0
+      total_steps: 10000000
+  ordered_global_models:
+    - memoryless_mlp
+    - frame_stack_mlp
+    - gru
+    - memory_trace_shared
+    - s5rl
+    - mamba1
+    - agalite_shared
+    - arcmind
+    - ffm
+    - shm
+    - lru
+    - s4d
+    - transformer_xl
+    - memory_trace_official
+    - agalite_source_compat
+    - arcmind_ssm_only
+    - arcmind_unordered
+    - arcmind_no_memory
+    - arcmind_no_ssm
+    - arcmind_no_gate
+  incidence:
+    tmaze_10:
       - memoryless_mlp
       - frame_stack_mlp
-      - memory_trace_official
-      - memory_trace_shared
-      - positional_mlp
-      - elman_rnn
       - gru
-      - lstm
-      - tcn
+      - memory_trace_shared
+      - s5rl
+      - mamba1
+      - agalite_shared
+      - arcmind
       - ffm
-      - shm_paper_uniform
-      - s4d
-      - ms4
-      - ms4n
+      - shm
       - lru
-      - s5rl
-      - mamba1
-      - causal_transformer
+      - s4d
       - transformer_xl
-      - gtrxl
-      - arcmind
-      - arcmind_unordered
-      - arcmind_no_memory
-      - arcmind_no_ssm
-      - arcmind_no_gate
-      - arcmind_ssm_only
-    remaining_required_adapters: []
-    tasks:
-      - simple_chain
-      - tmaze_10
-      - rocksample_11_11
-      - battleship_10
-      - Walker-V-v0
-      - HalfCheetah-V-v0
-      - Navix-DMLab-Maze-01-v0
-    note: >-
-      Simple Chain and quick cells validate infrastructure only. They are
-      prohibited as paper accuracy results. HalfCheetah-P-v0 is exposed by the
-      library but is not a registered POBAX paper task.
-
-  pomdp_registered:
-    benchmark: POBAX
-    implementation: shared_jax_ppo
-    source: https://rlj.cs.umass.edu/2025/papers/RLJ_RLC_2025_153.pdf
-    initial_seed_manifest: [1103, 2207, 3301, 4409, 5519]
-    target_final_seed_count: 30
-    minimum_seed_count_for_preliminary_tables: 10
-    policy_selection: final_policy_after_fixed_interaction_budget
-    primary_registration_schema: 4
-    upper_reference_registration_schema: 2
-    tuning_registration_schema: 3
-    comparison_profiles:
-      pobax_author_semantics:
-        purpose: mirror_pinned_author_ppo_settings_and_step_semantics_in_shared_runner
-        exact_author_code_reproduction: false
-        interaction_budget_rule: floor_to_complete_vector_rollouts
-        learning_rate_schedule: >-
-          lr * (1 - floor(opt_step / (num_minibatches * update_epochs)) /
-          num_updates)
-      arcmind_shared_comparison:
-        purpose: compare_all_policy_cores_under_one_shared_ppo_contract
-        interaction_budget_rule: require_exact_vector_rollout_divisibility
-    required_learner_fields:
-      - num_envs
-      - rollout_steps
-      - update_epochs
-      - num_minibatches
-      - learning_rate
-      - gae_lambda
-      - entropy_coefficient
-      - anneal_learning_rate
-    pilot_screening_seeds: [1103, 2207, 3301]
-    registered_tuning_seed_rule: match_published_task_count
-    tuning_aggregation:
-      evidence_tier: development_tuning
-      matrix_kind: hyperparameter_selection
-      immutable_identity:
-        - model_family
-        - implementation_model
-        - candidate_id
-      candidate_cardinality: equal_across_model_families
-      normalized_learner_grid: identical_across_model_families
-      candidates_per_family_minimum: 2
-      immutable_cell_logs:
-        completion_index_path_and_sha256: required
-        checksum_inventory_coverage: required
-        checksum_inventory_equality: exact_canonical_files_only
-      controlled_structural_learner_fields:
-        - num_envs
-        - rollout_steps
-        - update_epochs
-        - num_minibatches
-      tunable_learner_fields:
-        - learning_rate
-        - gae_lambda
-        - entropy_coefficient
-        - anneal_learning_rate
-      primary_metric: mean_seed_auc_mean_return
-      selection_scope: within_model_family_only
-      architecture_ranking: prohibited
-      integration: trapezoid_over_shared_complete_case_suffix
-      minimum_shared_finite_points: 2
-      checkpoint_selection: prohibited
-      registered_final_evidence: prohibited
-      paper_performance_claims: prohibited
-    final_selection_binding:
-      registration_schema: 4
-      scope: one_primary_environment
-      comparison_profile: arcmind_shared_comparison
-      raw_tuning_matrix: canonical_rebuild_required
-      tuning_aggregate_bytes: exact_canonical_identity
-      aggregate_sha256: required
-      source_registration_sha256: required
-      source_manifest_sha256: required
-      source_completion_index_sha256: required
-      source_checksum_manifest_sha256: required
-      source_implementation_sha256: required
-      winner_candidate_identity: exact
-      winner_learner: exact
-      winner_implementation_source_sha256: exact
-      final_equivalence:
-        implementation_source_manifest: exact
-        dependency_lock_sha256: exact
-        pobax_commit: exact
-        navix_commit: exact
-        non_device_runtime_contract: exact
-        git_commit: may_differ
-      final_seed_overlap_with_tuning: prohibited
-      final_manifest_registration_sha256: required_exact_canonical_file_hash
-      paper_eligible_primary_schema: 4_only
-      author_semantics_upper_reference_binding: not_required
-    artifact_requirements:
-      aggregate_output_location: outside_immutable_raw_matrix
-      freeze_environment_source_and_reference: true
-      freeze_parameter_counts_and_ratio: true
-      freeze_parameter_contract_and_comparison_role: true
-      freeze_memory_trace_decay_values_and_origin: true
-      causal_transformer_horizon_contract:
-        registered_window_length: equals_task_maximum_episode_steps
-        validate_configuration_artifact_resume_and_aggregation: true
-        legacy_schema_v1_v2_development_artifacts: readable_but_not_paper_eligible
-      record_requested_environment_steps: true
-      record_realized_environment_steps: true
-      finite_optimizer_metrics:
-        required:
-          - loss
-          - actor_loss
-          - value_loss
-          - entropy
-          - approximate_kl
-        validate_every_update: true
-      validate_final_training_metrics: true
-      fail_training_before_evaluation: true
-      canonical_cell_log: successful_child_only
-      failed_attempt_root: sibling_raw_matrix_dot_attempts
-      failed_attempt_logs: unique_attempt_paths_outside_raw_matrix
-      failed_partial_artifacts: unique_attempt_paths_outside_raw_matrix
-      raw_checksum_inventory: exact_regular_file_inventory
-      raw_root_noncanonical_extras: prohibited_even_when_checksummed
-      registered_aggregate_inputs:
-        registration_json: required_and_canonical
-        completion_index_json: required_validated_and_canonical
-        canonical_cell_logs: required_and_hashed
-        checksums_sha256: required_and_exact
-      schema_v2_registration_to_artifact_binding:
-        learner: exact
-        environment_budget: exact
-        evaluation_episodes: exact
-        comparison_profile: exact
-        quick: must_be_false
-        required_gpu: validated_against_runtime_provenance
-      schema_v1_legacy_registration_to_artifact_binding:
-        evaluation_episodes: exact
-      tuning_required_gpu: validated_against_runtime_provenance
-      registered_aggregate_integrity_hashes:
-        - registration_file_sha256
-        - completion_index_sha256
-        - checksum_manifest_sha256
-      parameter_contracts:
-        parameter_matched_primary:
-          parameter_ratio_bounds: [0.9, 1.1]
-        fixed_official_architecture:
-          exact_parameter_count_from_frozen_policy_core: true
-          comparison_role: supplemental_source_compatible
-          exclude_from_parameter_matched_primary_pairing: true
-      upper_reference_link:
-        required: true
-        ordered_seed_identity: exact
-        alias_mapping: exact
-        validate_both_raw_checksum_inventories: true
-    required_policy_cores:
-      - memoryless_mlp
-      - positional_mlp
-      - frame_stack_mlp
       - memory_trace_official
-      - memory_trace_shared
+      - agalite_source_compat
+    rocksample_11_11:
+      - memoryless_mlp
+      - frame_stack_mlp
       - gru
-      - lstm
-      - fast_and_forgetful_memory
-      - stable_hadamard_memory_paper_uniform
-      - lru
-      - s4d
+      - memory_trace_shared
       - s5rl
       - mamba1
-      - transformer_xl
+      - agalite_shared
       - arcmind
+      - ffm
+      - shm
+      - lru
+      - s4d
+      - transformer_xl
+      - arcmind_ssm_only
       - arcmind_unordered
       - arcmind_no_memory
       - arcmind_no_ssm
       - arcmind_no_gate
-    registered_tasks:
-      tmaze_10:
-        environment_id: tmaze_10
-        category: object_uncertainty_and_tracking
-        published_train_steps: 1000000
-        published_tuning_seed_count: 5
-        published_final_seed_count: 30
-      rocksample_11_11:
-        environment_id: rocksample_11_11
-        category: object_uncertainty
-        published_train_steps: 5000000
-        published_tuning_seed_count: 5
-        published_final_seed_count: 30
-      battleship_10:
-        environment_id: battleship_10
-        category: spatial_uncertainty_and_episode_nonstationarity
-        published_train_steps: 10000000
-        published_tuning_seed_count: 10
-        published_final_seed_count: 30
-      walker_velocity_only:
-        environment_id: Walker-V-v0
-        category: moment_features
-        published_train_steps: 50000000
-        published_tuning_seed_count: 5
-        published_final_seed_count: 30
-      halfcheetah_velocity_only:
-        environment_id: HalfCheetah-V-v0
-        category: moment_features
-        published_train_steps: 50000000
-        published_tuning_seed_count: 5
-        published_final_seed_count: 30
-      navix_dmlab_maze_01:
-        environment_id: Navix-DMLab-Maze-01-v0
-        category: spatial_uncertainty_and_episode_nonstationarity
-        published_train_steps: 10000000
-        published_tuning_seed_count: 5
-        published_final_seed_count: 30
-    note: >-
-      Freeze one equal-cardinality tuning grid on the tuning seeds before
-      registered evaluation. Never choose checkpoints or hyperparameters from
-      registered-seed evaluation returns. The three development tuning seeds
-      above are for pilot screening only. Registered tuning must use the
-      published task-specific counts recorded above. A result with fewer than
-      30 final seeds must state that it does not match the published POBAX
-      final-seed count.
+    battleship_10:
+      - memoryless_mlp
+      - frame_stack_mlp
+      - gru
+      - memory_trace_shared
+      - s5rl
+      - mamba1
+      - agalite_shared
+      - arcmind
+    Navix-DMLab-Maze-01-v0:
+      - memoryless_mlp
+      - frame_stack_mlp
+      - gru
+      - memory_trace_shared
+      - s5rl
+      - mamba1
+      - agalite_shared
+      - arcmind
+  inherited_learners:
+    memory_trace_official: memory_trace_shared
+    agalite_source_compat: agalite_shared
+    arcmind_ssm_only: arcmind
+    arcmind_unordered: arcmind
+    arcmind_no_memory: arcmind
+    arcmind_no_ssm: arcmind
+    arcmind_no_gate: arcmind
+  planned_task_model_groups: 49
+  planned_cells: 490
+
+compute_aware_upper_references:
+  registration_schema: 7
+  artifact_schema: 11
+  model: memoryless_mlp
+  learner_source: exact_selected_schema6_memoryless_lane
+  seeds: [10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007, 10008, 10009]
+  evaluation_episodes_per_environment: 16
+  require_gpu: true
+  aliases:
+    - id: tmaze_10-perfect-memory
+      primary: tmaze_10
+      total_steps: 1000000
+      reference_class: persistent_cue
+    - id: rocksample_11_11-fully-observable
+      primary: rocksample_11_11
+      total_steps: 5000000
+      reference_class: full_markov_observation
+    - id: battleship_10-perfect-recall
+      primary: battleship_10
+      total_steps: 10000000
+      reference_class: perfect_recall_history
+    - id: Navix-DMLab-Maze-01-fully-observable
+      primary: Navix-DMLab-Maze-01-v0
+      total_steps: 10000000
+      reference_class: full_markov_map_position_and_direction
+  planned_cells: 40
 
 statistics:
   bootstrap_resamples: 10000
   confidence_level: 0.95
-  aggregate_metrics: [mean, median, iqm]
-  paired_environment_seeds: true
+  paired_seed_indices_within_task: true
+  shared_draw_matrix_across_methods_within_task: true
+  resample_tasks: false
+  fixed_task_weights:
+    tmaze_10: 0.25
+    rocksample_11_11: 0.25
+    battleship_10: 0.25
+    Navix-DMLab-Maze-01-v0: 0.25
+  probability_of_arcmind_improvement:
+    win: 1
+    exact_tie: 0.5
+    loss: 0
+  cross_task_models:
+    - memoryless_mlp
+    - frame_stack_mlp
+    - gru
+    - memory_trace_shared
+    - s5rl
+    - mamba1
+    - agalite_shared
+    - arcmind
+  task_specific_paired_comparisons: 17
+  raw_return_pooling_across_tasks: prohibited
+  source_compatible_lanes:
+    role: supplemental
+    excluded_from_parameter_matched_primary_table: true
+
+integrity:
+  canonical_json_required: true
+  duplicate_json_keys: prohibited
+  non_finite_json_values: prohibited
+  clean_git_required: true
+  completion_index_canonical_bytes: required
+  raw_checksum_inventory: exact_regular_file_inventory
+  raw_root_noncanonical_extras: prohibited_even_when_checksummed
+  failed_attempt_root: sibling_raw_matrix_dot_attempts
+  implementation_source_scope:
+    - all_tracked_python_under_arcmind
+    - all_tracked_non_test_python_under_benchmarks_pobax
+  tuning_to_final_equivalence:
+    implementation_source_manifest: exact
+    dependency_lock_sha256: exact
+    pobax_commit: exact
+    navix_commit: exact
+    non_device_runtime_contract: exact
+    git_commit: may_differ
+  schema7_primary_proof:
+    canonical_schema6_aggregate_rebuild: required
+    primary_file_and_internal_hashes: exact
+    selected_memoryless_learner: exact
+  schema6_schema7_link:
+    exact_alias_mapping: required
+    learner_and_evaluation_contract: exact
+    provenance_and_checksums: exact
+
+resource_plan:
+  document: docs/compute_budget.md
+  planned_cells: 764
+  planned_training_environment_steps: 3144000000
+  central_local_gpu_hours: 1271.267
+  worst_rate_sensitivity_gpu_hours: 1653.326
+  paid_performance_expansion_without_new_registration: prohibited

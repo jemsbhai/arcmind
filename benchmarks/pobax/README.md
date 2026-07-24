@@ -300,7 +300,7 @@ optimizer step `s`, it is
 The schedule reaches zero at the optimizer boundary and is clamped to zero
 after that boundary.
 
-Development tuning uses schema v3 and `matrix_kind:
+Legacy development tuning uses schema v3 and `matrix_kind:
 hyperparameter_selection`. Its `candidate_families` list groups immutable
 candidate IDs under one implementation model per family. Every candidate
 records a complete learner configuration. Candidate IDs are used in frozen
@@ -311,7 +311,7 @@ Every family has the same number of candidates, with no duplicate normalized
 learner configuration inside a family. The exact normalized learner
 configuration set must also be identical across families.
 
-Primary registered-final comparisons use schema v4. They contain no free
+Legacy 30-seed registered-final comparisons use schema v4. They contain no free
 global learner block. Instead, `tuning_selection` binds one task to the raw
 schema-v3 tuning matrix, its canonical aggregate and SHA256, its source
 registration, manifest, completion-index, checksum-inventory, and
@@ -328,6 +328,30 @@ canonical final registration file, so rechecksumming cannot authorize a
 registration change. The final 30-seed manifest must be disjoint from all tuning seeds.
 Schema-v2 registered upper references remain valid without this binding,
 including the `pobax_author_semantics` lane.
+
+The compute-aware paper study uses three separate fail-closed schemas:
+
+- Schema v5 tunes 13 ordered model families on T-Maze and RockSample at
+  1,000,000 steps each. It uses learning rates `0.0001`, `0.00025`, and
+  `0.0005`, seeds `4409`, `5519`, and `6637`, one evaluation episode per
+  vector environment, and mandatory GPU provenance. Its exact 234-cell
+  schema-v9 artifact matrix selects one learner per family by mean task rank,
+  mean range-normalized task regret, then learner ID.
+- Schema v6 rebuilds and proves the canonical schema-v5 aggregate, then runs
+  the exact sparse 490-cell primary matrix. It uses four tasks, 49 task-model
+  groups, seeds `10000` through `10009`, 16 evaluation episodes per vector
+  environment, and schema-v10 artifacts. Seven source-compatible or ablation
+  models inherit a named family learner. Every configuration, artifact,
+  manifest cell, and resume check freezes that inheritance.
+- Schema v7 binds a completed schema-v6 primary matrix and the actual selected
+  memoryless learner. It runs exactly four privileged aliases, one model, and
+  the same ten seeds, for 40 schema-v11 artifacts. Its aggregate and the
+  schema-v6/schema-v7 link independently rebuild the primary evidence and
+  verify every file hash, internal manifest identity, learner, evaluation,
+  alias, and provenance field.
+
+Schemas v3 and v4 remain supported for legacy 30-seed evidence. They are not
+the first-paper compute-aware contract.
 
 The implementation-source manifest is a versioned canonical manifest over
 every tracked Python file under `arcmind/` and every tracked non-test Python
@@ -361,11 +385,11 @@ immutable raw matrix, its completion index, or its checksum inventory.
 Every registration declares `matrix_kind`. A `primary_comparison` matrix must
 include ArcMind. An `upper_reference` matrix contains only the memoryless
 policy on its separately labeled privileged or full-observation task. A
-`hyperparameter_selection` matrix contains schema-v3 candidate families and
-cannot be aggregated by the registered-final path. A
-registered-final matrix is accepted only with exactly 30 paired seeds.
-Primary registered-final matrices additionally require the schema-v4 tuning
-selection binding.
+`hyperparameter_selection` matrix uses schema v3 legacy candidate families or
+the exact schema v5 family by learner grid and cannot be aggregated by the
+registered-final path. Legacy registered-final matrices require exactly 30
+paired seeds. Schema v6 and schema v7 require the exact ordered ten-seed
+manifest and their respective selection or primary bindings.
 Each child process writes an immutable per-cell log beside its JSON artifact.
 The completion index records both hashes, and the directory checksum covers
 the logs as well as the structured results.
@@ -378,10 +402,11 @@ python -m benchmarks.pobax.aggregate_registered \
   benchmark_results/pobax/registered-final-analysis/aggregate.json
 ```
 
-The aggregator accepts registered-final artifacts only. It verifies the
-Cartesian matrix, configuration hashes, clean provenance, raw evaluation
-returns, episode counts, and within-task learning-curve grids before computing
-seed-level summaries and paired differences against ArcMind. Early curve
+The aggregator accepts registered-final artifacts only. It verifies the exact
+Cartesian legacy inventory or sparse schema-v6 inventory, configuration
+hashes, clean provenance, raw evaluation returns, episode counts, and
+within-task learning-curve grids before computing seed-level summaries and
+paired differences against ArcMind. Early curve
 entries with no completed episode remain JSON `null`; aggregation starts at
 the first step where every cell in that task has a finite return.
 Standalone aggregation also requires the frozen sibling `registration.json`,
@@ -398,11 +423,22 @@ profile, and quick-run contract. A declared GPU requirement must agree with
 the validated runtime provenance.
 Schema-v1 registered artifacts retain legacy aggregation support, but their
 frozen evaluation episode count must match every validated cell. A
-registered-final primary-to-upper link rejects every primary schema except
-schema v4, which requires the frozen tuning selection.
+legacy registered-final primary-to-upper link requires schema v4 and its
+frozen tuning selection. The compute-aware link accepts only the exact schema
+v6 and schema v7 pair.
 Derived aggregates live outside the immutable raw-matrix directory so its
 checksum manifest continues to cover every file it was created to protect.
 The write commands reject any output path inside that directory.
+
+Schema v6 keeps raw returns inside task groups. Its cross-task analysis is
+limited to the ordered eight-model all-task intersection. It resamples the ten
+paired seed indices independently within each task, reuses one 10,000-draw
+matrix across methods in that task, fixes task weights at 0.25, and assigns
+0.5 to an exact return tie. Tasks are not resampled. FFM, SHM, LRU, S4D,
+Transformer-XL, the two source-compatible lanes, and the five ArcMind
+ablations receive task-local paired comparisons against ArcMind. Their raw
+returns and differences are never pooled across tasks, and the source lanes
+remain separately labeled supplemental evidence.
 
 Smoke, pilot, and tuning matrices use the separately labeled development
 aggregator:
@@ -419,12 +455,12 @@ paper. Legacy primary pilots whose older frozen configuration omitted those
 fields are accepted only when the completed artifact itself passes the same
 checks, and the aggregate records that limitation explicitly.
 
-The `development_tuning` tier is selection evidence only. It requires schema
-v3, `arcmind_shared_comparison`, exactly one published primary task at its full
-interaction budget, at least two candidates per model family, equal candidate
-cardinality across families, and the published task-specific tuning-seed
-count. Every candidate uses the same seed set, budget, evaluation contract,
-and training-step grid. The structural learner fields `num_envs`,
+The `development_tuning` tier is selection evidence only. Legacy schema v3
+requires one published primary task, equal candidate cardinality, and the
+published task-specific tuning-seed count. Schema v5 instead requires the
+exact compute-aware 234-cell design described above. Every candidate uses its
+schema's frozen seed set, budget, evaluation contract, and training-step grid.
+The structural learner fields `num_envs`,
 `rollout_steps`, `update_epochs`, and `num_minibatches` are identical across
 the entire matrix. Candidates may vary only `learning_rate`, `gae_lambda`,
 `entropy_coefficient`, and `anneal_learning_rate`. Completion and checksum
@@ -432,7 +468,8 @@ indexes, frozen environment semantics, and parameter-match contracts are
 mandatory. Every schema-v3 completion row must carry the immutable cell log
 path and hash, and the checksum inventory must cover every log.
 Equal cardinality is not sufficient: every family must use the exact same
-normalized set of complete learner configurations.
+normalized set of complete learner configurations. Schema v5 further fixes
+the exact family order, learner IDs, learning rates, tasks, and seeds.
 The schema-v3 checksum inventory must equal the exact canonical registration,
 manifest, completion, artifact, and log paths. Additional files inside the
 raw tuning root are rejected even when checksummed. A declared GPU
@@ -443,16 +480,18 @@ first finite `mean_recent_return` across all candidate and seed cells, then
 requires at least two shared finite curve points. It integrates each seed
 curve by the trapezoidal rule without extrapolation and divides by the common
 integration width.
-Candidates are ranked separately within each model family by mean seed
-`auc_mean_return`; an exact score tie is resolved by ascending candidate ID.
-No result ranks one architecture against another. This rule selects a
-candidate configuration, never a checkpoint. Final evaluation return is
-preserved for audit but cannot affect selection. The aggregate status is
+Legacy schema-v3 candidates are ranked separately within each model family by
+mean seed `auc_mean_return`, with candidate ID as the exact-score tie breaker.
+Schema v5 first computes task scores, shared ranks, and range-normalized
+regret, then selects by mean rank, mean regret, and learner ID. Neither schema
+ranks model families. Both select a configuration, never a checkpoint. Final
+evaluation return is preserved for audit but cannot affect selection. The
+aggregate status is
 `development_tuning_selection_aggregate_not_for_paper`, and its eligibility
-block explicitly prohibits registered-final evidence and paper performance
-claims. A selected configuration must be frozen in a new registered-final
-schema-v4 manifest and rerun on the disjoint final seed manifest. The binding
-is revalidated when the registered matrix is aggregated.
+block prohibits registered-final evidence and paper performance claims. A
+legacy selection enters schema v4. A compute-aware selection enters schema
+v6. Both are rerun on disjoint final seeds and revalidated during registered
+aggregation.
 
 Primary and upper-reference matrices are paired only through a validated link:
 
@@ -466,8 +505,10 @@ python -m benchmarks.pobax.link_upper_reference \
 The linker requires identical ordered seeds, exact alias-to-primary mappings,
 learner and evaluation contracts, source commits, dependency locks, and
 registered budgets. It validates exact raw file inventory and checksums for
-both matrices and permits backend or device differences only when all
-non-device runtime fields match.
+both matrices. The legacy path permits backend or device differences only when
+all non-device runtime fields match. The schema-v6/schema-v7 path additionally
+requires the upper registration to prove the supplied completed primary
+matrix and its exact selected memoryless learner.
 
 The discrete development runner accepts `simple_chain`, `tmaze_10`,
 `rocksample_11_11`, `battleship_10`, and
@@ -498,11 +539,10 @@ A smoke run checks imports, shapes, reset behavior, JIT, gradients, and
 artifacts. Quick or 131,072-step runs are smoke evidence only. A pilot run may
 use shortened budgets and three to five seeds to check learnability and freeze
 choices. It is development evidence only. A development tuning run uses the
-full task budget and published tuning-seed count to choose among a frozen,
-equal-cardinality candidate matrix by learning-curve AUC. It remains
-ineligible for paper performance claims. A registered final run uses the
-selected frozen configuration, a disjoint paired seed manifest, and the full
-task budget below.
+exact registration for its evidence lineage and remains ineligible for paper
+performance claims. A registered final run uses the selected frozen
+configuration, a disjoint paired seed manifest, and its registered task
+budget.
 
 | Environment identifier | Published steps | Tuning seeds | Final seeds |
 |---|---:|---:|---:|
@@ -513,8 +553,16 @@ task budget below.
 | `HalfCheetah-V-v0` | 50,000,000 | 5 | 30 |
 | `Navix-DMLab-Maze-01-v0` | 10,000,000 | 5 | 30 |
 
-These counts reproduce the published POBAX interaction budgets and seed
-counts. ArcMind uses equal-cardinality tuning grids and paired seeds across
-policy cores. A result with 10 final seeds is preliminary. Five final seeds is
-a pilot and must not be described as paper-grade or as a reproduction of the
-published POBAX result.
+Those counts describe the published POBAX reference protocol. The ArcMind
+compute-aware study uses this separate frozen contract:
+
+| Environment identifier | Tuning steps | Tuning seeds | Final steps | Final seeds |
+|---|---:|---:|---:|---:|
+| `tmaze_10` | 1,000,000 | 3 | 1,000,000 | 10 |
+| `rocksample_11_11` | 1,000,000 | 3 | 5,000,000 | 10 |
+| `battleship_10` | not a tuning task | 0 | 10,000,000 | 10 |
+| `Navix-DMLab-Maze-01-v0` | not a tuning task | 0 | 10,000,000 | 10 |
+
+The compute-aware result may be paper evidence after all gates pass, but it
+must state that it does not match the published POBAX tuning counts, masked
+continuous-control panel, or 30-seed final protocol.

@@ -996,6 +996,60 @@ with each actual experiment.
   correction, measured timing conditions, and local resource exclusion.
 - External cost: zero dollars. All measurements used local hardware.
 
+### F-ENG-014: The compute-aware evidence chain is closed before performance runs
+
+- Class: `engineering validation`
+- Status: complete, registered performance experiments not started
+- Date: 2026-07-24
+- Question: can tuning, sparse final evaluation, task-specific ablations, and
+  privileged references share one fail-closed provenance chain without
+  weakening the legacy 30-seed schemas?
+- Implemented chain:
+  - commit `237aae2` adds schema 5 aggregation for the exact 234-cell tuning
+    panel and selects 13 family learners by mean task rank, mean
+    range-normalized regret, then learner ID;
+  - commit `d1df601` adds schema 6 execution for the exact 49-group,
+    490-cell sparse primary matrix;
+  - commit `7696910` adds schema 6 registered aggregation with taskwise,
+    paired, deterministic bootstrap statistics and no cross-task pooling of
+    raw returns;
+  - commit `e4be120` adds schema 7 and artifact schema 11 for the exact
+    four-alias, 40-cell upper-reference matrix; and
+  - commit `2b76281` adds schema 7 aggregation, the exact schema 6 and schema
+    7 link, and paired ArcMind comparisons for all 17 task-specific methods.
+- Exact study gates:
+  - schema 5 uses 13 families, three learning rates, three seeds, T-Maze and
+    RockSample at 1,000,000 steps, one evaluation episode per vector
+    environment, and GPU provenance;
+  - schema 6 uses seeds 10000 through 10009, 16 evaluation episodes per vector
+    environment, mandatory GPU provenance, exact task incidence, and seven
+    explicit learner-inheritance bindings;
+  - schema 7 uses the same final seeds and evaluation count, only the selected
+    memoryless learner, and canonical proof of the completed schema 6 primary
+    matrix; and
+  - schemas 1 through 4 retain their legacy behavior and seed requirements.
+- Statistical gate:
+  - the eight-model all-task intersection uses 10,000 deterministic bootstrap
+    draws, paired seed-index resampling within task, shared draws across
+    methods, fixed task weights of 0.25, and an exact-tie score of 0.5;
+  - FFM, SHM, LRU, S4D, Transformer-XL, and all five ArcMind ablations receive
+    task-local paired comparisons against ArcMind; and
+  - the official Memory Traces and source-compatible AGaLiTe lanes receive a
+    separately labeled supplemental paired analysis.
+- Validation:
+  - the authoritative pinned Linux run used Python 3.12.3, JAX 0.6.2, and
+    `JAX_PLATFORMS=cpu`;
+  - all 534 collected POBAX tests passed in 175.33 seconds;
+  - the only warnings were upstream TensorFlow Probability and JAXopt
+    deprecation warnings; and
+  - the previously observed Mamba sequence-parity failure did not recur in
+    three isolated CPU runs, the complete Mamba module, a clean parent
+    worktree, or this full integrated run. It is classified as transient
+    resource interference from the overlapping GPU calibration.
+- Evidence restriction: this finding validates registration, integrity,
+  analysis, and compatibility behavior only. It contains no registered
+  performance result and supports no ArcMind accuracy claim.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`

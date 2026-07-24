@@ -1,6 +1,6 @@
 # ArcMind benchmark and baseline audit
 
-Status: living primary-source audit, updated 2026-07-23.
+Status: living primary-source audit, updated 2026-07-24.
 
 This document separates like-for-like backbone controls from methods that
 change the learner, supervision, observation privileges, or task. It is not a
@@ -19,7 +19,7 @@ better-informed agents. The official source is
 [pinned to commit
 `a5e1d62d14e4efe783885b9d4f19cffa2a568eec`](https://github.com/taodav/pobax/tree/a5e1d62d14e4efe783885b9d4f19cffa2a568eec).
 
-The registered subset and published reference protocol are:
+The published reference protocol is:
 
 | Source environment identifier | Partial-observability category | Published training steps | Tuning seeds | Final seeds |
 |---|---|---:|---:|---:|
@@ -29,6 +29,20 @@ The registered subset and published reference protocol are:
 | `Walker-V-v0` | moment features | 50,000,000 | 5 | 30 |
 | `HalfCheetah-V-v0` | moment features | 50,000,000 | 5 | 30 |
 | `Navix-DMLab-Maze-01-v0` | spatial uncertainty and episode nonstationarity | 10,000,000 | 5 | 30 |
+
+The frozen first-paper study selects four discrete, low-dimensional tasks and
+uses a separate compute-aware seed contract:
+
+| Source environment identifier | Training steps | Tuning use | Final seeds |
+|---|---:|---|---:|
+| `tmaze_10` | 1,000,000 | 3 seeds, 3 learning rates | 10 |
+| `rocksample_11_11` | 5,000,000 | 3 seeds at a separate 1,000,000-step tuning budget | 10 |
+| `battleship_10` | 10,000,000 | no tuning-task role | 10 |
+| `Navix-DMLab-Maze-01-v0` | 10,000,000 | no tuning-task role | 10 |
+
+This design preserves the published final interaction budgets for the four
+selected tasks. It does not reproduce POBAX's task-specific tuning counts,
+masked continuous-control panel, or 30-seed final protocol.
 
 `HalfCheetah-P-v0` exists in the library but is not one of the masked MuJoCo
 tasks validated for the published POBAX benchmark. Battleship uses an action
@@ -97,6 +111,14 @@ observation, previous action, previous reward, and reset flag), actor-critic
 heads, collection path, PPO loss, optimizer, update schedule, environment
 seeds, and evaluation path. Width is chosen by exact scalar parameter count.
 
+The frozen all-task intersection contains memoryless MLP, frame-stack MLP,
+GRU, shared Memory Traces, S5RL, Mamba-1, shared AGaLiTe, and ArcMind. FFM,
+SHM, LRU, S4D, and Transformer-XL add T-Maze and RockSample evidence. The
+official Memory Traces and source-compatible AGaLiTe policies are supplemental
+T-Maze lanes. Five ArcMind ablations run on RockSample. Other implemented
+controls in the audit table were excluded before performance runs and cannot
+be introduced after seeing registered returns.
+
 | Family | Required control | Implementation status | Reason |
 |---|---|---|---|
 | no learned memory | MLP, positional MLP, four-frame MLP | MLP and frame stack implemented; positional MLP required | Establishes observation, timestep-aware, and short-window floors. POPGym found the positional control important enough to recommend in future memory comparisons. |
@@ -110,7 +132,7 @@ seeds, and evaluation path. Width is chosen by exact scalar parameter count.
 | RL-specific structured SSM | S5RL | implemented | S5 is a multi-input/multi-output SSM with an [official JAX implementation](https://github.com/lindermanlab/S5); [S5RL](https://proceedings.neurips.cc/paper_files/paper/2023/hash/92d3d2a9801211ca3693ccb2faa1316f-Abstract-Conference.html) specifically adapts it to reset-aware RL. Its current official repository is pinned at [`12e5d42be3a6bde81cce4234f8be4e119e4318b6`](https://github.com/luchris429/popjaxrl/tree/12e5d42be3a6bde81cce4234f8be4e119e4318b6). |
 | input-selective state-space model | Mamba1 | source-audited core implemented | [Mamba](https://openreview.net/forum?id=tEYskw1VY2) provides the modern input-selective state-space control. The implemented source contract is pinned at [`10b5d6358f27966f6a40e4bf0baa17a460688128`](https://github.com/state-spaces/mamba/tree/10b5d6358f27966f6a40e4bf0baa17a460688128). Mamba-2 and Mamba-3 remain contextual until they have matched online-PPO evidence. |
 | constant-state gated linear attention | AGaLiTe | required | [AGaLiTe](https://openreview.net/forum?id=lh6vOAHuvo) is an accepted TMLR method for partially observable online RL with PureJaxRL PPO and a constant-state approximate gated linear-attention core. Its official JAX/Flax implementation is pinned at [`101acbecc121a258ad8f7e58e2f782f546674979`](https://github.com/subho406/agalite/tree/101acbecc121a258ad8f7e58e2f782f546674979). It is a mandatory modern executable baseline. |
-| exact attention | full-window causal Transformer | implemented | Provides the high-cost exact-context reference. |
+| exact attention | full-window causal Transformer | resource reference only | The corrected 1,000-step RockSample build exceeded the declared 16 GiB device, so it is excluded from trainable registered comparisons rather than silently shortened. |
 | recurrent attention | Transformer-XL, GTrXL | implemented | Tests segment recurrence and the GRU-gated, identity-map architecture introduced by [GTrXL](https://proceedings.mlr.press/v119/parisotto20a.html). |
 | proposed hybrid | ArcMind plus five registered ablations | implemented | Isolates the fast path, exact memory, temporal ordering, fusion gate, and full hybrid. |
 
@@ -425,23 +447,26 @@ numbers in explicitly non-comparable context tables.
 
 Before registered POBAX runs:
 
-1. implement and parity-test the positional MLP, FFM, SHM, and privileged
-   observation adapters;
-2. reproduce a small author-code FFM or SHM reference cell and an S5RL or
-   memory-trace reference cell;
-3. classify every artifact as smoke, pilot, preliminary, or registered final;
-4. treat quick and 131,072-step cells as infrastructure evidence only;
-5. use the published interaction budget for every method in each registered
+1. keep every parity-tested source contract and artifact schema frozen;
+2. run only the exact schema 5 tuning grid, with equal learner trials per
+   family and no checkpoint selection;
+3. bind schema 6 learners to the canonical schema 5 winners and use the exact
+   sparse task incidence;
+4. use seeds `10000` through `10009` for every registered primary and upper
+   cell;
+5. use the published interaction budget for every method in each selected
    task cell;
-6. target 30 paired final seeds, matching the published POBAX result count,
-   and label any 10-seed table preliminary;
-7. freeze one small tuning grid with the same trial count per architecture;
-8. give memory traces a budget capable of reproducing their slow-learning
-   behavior, or label the comparison budget-limited;
-9. run fully observable or privileged references where POBAX supplies them;
-10. freeze seed manifests and raw-result schemas before evaluating final
-    seeds;
-11. retain throughput, latency, state size, and peak-memory measurements; and
-12. reserve the USD 10 cloud allowance for an independent environment or
-    author-code reproduction check, using the local RTX 4090 Laptop GPU for
-    development and registered runs.
+6. state that 10 final seeds, four discrete tasks, and three tuning seeds do
+   not reproduce the published POBAX 30-seed protocol;
+7. keep source-compatible lanes supplemental and outside the
+   parameter-matched primary table;
+8. run all five ArcMind ablations and their paired task-local analyses on
+   RockSample;
+9. bind the four schema 7 privileged references to the selected memoryless
+   learner and completed schema 6 primary evidence;
+10. freeze seed manifests and exact raw-result inventories before evaluating
+    final seeds;
+11. retain throughput, latency, state size, peak-memory, and resource-failure
+    measurements; and
+12. keep planned external compute at USD 0, with the USD 10 cap reserved for
+    an explicitly recorded emergency compatibility check.
