@@ -468,6 +468,24 @@ requires matching implementation provenance, and emits only the four frozen
 upper aliases. The schema 6 and schema 7 linker rebuilds both aggregates and
 checks the exact alias, learner, evaluation, source, and checksum contracts.
 It does not treat privileged observations as an ordinary primary method.
+The linker requires the complete schema 6 and schema 7 provenance objects to
+match, including Git provenance. The hash-bearing schema 7 registration is
+therefore generated inside the ignored results tree after schema 6 completes,
+then executed from the same clean commit and runtime as schema 6.
+
+The compute-aware artifact paths are frozen as:
+
+| Artifact | Repository-relative path |
+|---|---|
+| tuning raw matrix | `benchmark_results/pobax/compute-aware-tuning-v1` |
+| tuning aggregate | `benchmark_results/pobax/aggregates/compute-aware-tuning-v1.json` |
+| schema 6 registration | `benchmarks/pobax/manifests/compute_aware_final_v1.json` |
+| schema 6 raw matrix | `benchmark_results/pobax/compute-aware-primary-v1` |
+| schema 6 aggregate | `benchmark_results/pobax/aggregates/compute-aware-primary-v1.json` |
+| schema 7 registration | `benchmark_results/pobax/registrations/compute-aware-upper-v1.json` |
+| schema 7 raw matrix | `benchmark_results/pobax/compute-aware-upper-v1` |
+| schema 7 aggregate | `benchmark_results/pobax/aggregates/compute-aware-upper-v1.json` |
+| primary and upper link | `benchmark_results/pobax/aggregates/compute-aware-primary-upper-v1.json` |
 
 Tuning and final execution must have identical versioned
 implementation-source manifests. The manifest covers every tracked Python
@@ -477,6 +495,8 @@ SHA256 values. Tuning and final execution must also have identical dependency
 lock hashes, pinned POBAX and Navix commits, and non-device runtime contracts.
 The repository commit may differ so that the final registration can contain
 the audited tuning decision without falsely requiring the pre-decision commit.
+After schema 6 starts, the repository commit and runtime remain frozen through
+schema 7 completion and linking.
 
 Canonical cell logs identify successful executions only. Output from a
 failed child is retained under a sibling `<raw-matrix>.attempts` tree with a

@@ -430,6 +430,27 @@ Derived aggregates live outside the immutable raw-matrix directory so its
 checksum manifest continues to cover every file it was created to protect.
 The write commands reject any output path inside that directory.
 
+The compute-aware study uses these canonical repository-relative paths:
+
+```text
+benchmark_results/pobax/compute-aware-tuning-v1
+benchmark_results/pobax/aggregates/compute-aware-tuning-v1.json
+benchmarks/pobax/manifests/compute_aware_final_v1.json
+benchmark_results/pobax/compute-aware-primary-v1
+benchmark_results/pobax/aggregates/compute-aware-primary-v1.json
+benchmark_results/pobax/registrations/compute-aware-upper-v1.json
+benchmark_results/pobax/compute-aware-upper-v1
+benchmark_results/pobax/aggregates/compute-aware-upper-v1.json
+benchmark_results/pobax/aggregates/compute-aware-primary-upper-v1.json
+```
+
+The schema 6 registration is committed before primary execution. The
+hash-bearing schema 7 registration is generated under the ignored
+`benchmark_results` tree after the primary matrix completes. Schema 7 then
+runs from the same clean commit and runtime as schema 6 because the final
+linker requires their complete provenance objects, including Git provenance,
+to match.
+
 Schema v6 keeps raw returns inside task groups. Its cross-task analysis is
 limited to the ordered eight-model all-task intersection. It resamples the ten
 paired seed indices independently within each task, reuses one 10,000-draw

@@ -1127,6 +1127,57 @@ with each actual experiment.
   logs, the completion index, checksum inventory, and canonical schema 5
   aggregate validate.
 
+### F-ENG-016: Schema 6 and schema 7 must share complete Git provenance
+
+- Class: `engineering validation`
+- Status: complete before final-matrix materialization
+- Date: 2026-07-24
+- Question: can the upper-reference registration be committed after the
+  primary run without weakening or breaking the final evidence link?
+- Finding: no. The schema 6 and schema 7 linker requires equality of their
+  complete provenance objects, including Git commit and dirty-state fields.
+  A post-primary commit for the hash-bearing schema 7 registration would make
+  an otherwise valid pair unlinkable.
+- Frozen procedure:
+  - finish schema 5 and build its canonical aggregate;
+  - materialize and commit the schema 6 registration with its exact 13
+    selected learners;
+  - create one clean final worktree at that commit and copy byte-identical
+    tuning raw evidence and aggregate into their canonical ignored paths;
+  - execute and aggregate schema 6;
+  - materialize schema 7 under
+    `benchmark_results/pobax/registrations/compute-aware-upper-v1.json`
+    without changing Git state; and
+  - execute, aggregate, and link schema 7 from the same clean commit,
+    dependency environment, external pins, and runtime.
+- Frozen artifact paths:
+  - tuning:
+    `benchmark_results/pobax/compute-aware-tuning-v1` and
+    `benchmark_results/pobax/aggregates/compute-aware-tuning-v1.json`;
+  - primary:
+    `benchmarks/pobax/manifests/compute_aware_final_v1.json`,
+    `benchmark_results/pobax/compute-aware-primary-v1`, and
+    `benchmark_results/pobax/aggregates/compute-aware-primary-v1.json`;
+  - upper:
+    `benchmark_results/pobax/registrations/compute-aware-upper-v1.json`,
+    `benchmark_results/pobax/compute-aware-upper-v1`, and
+    `benchmark_results/pobax/aggregates/compute-aware-upper-v1.json`; and
+  - link:
+    `benchmark_results/pobax/aggregates/compute-aware-primary-upper-v1.json`.
+- Validation:
+  - an independent field-by-field audit found no schema 6 or schema 7
+    contract mismatch;
+  - the focused registration, execution, aggregation, and linking suite passed
+    132 tests with only two upstream deprecation warnings;
+  - an out-of-repository materializer builds hashes from source bytes, copies
+    actual winners rather than fixture learners, validates canonical bindings,
+    and refuses mismatched replacement; and
+  - synthetic complete fixtures produced exactly 490 schema 6 cells with
+    task counts 150, 180, 80, and 80, plus exactly 40 schema 7 cells with ten
+    cells per upper-reference alias.
+- Evidence restriction: this finding validates materialization and provenance
+  continuity only. It contains no return and supports no performance claim.
+
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 
 - Class: `diagnostic evidence` and `null or negative result`
