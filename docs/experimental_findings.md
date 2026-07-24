@@ -548,6 +548,10 @@ with each actual experiment.
     verified from an independent checkout;
   - an independent PyTorch fixture replay had maximum output error
     `1.19e-7` and exact final recurrent caches;
+  - the CPU-exported differential fixture is replayed on an explicit CPU JAX
+    device at the original tolerance, while separate recurrence, JIT, and
+    learner tests continue to exercise the GPU path. This prevents NVIDIA
+    TF32 matrix multiplication from weakening the source-parity oracle;
   - a 16,384-case analytic width grid stayed within the 10 percent parameter
     tolerance, with worst ratio `0.98558`;
   - the focused audit suite passed 200 of 200 tests and the complete POBAX
@@ -562,8 +566,8 @@ with each actual experiment.
 ### F-REF-004: The existing Memory Traces core is an adaptation, not an official policy
 
 - Class: `reference audit`
-- Status: primary paper and official source verified, implementation revision
-  required before registered use
+- Status: primary paper and official source verified; the required
+  implementation revision is complete in F-ENG-011
 - Date: 2026-07-23
 - Primary sources:
   - ICML 2025 proceedings:
@@ -599,6 +603,65 @@ with each actual experiment.
   POBAX decays must be frozen as tuning choices.
 - Evidence restriction: the existing core cannot be called an official
   reproduction. No performance claim is supported by this audit.
+
+### F-ENG-011: Memory Traces requires separate source and matched lanes
+
+- Class: `engineering validation`
+- Status: implementation complete, performance experiments not started
+- Date: 2026-07-23
+- Question: can Memory Traces enter the shared POBAX evaluation without
+  presenting a parameter-matched adaptation as the official policy?
+- Source contract:
+  - the official MIT repository is pinned at commit
+    `fcfdacc0b0a06dc181b49b9ef95893dbae7f2bcd`;
+  - exact SHA256 hashes bind `traces/ppo.py` and `examples/ppo_tmaze.py`;
+  - the frozen decays `[0.0, 0.985]` are identified as values from the
+    public TMaze64 example, not as author-selected POBAX settings; and
+  - an immutable differential fixture records the official trace features,
+    separate actor and critic outputs, parameters, resets, and dependency
+    versions. Its SHA256 is
+    `740d2ec4a27a9d89cf000d103320a26bac7e936ef793a094829f5d34385c61ab`.
+- Implementation:
+  - `memory_trace_official` traces observations only, resets each completed
+    worker before incorporating the current observation, flattens in
+    trace-major order, and uses separate two-layer width-64 tanh actor and
+    critic networks with the official orthogonal gains;
+  - `memory_trace_shared` applies the same fixed recurrence to the complete
+    augmented causal policy input and uses the common parameter-matched
+    shared trunk and heads;
+  - `memory_trace_mlp` remains a development-only compatibility alias and is
+    rejected for tuning and registered final evidence; and
+  - the official categorical lane is rejected on continuous-action tasks.
+- Evidence controls:
+  - the official lane uses a fixed-source parameter contract and a
+    supplemental reporting role;
+  - the shared lane uses the 0.9 to 1.1 matched-parameter contract and the
+    primary reporting role;
+  - tuning-to-final binding validates the applicable parameter contract,
+    rather than incorrectly requiring every source-compatible architecture
+    to be parameter matched;
+  - frozen configurations, raw artifacts, resume checks, and both
+    aggregators revalidate the source, policy, decay, and parameter
+    contracts; and
+  - official paired results are separated from the primary ArcMind
+    comparisons while remaining visible in grouped summaries.
+- Validation:
+  - the implementation commit is
+    `a5855d0b30f0e3f58ad29c3b49d771d36e2e1e1c`;
+  - the implementation pass completed 358 of 358 POBAX tests;
+  - source, core, launcher, development-aggregation, and
+    registered-aggregation audit slices completed 198 of 198 tests;
+  - the official CPU-device fixture replay keeps a `2e-6` tolerance while
+    independent NumPy replay matched traces and features exactly, logits
+    within `2.79e-9`, and values within `1.79e-7`; and
+  - the independent audit found no P0, P1, or P2 correctness or
+    evidence-integrity issue.
+- Interpretation: Memory Traces now has one source-compatible supplemental
+  lane and one clearly labeled matched primary adaptation. This establishes
+  implementation identity, learner integration, and result separation only.
+- Evidence restriction: no Memory Traces return, efficiency, superiority,
+  or equivalence claim is supported until registered experiments are
+  complete.
 
 ### F-REF-005: AGaLiTe is a missing matched online-PPO baseline
 
