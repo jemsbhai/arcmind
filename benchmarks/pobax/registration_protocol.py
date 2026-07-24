@@ -91,6 +91,43 @@ COMPUTE_AWARE_LEARNER_GRID = (
     ("lr_mid", 0.00025),
     ("lr_high", 0.0005),
 )
+COMPUTE_AWARE_TUNED_FAMILIES = (
+    "memoryless_mlp",
+    "frame_stack_mlp",
+    "gru",
+    "memory_trace_shared",
+    "s5rl",
+    "mamba1",
+    "agalite_shared",
+    "arcmind",
+    "ffm",
+    "shm",
+    "lru",
+    "s4d",
+    "transformer_xl",
+)
+COMPUTE_AWARE_FINAL_MODELS = (
+    *COMPUTE_AWARE_TUNED_FAMILIES,
+    "memory_trace_official",
+    "agalite_source_compat",
+    "arcmind_ssm_only",
+    "arcmind_unordered",
+    "arcmind_no_memory",
+    "arcmind_no_ssm",
+    "arcmind_no_gate",
+)
+COMPUTE_AWARE_TASK_MODEL_INCIDENCE = (
+    ("tmaze_10", COMPUTE_AWARE_FINAL_MODELS[:15]),
+    (
+        "rocksample_11_11",
+        (
+            *COMPUTE_AWARE_TUNED_FAMILIES,
+            *COMPUTE_AWARE_FINAL_MODELS[15:],
+        ),
+    ),
+    ("battleship_10", COMPUTE_AWARE_FINAL_MODELS[:8]),
+    ("Navix-DMLab-Maze-01-v0", COMPUTE_AWARE_FINAL_MODELS[:8]),
+)
 COMPUTE_AWARE_INHERITED_LEARNER_SOURCES = {
     "arcmind_ssm_only": "arcmind",
     "arcmind_unordered": "arcmind",
@@ -711,8 +748,8 @@ def normalize_candidate_families(value: object) -> tuple[dict[str, Any], ...]:
 def normalize_tuned_families(value: object) -> tuple[dict[str, str], ...]:
     """Validate schema-v5 model families for the shared tuning panel."""
 
-    if not isinstance(value, list) or not value:
-        raise ValueError("tuned_families must be a non-empty list")
+    if not isinstance(value, list) or len(value) != len(COMPUTE_AWARE_TUNED_FAMILIES):
+        raise ValueError("tuned_families must contain exactly the 13 registered families")
     families: list[dict[str, str]] = []
     family_ids: set[str] = set()
     implementation_models: set[str] = set()
@@ -753,6 +790,12 @@ def normalize_tuned_families(value: object) -> tuple[dict[str, str], ...]:
                 implementation_model,
                 environment,
                 field=f"{field}.implementation_model",
+            )
+        expected_family = COMPUTE_AWARE_TUNED_FAMILIES[index]
+        if family_id != expected_family or implementation_model != expected_family:
+            raise ValueError(
+                "tuned_families must preserve the exact registered family and "
+                "implementation order with family_id equal to implementation_model"
             )
         family_ids.add(family_id)
         implementation_models.add(implementation_model)
@@ -872,10 +915,26 @@ def validate_compute_aware_tuning_contract(
         raise ValueError("compute-aware tuning requires matrix_kind 'hyperparameter_selection'")
     if quick:
         raise ValueError("compute-aware tuning cannot use quick execution")
-    if not tuned_families:
-        raise ValueError("compute-aware tuning requires explicit tuned families")
-    if not learner_grid:
-        raise ValueError("compute-aware tuning requires an explicit shared learner grid")
+    expected_families = tuple(
+        {
+            "family_id": family,
+            "implementation_model": family,
+        }
+        for family in COMPUTE_AWARE_TUNED_FAMILIES
+    )
+    if tuned_families != expected_families:
+        raise ValueError(
+            "compute-aware tuning requires the exact ordered registered tuned families"
+        )
+    expected_learner_grid = tuple(
+        {
+            "learner_id": learner_id,
+            "learner": _compute_aware_learner(learning_rate),
+        }
+        for learner_id, learning_rate in COMPUTE_AWARE_LEARNER_GRID
+    )
+    if learner_grid != expected_learner_grid:
+        raise ValueError("compute-aware tuning requires the exact ordered registered learner grid")
     actual_panel = tuple(environments.items())
     if actual_panel != COMPUTE_AWARE_TUNING_PANEL:
         raise ValueError(
@@ -929,8 +988,12 @@ def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
             raise ValueError(f"tuning_selection.{name} must be a lowercase SHA256")
         hashes[name] = hash_value
     raw_selections = value["selections"]
-    if not isinstance(raw_selections, list) or not raw_selections:
-        raise ValueError("tuning_selection.selections must be a non-empty list")
+    if not isinstance(raw_selections, list) or len(raw_selections) != len(
+        COMPUTE_AWARE_TUNED_FAMILIES
+    ):
+        raise ValueError(
+            "tuning_selection.selections must contain exactly the 13 registered families"
+        )
     selections: list[dict[str, Any]] = []
     model_families: set[str] = set()
     implementation_models: set[str] = set()
@@ -975,6 +1038,12 @@ def normalize_panel_selection_binding(value: object) -> dict[str, Any]:
             implementation_model,
             field=f"{field}.implementation_model",
         )
+        expected_family = COMPUTE_AWARE_TUNED_FAMILIES[index]
+        if model_family != expected_family or implementation_model != expected_family:
+            raise ValueError(
+                "tuning_selection.selections must preserve the exact registered "
+                "family and implementation order"
+            )
         validate_model_evidence_tier(
             implementation_model,
             "registered_final",
@@ -1140,6 +1209,15 @@ def normalize_task_model_incidence(
         )
     if len(common_models) < 2:
         raise ValueError("task_model_incidence must retain at least two all-task common models")
+    actual_incidence = tuple((entry["environment"], entry["models"]) for entry in normalized)
+    if (
+        environment_ids != tuple(environment for environment, _ in COMPUTE_AWARE_FINAL_PANEL)
+        or model_ids != COMPUTE_AWARE_FINAL_MODELS
+        or actual_incidence != COMPUTE_AWARE_TASK_MODEL_INCIDENCE
+    ):
+        raise ValueError(
+            "task_model_incidence must equal the exact registered per-task model design"
+        )
     return tuple(normalized)
 
 
@@ -1183,14 +1261,23 @@ def validate_compute_aware_final_contract(
             f"published budgets: expected={COMPUTE_AWARE_FINAL_PANEL}, "
             f"found={actual_budgets}"
         )
+    if (
+        isinstance(models, (str, bytes))
+        or not isinstance(models, Sequence)
+        or tuple(models) != COMPUTE_AWARE_FINAL_MODELS
+    ):
+        raise ValueError(
+            "compute-aware final requires the exact ordered registered global model roster"
+        )
+    normalized_models = tuple(models)
     normalized_bindings = normalize_learner_bindings(
         learner_bindings,
-        models=models,
+        models=normalized_models,
     )
     normalized_incidence = normalize_task_model_incidence(
         task_model_incidence,
         environments=[environment for environment, _ in actual_budgets],
-        models=models,
+        models=normalized_models,
     )
     binding = normalize_panel_selection_binding(tuning_selection)
     selections_by_family = {

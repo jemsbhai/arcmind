@@ -7,10 +7,13 @@ from copy import deepcopy
 import pytest
 
 from benchmarks.pobax.registration_protocol import (
+    COMPUTE_AWARE_FINAL_MODELS,
     COMPUTE_AWARE_FINAL_PANEL,
     COMPUTE_AWARE_FINAL_SEEDS,
     COMPUTE_AWARE_INHERITED_LEARNER_SOURCES,
     COMPUTE_AWARE_LEARNER_GRID,
+    COMPUTE_AWARE_TASK_MODEL_INCIDENCE,
+    COMPUTE_AWARE_TUNED_FAMILIES,
     COMPUTE_AWARE_TUNING_PANEL,
     COMPUTE_AWARE_TUNING_SEEDS,
     LEARNER_FIELDS_V2,
@@ -47,9 +50,8 @@ def _learner(learning_rate: float = 0.00025) -> dict[str, int | float | bool]:
 
 def _families() -> list[dict[str, str]]:
     return [
-        {"family_id": "memoryless_mlp", "implementation_model": "memoryless_mlp"},
-        {"family_id": "gru", "implementation_model": "gru"},
-        {"family_id": "arcmind", "implementation_model": "arcmind"},
+        {"family_id": family, "implementation_model": family}
+        for family in COMPUTE_AWARE_TUNED_FAMILIES
     ]
 
 
@@ -87,23 +89,22 @@ def _selection_binding() -> dict[str, object]:
 
 
 def _models() -> list[str]:
-    return ["memoryless_mlp", "gru", "arcmind", "arcmind_no_memory"]
+    return list(COMPUTE_AWARE_FINAL_MODELS)
 
 
 def _learner_bindings() -> list[dict[str, str]]:
     return [
         {
-            "model": "memoryless_mlp",
-            "mode": "selected",
-            "source_model_family": "memoryless_mlp",
-        },
-        {"model": "gru", "mode": "selected", "source_model_family": "gru"},
-        {"model": "arcmind", "mode": "selected", "source_model_family": "arcmind"},
-        {
-            "model": "arcmind_no_memory",
-            "mode": "inherited",
-            "source_model_family": "arcmind",
-        },
+            "model": model,
+            "mode": (
+                "inherited" if model in COMPUTE_AWARE_INHERITED_LEARNER_SOURCES else "selected"
+            ),
+            "source_model_family": COMPUTE_AWARE_INHERITED_LEARNER_SOURCES.get(
+                model,
+                model,
+            ),
+        }
+        for model in COMPUTE_AWARE_FINAL_MODELS
     ]
 
 
@@ -117,15 +118,12 @@ def _final_environments() -> dict[str, int]:
 
 
 def _incidence() -> list[dict[str, object]]:
-    common = ["memoryless_mlp", "gru", "arcmind"]
     return [
-        {"environment": "tmaze_10", "models": common},
         {
-            "environment": "rocksample_11_11",
-            "models": [*common, "arcmind_no_memory"],
-        },
-        {"environment": "battleship_10", "models": common},
-        {"environment": "Navix-DMLab-Maze-01-v0", "models": common},
+            "environment": environment,
+            "models": list(models),
+        }
+        for environment, models in COMPUTE_AWARE_TASK_MODEL_INCIDENCE
     ]
 
 
@@ -207,8 +205,18 @@ def test_valid_compute_aware_tuning_contract_normalizes_exact_design() -> None:
 
     assert [item["family_id"] for item in families] == [
         "memoryless_mlp",
+        "frame_stack_mlp",
         "gru",
+        "memory_trace_shared",
+        "s5rl",
+        "mamba1",
+        "agalite_shared",
         "arcmind",
+        "ffm",
+        "shm",
+        "lru",
+        "s4d",
+        "transformer_xl",
     ]
     assert [item["learner_id"] for item in grid] == [
         "lr_low",
@@ -230,6 +238,43 @@ def test_compute_aware_grid_and_final_panel_are_exactly_frozen() -> None:
         ("battleship_10", 10_000_000),
         ("Navix-DMLab-Maze-01-v0", 10_000_000),
     )
+    assert COMPUTE_AWARE_TUNED_FAMILIES == (
+        "memoryless_mlp",
+        "frame_stack_mlp",
+        "gru",
+        "memory_trace_shared",
+        "s5rl",
+        "mamba1",
+        "agalite_shared",
+        "arcmind",
+        "ffm",
+        "shm",
+        "lru",
+        "s4d",
+        "transformer_xl",
+    )
+    assert COMPUTE_AWARE_FINAL_MODELS == (
+        *COMPUTE_AWARE_TUNED_FAMILIES,
+        "memory_trace_official",
+        "agalite_source_compat",
+        "arcmind_ssm_only",
+        "arcmind_unordered",
+        "arcmind_no_memory",
+        "arcmind_no_ssm",
+        "arcmind_no_gate",
+    )
+    assert COMPUTE_AWARE_TASK_MODEL_INCIDENCE == (
+        ("tmaze_10", COMPUTE_AWARE_FINAL_MODELS[:15]),
+        (
+            "rocksample_11_11",
+            (
+                *COMPUTE_AWARE_TUNED_FAMILIES,
+                *COMPUTE_AWARE_FINAL_MODELS[15:],
+            ),
+        ),
+        ("battleship_10", COMPUTE_AWARE_FINAL_MODELS[:8]),
+        ("Navix-DMLab-Maze-01-v0", COMPUTE_AWARE_FINAL_MODELS[:8]),
+    )
 
 
 @pytest.mark.parametrize(
@@ -237,7 +282,7 @@ def test_compute_aware_grid_and_final_panel_are_exactly_frozen() -> None:
     [
         (
             lambda value: value.append(deepcopy(value[0])),
-            "unique portable identifier",
+            "exactly the 13 registered families",
         ),
         (
             lambda value: value[1].update(implementation_model="memoryless_mlp"),
@@ -250,6 +295,14 @@ def test_compute_aware_grid_and_final_panel_are_exactly_frozen() -> None:
         (
             lambda value: value[0].update(implementation_model="not_registered"),
             "registered policy implementations",
+        ),
+        (
+            lambda value: value.reverse(),
+            "exact registered family",
+        ),
+        (
+            lambda value: value[0].update(family_id="frame_stack_mlp"),
+            "exact registered family",
         ),
     ],
 )
@@ -347,9 +400,7 @@ def test_panel_selection_binding_normalizes_winners_and_paths() -> None:
 
     assert binding["raw_matrix_path"] == ("benchmark_results/pobax/tuning-panel-v1")
     assert [item["candidate_id"] for item in binding["selections"]] == [
-        "memoryless_mlp.lr_mid",
-        "gru.lr_mid",
-        "arcmind.lr_mid",
+        f"{family}.lr_mid" for family in COMPUTE_AWARE_TUNED_FAMILIES
     ]
 
 
@@ -394,6 +445,10 @@ def _duplicate_selection_family(binding: dict[str, object]) -> None:
             lambda value: value["selections"][0]["learner"].update(gae_lambda=0.5),
             "registered learner configuration",
         ),
+        (
+            lambda value: value["selections"].reverse(),
+            "exact registered family",
+        ),
     ],
 )
 def test_panel_selection_binding_fails_closed(mutation, message: str) -> None:
@@ -413,12 +468,12 @@ def test_valid_learner_bindings_and_sparse_incidence_normalize() -> None:
     )
 
     assert bindings[-1] == {
-        "model": "arcmind_no_memory",
+        "model": "arcmind_no_gate",
         "mode": "inherited",
         "source_model_family": "arcmind",
     }
-    assert incidence[0]["models"] == ("memoryless_mlp", "gru", "arcmind")
-    assert incidence[1]["models"][-1] == "arcmind_no_memory"
+    assert incidence[0]["models"] == COMPUTE_AWARE_FINAL_MODELS[:15]
+    assert incidence[1]["models"][-1] == "arcmind_no_gate"
 
 
 @pytest.mark.parametrize(
@@ -451,12 +506,24 @@ def test_learner_bindings_fail_closed(mutation, message: str) -> None:
 
 
 def _remove_arcmind_from_one_task(incidence: list[dict[str, object]]) -> None:
-    incidence[0]["models"] = ["memoryless_mlp", "gru"]
+    incidence[0]["models"] = list(COMPUTE_AWARE_FINAL_MODELS[:7])
 
 
 def _leave_only_arcmind_common(incidence: list[dict[str, object]]) -> None:
-    incidence[0]["models"] = ["memoryless_mlp", "arcmind"]
-    incidence[2]["models"] = ["gru", "arcmind"]
+    incidence[0]["models"] = [
+        "arcmind",
+        "memory_trace_official",
+        "agalite_source_compat",
+    ]
+    incidence[2]["models"] = ["memoryless_mlp", "arcmind"]
+    incidence[3]["models"] = ["gru", "arcmind"]
+
+
+def _move_official_memory_trace_to_rocksample(
+    incidence: list[dict[str, object]],
+) -> None:
+    incidence[0]["models"].remove("memory_trace_official")
+    incidence[1]["models"].insert(13, "memory_trace_official")
 
 
 @pytest.mark.parametrize(
@@ -483,6 +550,10 @@ def _leave_only_arcmind_common(incidence: list[dict[str, object]]) -> None:
             "every global model",
         ),
         (_leave_only_arcmind_common, "at least two all-task common models"),
+        (
+            _move_official_memory_trace_to_rocksample,
+            "exact registered per-task model design",
+        ),
     ],
 )
 def test_task_model_incidence_fails_closed(mutation, message: str) -> None:
@@ -569,6 +640,14 @@ def _ordinary_model_inherits_arcmind(bindings: list[dict[str, str]]) -> None:
             "exact ordered seed manifest",
         ),
         (
+            {"models": lambda value: value.reverse()},
+            "exact ordered registered global model roster",
+        ),
+        (
+            {"incidence": _move_official_memory_trace_to_rocksample},
+            "exact registered per-task model design",
+        ),
+        (
             {"learner_bindings": _unknown_binding_source},
             "must inherit from 'arcmind'",
         ),
@@ -618,6 +697,16 @@ def test_compute_aware_final_contract_fails_closed(
         selection = _selection_binding()
         selection_mutation(selection)
         kwargs["tuning_selection"] = selection
+    model_mutation = kwargs.pop("models", None)
+    if callable(model_mutation):
+        models = _models()
+        model_mutation(models)
+        kwargs["models"] = models
+    incidence_mutation = kwargs.pop("incidence", None)
+    if callable(incidence_mutation):
+        incidence = _incidence()
+        incidence_mutation(incidence)
+        kwargs["incidence"] = incidence
 
     with pytest.raises(ValueError, match=message):
         _validate_final(**kwargs)
