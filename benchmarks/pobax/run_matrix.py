@@ -32,6 +32,8 @@ from benchmarks.pobax.registered_artifacts import (
     atomic_write_json,
     canonical_json_bytes,
     canonical_json_sha256,
+    exclusive_process_lock,
+    matrix_process_lock_path,
     registered_cell_id,
     registered_cell_path,
     sha256_file,
@@ -81,6 +83,7 @@ _MATRIX_KINDS = {
     "upper_reference",
     "hyperparameter_selection",
 }
+_SHARD_PARTITION_ALGORITHM = "manifest-order-modulo-v1"
 _SCHEMA_V7_PRIMARY_HASH_FIELDS = (
     "primary_aggregate_file_sha256",
     "primary_registration_file_sha256",
@@ -1160,10 +1163,10 @@ def _preserve_orphaned_file(
     return destination
 
 
-def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]:
-    """Describe, freeze, execute, and index one complete registered matrix."""
+def _describe_matrix(registration_path: Path) -> dict[str, Any]:
+    """Describe one complete matrix without creating or executing artifacts."""
+
     registration = _load_registration(registration_path.resolve())
-    output_root = output_root.resolve()
     cells: list[dict[str, Any]] = []
     provenance: dict[str, Any] | None = None
     candidate_families = (
@@ -1380,20 +1383,234 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
         **manifest_without_hash,
         "manifest_sha256": manifest_sha256,
     }
-    output_root.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(output_root / "registration.json", registration)
-    atomic_write_json(output_root / "frozen_manifest.json", manifest)
 
-    expected_status = EVIDENCE_STATUS[registration["evidence_tier"]]
+    return {
+        "registration": registration,
+        "matrix_inventory": matrix_inventory,
+        "cells": cells,
+        "provenance": provenance,
+        "manifest": manifest,
+        "manifest_sha256": manifest_sha256,
+        "expected_status": EVIDENCE_STATUS[registration["evidence_tier"]],
+    }
+
+
+def _validate_shard_selection(*, shard_count: int, shard_index: int) -> None:
+    if isinstance(shard_count, bool) or not isinstance(shard_count, int) or shard_count <= 0:
+        raise ValueError("shard_count must be a positive integer")
+    if (
+        isinstance(shard_index, bool)
+        or not isinstance(shard_index, int)
+        or shard_index < 0
+        or shard_index >= shard_count
+    ):
+        raise ValueError("shard_index must be an integer in [0, shard_count)")
+
+
+def _shard_cells(
+    cells: list[dict[str, Any]],
+    *,
+    shard_count: int,
+    shard_index: int,
+) -> tuple[dict[str, Any], ...]:
+    """Select one stable, disjoint index-modulo shard from the frozen cell order."""
+
+    _validate_shard_selection(shard_count=shard_count, shard_index=shard_index)
+    return tuple(cell for index, cell in enumerate(cells) if index % shard_count == shard_index)
+
+
+def _validate_sharded_runtime(description: dict[str, Any], *, shard_count: int) -> None:
+    if shard_count == 1 or not description["registration"]["require_gpu"]:
+        return
+    runtime = description["provenance"].get("runtime_contract")
+    if not isinstance(runtime, dict):
+        raise RuntimeError("sharded GPU execution requires a structured runtime contract")
+    devices = runtime.get("devices")
+    if (
+        runtime.get("jax_backend") != "gpu"
+        or not isinstance(devices, list)
+        or len(devices) != 1
+        or not isinstance(devices[0], dict)
+        or devices[0].get("platform") != "gpu"
+    ):
+        raise RuntimeError("sharded GPU execution requires exactly one visible JAX GPU per process")
+
+
+def _validate_matrix_root_inventory(
+    output_root: Path,
+    cells: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    *,
+    require_all_cells: bool,
+    allow_final_files: bool,
+    allow_shard_files: bool = False,
+    require_role_files: bool = False,
+) -> None:
+    """Reject files outside the exact raw-root role for this execution."""
+
+    if allow_final_files and allow_shard_files:
+        raise ValueError("a matrix root cannot have canonical and shard finalization files")
+
+    allowed = {"registration.json", "frozen_manifest.json"}
+    for cell in cells:
+        artifact = Path(cell["artifact_path"])
+        allowed.add(artifact.as_posix())
+        allowed.add(artifact.with_suffix(".log").as_posix())
+    if allow_final_files:
+        allowed.update({"completion_index.json", "checksums.sha256"})
+    if allow_shard_files:
+        allowed.update({"shard_completion.json", "shard_checksums.sha256"})
+
+    actual = set()
+    for path in output_root.rglob("*"):
+        if path.is_symlink():
+            raise RuntimeError(f"matrix roots must not contain symbolic links: {path}")
+        if path.is_file():
+            actual.add(path.relative_to(output_root).as_posix())
+    unexpected = sorted(actual - allowed)
+    if unexpected:
+        raise RuntimeError(f"matrix root contains files outside its frozen role: {unexpected}")
+    if require_all_cells:
+        missing = sorted(allowed - actual)
+        if not require_role_files:
+            missing = [
+                path
+                for path in missing
+                if path
+                not in {
+                    "completion_index.json",
+                    "checksums.sha256",
+                    "shard_completion.json",
+                    "shard_checksums.sha256",
+                }
+            ]
+        if missing:
+            raise RuntimeError(f"matrix root is missing required frozen files: {missing}")
+
+
+def _cell_lookup(description: dict[str, Any]) -> dict[tuple[str, str, int], dict[str, Any]]:
+    return {
+        (cell["environment"], cell["model"], cell["seed"]): cell for cell in description["cells"]
+    }
+
+
+def _validate_completed_cell(
+    *,
+    cell: dict[str, Any],
+    artifact_path: Path,
+    log_path: Path,
+    output_root: Path,
+    description: dict[str, Any],
+) -> dict[str, Any]:
+    artifact = _load_matching_artifact(
+        artifact_path,
+        expected_status=description["expected_status"],
+        environment=cell["environment"],
+        model=cell["model"],
+        seed=cell["seed"],
+        configuration_sha256=cell["configuration_sha256"],
+        manifest_sha256=description["manifest_sha256"],
+        cell_id=cell["cell_id"],
+        provenance=description["provenance"],
+        registration_schema_version=description["registration"]["schema_version"],
+    )
+    if artifact is None:
+        raise RuntimeError(f"completed cell artifact is missing: {artifact_path}")
+    if not log_path.is_file():
+        raise RuntimeError(f"completed cell is missing its immutable log: {log_path}")
+    return {
+        **cell,
+        "artifact_sha256": sha256_file(artifact_path),
+        "log_path": log_path.relative_to(output_root).as_posix(),
+        "log_sha256": sha256_file(log_path),
+    }
+
+
+def _finalize_complete_matrix(
+    description: dict[str, Any],
+    output_root: Path,
+) -> dict[str, Any]:
+    """Validate every frozen cell before creating the immutable final indexes."""
+
+    _validate_matrix_root_inventory(
+        output_root,
+        description["cells"],
+        require_all_cells=True,
+        allow_final_files=True,
+    )
+    completion_path = output_root / "completion_index.json"
+    checksum_path = output_root / "checksums.sha256"
+    if checksum_path.exists() and not completion_path.is_file():
+        raise RuntimeError("canonical checksum exists without its completion index")
+
     completed_cells: list[dict[str, Any]] = []
-    for environment, model, seed in matrix_inventory:
-        cell = next(
-            candidate
-            for candidate in cells
-            if candidate["environment"] == environment["id"]
-            and candidate["model"] == model
-            and candidate["seed"] == seed
+    for cell in description["cells"]:
+        artifact_path = output_root / cell["artifact_path"]
+        log_path = artifact_path.with_suffix(".log")
+        completed = _validate_completed_cell(
+            cell=cell,
+            artifact_path=artifact_path,
+            log_path=log_path,
+            output_root=output_root,
+            description=description,
         )
+        completed_cells.append(completed)
+
+    completion_index = {
+        "schema_version": 1,
+        "status": "complete",
+        "manifest_sha256": description["manifest_sha256"],
+        "planned_cells": len(description["cells"]),
+        "completed_cells": len(completed_cells),
+        "cells": completed_cells,
+    }
+    atomic_write_json(completion_path, completion_index)
+    write_checksum_manifest(output_root)
+    _validate_matrix_root_inventory(
+        output_root,
+        description["cells"],
+        require_all_cells=True,
+        allow_final_files=True,
+        require_role_files=True,
+    )
+    return completion_index
+
+
+def _execute_matrix_locked(
+    registration_path: Path,
+    output_root: Path,
+    *,
+    shard_count: int = 1,
+    shard_index: int = 0,
+) -> dict[str, Any]:
+    """Describe, freeze, and execute a complete matrix or one isolated shard."""
+
+    description = _describe_matrix(registration_path)
+    _validate_sharded_runtime(description, shard_count=shard_count)
+    registration = description["registration"]
+    output_root = output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    assigned_cells = _shard_cells(
+        description["cells"],
+        shard_count=shard_count,
+        shard_index=shard_index,
+    )
+    _validate_matrix_root_inventory(
+        output_root,
+        assigned_cells,
+        require_all_cells=False,
+        allow_final_files=shard_count == 1,
+        allow_shard_files=shard_count > 1,
+    )
+    atomic_write_json(output_root / "registration.json", registration)
+    atomic_write_json(output_root / "frozen_manifest.json", description["manifest"])
+
+    cell_lookup = _cell_lookup(description)
+    completed_cells: list[dict[str, Any]] = []
+    assigned_ids = {cell["cell_id"] for cell in assigned_cells}
+    for environment, model, seed in description["matrix_inventory"]:
+        cell = cell_lookup[(environment["id"], model, seed)]
+        if cell["cell_id"] not in assigned_ids:
+            continue
         artifact_path = output_root / cell["artifact_path"]
         log_path = artifact_path.with_suffix(".log")
         if artifact_path.exists() and not log_path.exists():
@@ -1410,14 +1627,14 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
             )
         artifact = _load_matching_artifact(
             artifact_path,
-            expected_status=expected_status,
+            expected_status=description["expected_status"],
             environment=environment["id"],
             model=model,
             seed=seed,
             configuration_sha256=cell["configuration_sha256"],
-            manifest_sha256=manifest_sha256,
+            manifest_sha256=description["manifest_sha256"],
             cell_id=cell["cell_id"],
-            provenance=provenance,
+            provenance=description["provenance"],
             registration_schema_version=registration["schema_version"],
         )
         if artifact is None:
@@ -1427,7 +1644,7 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
                 model=model,
                 seed=seed,
                 output=artifact_path,
-                manifest_sha256=manifest_sha256,
+                manifest_sha256=description["manifest_sha256"],
                 cell_id=cell["cell_id"],
                 describe_only=False,
             )
@@ -1451,14 +1668,14 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
             try:
                 artifact = _load_matching_artifact(
                     artifact_path,
-                    expected_status=expected_status,
+                    expected_status=description["expected_status"],
                     environment=environment["id"],
                     model=model,
                     seed=seed,
                     configuration_sha256=cell["configuration_sha256"],
-                    manifest_sha256=manifest_sha256,
+                    manifest_sha256=description["manifest_sha256"],
                     cell_id=cell["cell_id"],
-                    provenance=provenance,
+                    provenance=description["provenance"],
                     registration_schema_version=registration["schema_version"],
                 )
             except (
@@ -1491,36 +1708,96 @@ def execute_matrix(registration_path: Path, output_root: Path) -> dict[str, Any]
             atomic_write_bytes(log_path, process.stdout)
         if not log_path.is_file():
             raise RuntimeError(f"completed cell is missing its immutable log: {log_path}")
-        completed_cells.append(
-            {
-                **cell,
-                "artifact_sha256": sha256_file(artifact_path),
-                "log_path": log_path.relative_to(output_root).as_posix(),
-                "log_sha256": sha256_file(log_path),
-            }
+        completed = _validate_completed_cell(
+            cell=cell,
+            artifact_path=artifact_path,
+            log_path=log_path,
+            output_root=output_root,
+            description=description,
         )
+        completed_cells.append(completed)
 
-    completion_index = {
-        "schema_version": 1,
-        "status": "complete",
-        "manifest_sha256": manifest_sha256,
-        "planned_cells": len(cells),
-        "completed_cells": len(completed_cells),
-        "cells": completed_cells,
-    }
-    atomic_write_json(output_root / "completion_index.json", completion_index)
-    write_checksum_manifest(output_root)
-    return completion_index
+    if shard_count > 1:
+        _validate_matrix_root_inventory(
+            output_root,
+            assigned_cells,
+            require_all_cells=True,
+            allow_final_files=False,
+            allow_shard_files=True,
+        )
+        completion_path = output_root / "shard_completion.json"
+        checksum_path = output_root / "shard_checksums.sha256"
+        if checksum_path.exists() and not completion_path.is_file():
+            raise RuntimeError("shard checksum exists without its completion index")
+        shard_completion = {
+            "schema_version": 1,
+            "status": "shard_complete",
+            "partition_algorithm": _SHARD_PARTITION_ALGORITHM,
+            "registration_file_sha256": sha256_file(output_root / "registration.json"),
+            "manifest_file_sha256": sha256_file(output_root / "frozen_manifest.json"),
+            "manifest_sha256": description["manifest_sha256"],
+            "shard_count": shard_count,
+            "shard_index": shard_index,
+            "planned_cells": len(description["cells"]),
+            "assigned_cells": len(assigned_cells),
+            "completed_cells": len(completed_cells),
+            "cells": completed_cells,
+        }
+        atomic_write_json(completion_path, shard_completion)
+        write_checksum_manifest(output_root, filename="shard_checksums.sha256")
+        _validate_matrix_root_inventory(
+            output_root,
+            assigned_cells,
+            require_all_cells=True,
+            allow_final_files=False,
+            allow_shard_files=True,
+            require_role_files=True,
+        )
+        return shard_completion
+
+    return _finalize_complete_matrix(description, output_root)
+
+
+def execute_matrix(
+    registration_path: Path,
+    output_root: Path,
+    *,
+    shard_count: int = 1,
+    shard_index: int = 0,
+) -> dict[str, Any]:
+    """Execute one matrix role while excluding duplicate writers to that root."""
+
+    _validate_shard_selection(shard_count=shard_count, shard_index=shard_index)
+    resolved_output = output_root.resolve()
+    lock_path = matrix_process_lock_path(resolved_output)
+    with exclusive_process_lock(lock_path):
+        return _execute_matrix_locked(
+            registration_path,
+            resolved_output,
+            shard_count=shard_count,
+            shard_index=shard_index,
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registration", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--shard-count", type=int)
+    parser.add_argument("--shard-index", type=int)
     args = parser.parse_args()
+    if (args.shard_count is None) != (args.shard_index is None):
+        parser.error("--shard-count and --shard-index must be supplied together")
+    shard_count = 1 if args.shard_count is None else args.shard_count
+    shard_index = 0 if args.shard_index is None else args.shard_index
     print(
         json.dumps(
-            execute_matrix(args.registration, args.output_root),
+            execute_matrix(
+                args.registration,
+                args.output_root,
+                shard_count=shard_count,
+                shard_index=shard_index,
+            ),
             indent=2,
             allow_nan=False,
         )

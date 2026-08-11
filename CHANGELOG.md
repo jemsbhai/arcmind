@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added deterministic isolated matrix shards, source-side shard checksums, and
+  fail-closed canonical merging for multi-GPU registered execution
+- Added a four-A100 Slurm handoff with runtime preflight, resumable workers,
+  validated finalization, aggregation, and checksummed stage packaging
+
+### Changed
+- Recorded the outcome-independent A100 execution and compute-budget amendment
+  while preserving the incomplete laptop tuning attempt as excluded evidence
+
 ## [0.2.0] - 2026-07-23
 
 ### Fixed

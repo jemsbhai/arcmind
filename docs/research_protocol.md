@@ -1,8 +1,10 @@
 # ArcMind Research Protocol
 
-Status: pre-registration draft for the core architecture, dated 2026-07-23.
+Status: frozen first-paper protocol, originally dated 2026-07-23, with an
+outcome-independent execution amendment dated 2026-08-11.
 The intended venue is ICLR. The schedule is deadline-agnostic; external compute
-is capped at USD 10, while feasible local compute is the primary resource.
+is capped at USD 10, while local and in-kind collaborator compute are the
+primary resources.
 
 This document is the research contract for ArcMind. It defines the falsifiable
 claim, architecture revision, benchmark families, baselines, statistical
@@ -81,6 +83,39 @@ The study therefore uses 10 final seeds rather than the 30 final seeds in the
 published POBAX protocol. It preserves the published interaction budgets for
 the four selected tasks but must not be described as a complete POBAX
 reproduction or as evidence about masked continuous-control tasks.
+
+### 2026-08-11 A100 execution amendment
+
+The scientific design, schema versions, and tracked schema 5 registration
+remain unchanged. Schema 6 and schema 7 will be freshly materialized from
+their completed A100 predecessors. Before any completed-cell return or
+candidate ranking was inspected, the local schema 5 run was paused because
+its projected duration
+was impractical on the laptop. Its 55 completed RTX 4090 Laptop cells and
+paired logs remain a separately preserved, incomplete lineage and are
+ineligible for reuse in the A100 lineage.
+
+The replacement execution restarts all 234 schema 5 cells on four homogeneous
+40 GB A100 workers. Each process sees exactly one JAX GPU and writes one
+isolated, deterministic manifest-order-modulo shard. Every shard carries the
+same complete `registration.json` and new A100 `frozen_manifest.json` plus its
+own `shard_completion.json` and `shard_checksums.sha256`. A separate one-A100
+finalizer first validates disjoint and complete shard coverage, exact
+control-file identity,
+cell provenance, artifacts, logs, and source checksums; only then may it build
+the canonical raw matrix and its existing full completion and checksum files.
+Shard count and shard index are execution logistics and do not enter the
+scientific registration, frozen manifest, configuration hashes, cell IDs, or
+artifact paths. All 234 artifacts and logs are regenerated in empty A100 shard
+roots; no RTX manifest, artifact, log, completion record, or checksum is
+copied, skipped, merged, or resumed.
+
+Schema 5, schema 6, and schema 7 must use one unchanged installed runtime
+contract, including the GPU backend and the ordered one-element A100 device
+list. The schema 5 and schema 6 Git commits may differ only as already allowed
+for materializing the audited tuning decision; their implementation-source
+manifests and complete runtime contracts must remain identical. Schema 6 and
+schema 7 must also retain identical complete Git provenance.
 
 ## 2. Accuracy revision
 
@@ -492,7 +527,8 @@ implementation-source manifests. The manifest covers every tracked Python
 file under `arcmind/` and every tracked non-test Python file under
 `benchmarks/pobax/`, with canonical repository-relative paths and per-file
 SHA256 values. Tuning and final execution must also have identical dependency
-lock hashes, pinned POBAX and Navix commits, and non-device runtime contracts.
+lock hashes, pinned POBAX and Navix commits, and complete runtime contracts,
+including the backend and ordered device list.
 The repository commit may differ so that the final registration can contain
 the audited tuning decision without falsely requiring the pre-decision commit.
 After schema 6 starts, the repository commit and runtime remain frozen through

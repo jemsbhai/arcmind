@@ -16,6 +16,7 @@ from benchmarks.pobax.registered_artifacts import (
     canonical_json_bytes,
     canonical_json_sha256,
     dependency_lock_sha256,
+    exclusive_process_lock,
     gather_git_provenance,
     registered_cell_id,
     registered_cell_path,
@@ -110,6 +111,18 @@ def test_atomic_byte_write_is_immutable(tmp_path: Path) -> None:
     assert atomic_write_bytes(target, b"training log\n").written is False
     with pytest.raises(ExistingArtifactMismatchError, match="refusing to replace"):
         atomic_write_bytes(target, b"different\n")
+
+
+def test_process_lock_rejects_a_duplicate_writer_and_releases(tmp_path: Path) -> None:
+    lock_path = tmp_path / "matrix.execution.lock"
+
+    with exclusive_process_lock(lock_path):
+        with pytest.raises(RegisteredArtifactError, match="another process"):
+            with exclusive_process_lock(lock_path):
+                raise AssertionError("duplicate writer acquired the lock")
+
+    with exclusive_process_lock(lock_path):
+        assert lock_path.is_file()
 
 
 def test_dependency_and_artifact_checksums(tmp_path: Path) -> None:
