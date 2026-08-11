@@ -13,7 +13,9 @@ from benchmarks.pobax.registration_protocol import (
 from benchmarks.pobax.run_matrix import (
     _cell_namespace,
     _load_registration,
+    _matrix_cell_identities,
     _schema_v5_candidates,
+    _shard_cells,
 )
 from benchmarks.pobax.run_pilot import ARTIFACT_SCHEMA_BY_REGISTRATION
 
@@ -122,3 +124,17 @@ def test_run_pilot_reserves_artifact_schema_9_for_registration_schema_5() -> Non
         8,
         9,
     ]
+
+
+def test_repository_schema_v5_has_the_exact_four_way_cluster_partition() -> None:
+    registration_path = (
+        Path(__file__).resolve().parents[1] / "manifests" / "compute_aware_tuning_v1.json"
+    )
+    registration = _load_registration(registration_path)
+    inventory = _matrix_cell_identities(registration)
+    cells = [{"cell_id": str(index)} for index, _ in enumerate(inventory)]
+
+    assert len(inventory) == 234
+    assert [
+        len(_shard_cells(cells, shard_count=4, shard_index=shard_index)) for shard_index in range(4)
+    ] == [59, 59, 58, 58]

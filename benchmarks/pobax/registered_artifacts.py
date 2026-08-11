@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
@@ -40,6 +41,55 @@ class ArtifactWriteResult:
     path: Path
     sha256: str
     written: bool
+
+
+def matrix_process_lock_path(root: str | os.PathLike[str]) -> Path:
+    """Return the sibling lock path shared by every matrix-root writer."""
+
+    resolved = Path(root).resolve()
+    return resolved.with_name(f"{resolved.name}.matrix.lock")
+
+
+@contextmanager
+def exclusive_process_lock(path: str | os.PathLike[str]):
+    """Hold a process-scoped, crash-releasing lock outside an artifact root."""
+
+    lock_path = Path(path).resolve()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    stream = lock_path.open("a+b")
+    try:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise RegisteredArtifactError(
+                f"another process holds the artifact lock: {lock_path}"
+            ) from error
+        try:
+            yield lock_path
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        stream.close()
 
 
 def _validate_json_tree(value: Any, *, location: str = "$") -> None:
@@ -482,7 +532,9 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_json_sha256",
     "dependency_lock_sha256",
+    "exclusive_process_lock",
     "gather_git_provenance",
+    "matrix_process_lock_path",
     "registered_cell_id",
     "registered_cell_path",
     "sha256_file",

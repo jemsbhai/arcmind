@@ -1,6 +1,7 @@
 # ArcMind Compute Budget
 
-Status: frozen pre-performance planning estimate, dated 2026-07-24.
+Status: frozen pre-performance planning estimate, dated 2026-07-24, with an
+outcome-independent A100 execution amendment dated 2026-08-11.
 
 This document converts the completed local timing gates into the planned
 compute for the exact compute-aware study. It is a resource plan, not
@@ -106,13 +107,38 @@ experimental cells.
 
 ## 4. Dollar budget
 
-Planned external compute spend is USD 0. The USD 10 cap remains unspent and
-reserved for a small emergency compatibility check only. All registered
-training is planned for local hardware, whose feasible compute was explicitly
-left uncapped. Electricity, machine depreciation, and researcher time are not
-converted to a cloud-equivalent dollar figure.
+Planned external compute spend remains USD 0 because the collaborator's A100
+allocation is in-kind. The USD 10 cap remains unspent and reserved for a small
+emergency compatibility check only. Electricity, machine depreciation,
+researcher time, and in-kind cluster value are not converted to a
+cloud-equivalent dollar figure.
 
 Any paid run must be recorded here before launch with provider, instance,
 region, duration, purpose, and exact cost. Paid performance expansion beyond
 the frozen matrices requires a new pre-performance registration and cannot be
 silently merged into the primary evidence.
+
+## 5. 2026-08-11 A100 execution amendment
+
+The local timing measurements and device-hour totals above remain the frozen
+planning basis; they are RTX 4090 Laptop measurements, not claims about A100
+speed. Before any tuning return or ranking was inspected, the laptop run was
+paused at 55 of 234 cells for capacity reasons. The A100 lineage excludes
+those cells and restarts the complete 234-cell tuning matrix.
+
+Execution is reassigned to four homogeneous 40 GB A100s, one JAX-visible GPU
+per worker. Dividing the original single-device estimate equally across four
+workers gives an idealized wall-time range of 317.817 to 413.332 hours, or
+13.24 to 17.22 uninterrupted days. Applying the existing 20 percent reserve
+gives 381.380 to 495.998 hours, or 15.89 to 20.67 days. This is a scheduling
+bound derived from laptop rates, not an A100 runtime forecast. The
+compatibility preflight is not a timing calibration. A cluster-specific
+replacement may be recorded only from a fixed, return-blinded timing procedure
+declared before reading its elapsed times; it cannot use returns, rankings, or
+selective stopping. Queue delay, preemption, uneven per-cell costs,
+aggregation, and transfer time remain additional operational factors.
+
+The collaborator must record the cluster/site, allocation or project ID,
+Slurm job IDs, A100 device identity, calibration timing, elapsed stage times,
+and whether the allocation remained in-kind. Any monetary charge must be
+entered under the dollar budget before launch.

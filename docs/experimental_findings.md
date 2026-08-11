@@ -450,8 +450,9 @@ with each actual experiment.
     tracked Python file under `arcmind/` and every tracked non-test Python file
     under `benchmarks/pobax/`, recording each path and file SHA256;
   - require tuning and final execution to have the exact same implementation
-    manifest, dependency-lock hash, POBAX commit, Navix commit, and non-device
-    runtime contract, while allowing the repository commit to differ;
+    manifest, dependency-lock hash, POBAX commit, Navix commit, and complete
+    runtime contract, including backend and ordered device list, while
+    allowing the repository commit to differ;
   - bind the tuning completion-index, checksum-inventory, and
     implementation-source hashes in the schema-v4 registration, final
     manifest, every selected family, and every final cell;
@@ -1131,6 +1132,8 @@ with each actual experiment.
   - GPU memory and utilization returned to zero; and
   - resuming the identical registered command will validate and skip the 55
     complete cells before restarting the first incomplete cell.
+- Supersession: F-ENG-017 preserves this checkpoint as excluded historical
+  evidence and replaces, rather than resumes, it on the A100 cluster.
 - External cost: zero dollars. The run uses local hardware.
 - Evidence restriction: no per-cell return has been inspected. Selection and
   any performance statement remain prohibited until all 234 cells, paired
@@ -1187,6 +1190,79 @@ with each actual experiment.
     cells per upper-reference alias.
 - Evidence restriction: this finding validates materialization and provenance
   continuity only. It contains no return and supports no performance claim.
+
+### F-ENG-017: A100 execution supersedes the incomplete laptop lineage
+
+- Class: `registered execution provenance` and `engineering validation`
+- Status: cluster runner and handoff complete; A100 performance execution not
+  started
+- Date: 2026-08-11
+- Trigger: the projected end-to-end run was impractical on the laptop, and a
+  collaborator offered an in-kind allocation of four homogeneous 40 GB A100s.
+- Outcome independence: the migration decision was made without inspecting a
+  completed-cell return, candidate score, or ranking. It changes execution
+  capacity only; the schema 5 scientific registration, families, learner
+  grid, tasks, budgets, seeds, evaluation rule, and selection rule are
+  unchanged.
+- Preserved RTX checkpoint:
+  - local raw root:
+    `.worktrees/tuning-ec0dde8/benchmark_results/pobax/compute-aware-tuning-v1`;
+  - clean commit:
+    `ec0dde8aa8a42f6e8568c8ead098944bd95a941e`;
+  - tracked source-registration SHA256:
+    `bcdfdbeec89ecdf65a065bb032385a8880ac89f7f49349bd62775e5c22d0b436`;
+  - canonical raw-registration file SHA256:
+    `1a20352b5f17af7d01ba7aa7e69cb6dc4096917d81d4e413a394482db8a47a46`;
+  - implementation-source SHA256:
+    `93b57c6d3b4dd602741c410515e7cdecb3122e619f632f32c302efd6902dcf9f`;
+  - internal manifest SHA256:
+    `d37cea02ceaf107fb52e85c7b53df1e78acdba430af90c5d5fbbefcfdfc9caf0`;
+  - frozen-manifest file SHA256:
+    `f5c14c329f986cb79f8a10190c3dec016678c964df2471f93bb5234c64ea1978`;
+    and
+  - exactly 112 regular files totaling 39,569,600 bytes: one registration,
+    one frozen manifest, 55 schema-v9 artifacts, and 55 paired logs. There is
+    no completion index, checksum inventory, or attempt tree. Every artifact
+    is labeled `development_tuning_not_for_paper` and records the RTX 4090
+    Laptop runtime provenance.
+- Exclusion decision: preserve that root byte-for-byte as an incomplete RTX
+  lineage. Do not merge, rename, resume, or copy any of its manifest, cells,
+  or logs into A100 evidence.
+- A100 execution contract:
+  - retain schema 5 with artifact schema 9, schema 6 with artifact schema 10,
+    and schema 7 with artifact schema 11; the implementation amendment adds
+    execution sharding, locking, and verified merging without changing those
+    scientific schemas;
+  - use the unchanged tracked schema 5 registration in a fresh clean clone,
+    but generate a new A100 frozen manifest, configuration identities, cell
+    IDs, artifacts, and logs;
+  - restart all 234 cells across four isolated manifest-order-modulo shards
+    with counts 59, 59, 58, and 58;
+  - expose exactly one A100 to each process and require all four preflights to
+    produce the same complete runtime and implementation provenance;
+  - checksum each finished shard independently, then merge only after exact,
+    disjoint, full-manifest coverage and all artifact, log, provenance, and
+    source-checksum checks pass; and
+  - run finalization on one identically configured A100 because manifest
+    reconstruction includes the complete runtime contract and device list.
+- Stage continuity: the schema 6 registration must be freshly materialized
+  from the completed A100 schema 5 aggregate and bind its new raw hashes plus
+  the 13 actual winners. Schema 5 and schema 6 must share an identical
+  implementation-source manifest and complete runtime contract. Schema 7 is
+  then freshly materialized from schema 6, and both final stages retain
+  identical complete Git and runtime provenance.
+- Pending launch identity: record the new clean commit,
+  implementation-source SHA256, cluster allocation, and Slurm job IDs after
+  commit and preflight. Record the A100 frozen-manifest SHA256 as soon as the
+  workers materialize it, verify byte identity across all four shards, and do
+  so before any result inspection or aggregation.
+- Cost and timing: the allocation is in-kind unless recorded otherwise. The
+  prior laptop rates imply an idealized four-way bound of 13.24 to 17.22 days,
+  or 15.89 to 20.67 days with the existing 20 percent reserve; an A100
+  compatibility preflight is not a timing calibration, and only a fixed,
+  return-blinded timing procedure may replace this bound with a forecast.
+- Evidence restriction: this amendment makes no performance claim and does
+  not authorize outcome-based stopping, pruning, or design changes.
 
 ### F-DIAG-001: Exact recall helps the diagnostic learn, but current long-lag recall is weak
 

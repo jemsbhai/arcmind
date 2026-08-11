@@ -250,6 +250,48 @@ python -m benchmarks.pobax.run_matrix \
   --output-root benchmark_results/pobax/smoke-controls-v1
 ```
 
+Large frozen matrices can run as deterministic isolated shards. Each worker
+must receive its own output root and, for GPU-required registrations, exactly
+one JAX-visible GPU:
+
+```bash
+python -m benchmarks.pobax.run_matrix \
+  --registration benchmarks/pobax/manifests/compute_aware_tuning_v1.json \
+  --output-root "/shared/arcmind/tuning/shards/shard-${SHARD_INDEX}" \
+  --shard-count 4 \
+  --shard-index "${SHARD_INDEX}"
+```
+
+The shard count and zero-based index select cells by their frozen manifest
+ordinal modulo the shard count. They do not change the scientific
+registration, full manifest, configuration hashes, cell IDs, or artifact
+paths. A shard contains the identical full `registration.json` and
+`frozen_manifest.json`, only its assigned artifacts and logs, and the
+logistical `shard_completion.json` and `shard_checksums.sha256`. It never
+creates the canonical completion or checksum files.
+
+After every worker exits successfully, merge from one process running under
+the same runtime contract. For a GPU-required matrix, the finalizer must also
+see exactly one identical GPU because it reconstructs the frozen manifest:
+
+```bash
+python -m benchmarks.pobax.merge_matrix_shards \
+  --registration benchmarks/pobax/manifests/compute_aware_tuning_v1.json \
+  --output-root benchmark_results/pobax/compute-aware-tuning-v1 \
+  --shard-root /shared/arcmind/tuning/shards/shard-0 \
+  --shard-root /shared/arcmind/tuning/shards/shard-1 \
+  --shard-root /shared/arcmind/tuning/shards/shard-2 \
+  --shard-root /shared/arcmind/tuning/shards/shard-3
+```
+
+Shard arguments are self-identifying and may be supplied in any order. The
+merger locks every source and the canonical target, validates exact partition
+coverage and source checksums before publication, copies without replacement,
+and emits the existing canonical `completion_index.json` and
+`checksums.sha256` in full manifest order. Keep scheduler logs, lock files,
+and retry metadata outside all raw roots. The complete four-A100 Slurm
+workflow is in [`cluster/README.md`](cluster/README.md).
+
 The first predeclared multi-seed pilot uses
 `benchmarks/pobax/manifests/tmaze_pilot_v1.json`. It trains ten controls for
 250,000 exact environment transitions on the three development seeds. Its
@@ -321,7 +363,8 @@ rebuilds the tuning aggregate from the raw matrix, validates the exact raw
 file inventory and checksums, and requires byte identity with the bound
 aggregate. The final matrix must use the same deterministic implementation
 source manifest, dependency lock, external POBAX and Navix commits, and
-non-device runtime contract as tuning. The repository commit itself may
+complete runtime contract, including backend and ordered device list, as
+tuning. The repository commit itself may
 differ so that an audited tuning selection can be frozen in a later clean
 commit. The schema-v4 frozen manifest also binds the SHA256 of the complete
 canonical final registration file, so rechecksumming cannot authorize a
